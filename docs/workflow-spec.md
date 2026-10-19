@@ -461,7 +461,7 @@ Variables:
 | `workspace.<node>` | `{path, branch, base}` for that node's workspace (`branch` and `base` are `none` for `temp`). A list for `for_each` nodes. |
 | `errors.<node>` | For `for_each` nodes with `on_item_error: continue`: a list of `{index, item, error}` for the items that failed. |
 | `run` | `{id, dir, cost_usd, tokens, elapsed_s, base}`. `base` is the commit the repo was at when the run started. |
-| `session` | `{continued}`: true while rendering a pass that continues an earlier session (see [Sessions](#sessions)). |
+| `session` | `{continued}`: true while rendering a pass that continues an earlier session (see [Sessions](#sessions)). Not in `model` and `effort`, which are chosen before the session starts. |
 
 Rules:
 - An unknown name or field is an error, never an empty string. The same goes for reading
@@ -686,8 +686,8 @@ Errors:
    they read from, including `item.<field>` checked against the list's item schema when
    that can be worked out.
 8. `item` and `index` appear only in `for_each` nodes. `for_each` reads a list.
-9. `model` and `effort` are maps when `harness` is a list. A node that can run on `cursor`
-   has a `model`.
+9. `model` and `effort` are maps when `harness` is a list, and don't read `session`. A node
+   that can run on `cursor` has a `model`.
 10. Each short-form end output is a single field reference.
 11. Each sub-workflow exists and is valid, no workflow includes itself (directly or
     indirectly), and `with` sets every required input with a matching type.

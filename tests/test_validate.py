@@ -324,6 +324,17 @@ def test_model_and_effort_are_checked_for_the_harnesses_a_node_can_run_on(tmp_pa
         ("error", "defaults.effort", "unknown name `nope`"),
     ])
 
+
+def test_model_and_effort_cannot_read_the_session(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], instruction: x, model: "{{ 'opus' if session.continued else 'sonnet' }}"}
+        b: {needs: [start], instruction: x, effort: {claude-code: "{{ session.continued }}"}}
+    """))
+    assert_problems(report, [
+        ("error", "nodes.a.model", "`session` isn't available here"),
+        ("error", "nodes.b.effort.claude-code", "`session` isn't available here"),
+    ])
+
 # ---------- 10. end outputs ----------
 
 

@@ -531,7 +531,9 @@ class _Checker:
         """The harnesses a template like "{{ item.harness }}" can give, from its field's enum; none known otherwise."""
         path = templates.pure_path(harness)
         schema = self._resolve(path, node_id) if path else None
-        names = ([schema["const"]] if "const" in schema else schema.get("enum")) if schema else None
+        if not schema:
+            return set()
+        names = [schema["const"]] if "const" in schema else schema.get("enum")
         return {name for name in names if name in HARNESSES} if isinstance(names, list) else set()
 
     def _model_and_effort(self, node_id: str, harnesses: set[str]) -> None:
@@ -545,8 +547,11 @@ class _Checker:
                 settings.add((f"nodes.{node_id}.{key}", own))
             settings |= {self.wf.harness_setting_at(node_id, name, key) for name in harnesses}
         for where, value in sorted(settings, key=lambda setting: setting[0] or ""):
-            if isinstance(value, str):
-                self._template(where, value, node_id, "node")
+            if not isinstance(value, str):
+                continue
+            refs = self._template(where, value, node_id, "node") or []
+            if any(ref.name == "session" for ref in refs):
+                self.error(where, "`session` isn't available here: the model and effort are chosen before the session starts")
 
     def _workspace(self, node_id: str) -> None:
         workspace = self.wf.setting(node_id, "workspace")
