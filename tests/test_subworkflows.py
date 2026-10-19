@@ -13,7 +13,7 @@ from textwrap import dedent
 import pytest
 
 from fakes import Fake, edits
-from workflow import cli, harnesses, runner
+from workflow import cli, harnesses, runner, runs
 
 
 @pytest.fixture
@@ -448,3 +448,48 @@ def test_an_optional_field_a_sub_workflows_end_output_leaves_out_reads_as_none_i
     """)
     assert cli.main(["run", "main.yaml"]) == 0
     assert output() == {"said": "no note\n", "note": None}
+
+
+def test_a_sub_workflow_names_its_branch_once_per_parent_item(repo, capsys):
+    write("make.yaml", """
+        version: 1
+        name: make
+        start: {input: {branch: {type: string}}}
+        nodes:
+          impl: {needs: [start], command: "true", workspace: new, branch: "{{ start.branch }}"}
+        end: {output: {branch: "{{ workspace.impl.branch }}"}}
+    """)
+    write("main.yaml", """
+        version: 1
+        name: main
+        start: {input: {}}
+        nodes:
+          each: {needs: [start], for_each: '["a", "b"]', workflow: make.yaml, with: {branch: "fix/{{ item }}"}}
+        end: {output: {branches: {type: array, value: "{{ each | map(attribute='branch') | list }}"}}}
+    """)
+    assert cli.main(["run", "main.yaml"]) == 0
+    assert output() == {"branches": ["fix/a", "fix/b"]}
+    assert runs.Run.at(only_run()).branches() == {"each/0/impl": "fix/a", "each/1/impl": "fix/b"}
+
+
+def test_a_sub_workflow_item_fails_when_its_index_names_another_branch_on_a_later_pass(repo, capsys):
+    write("make.yaml", """
+        version: 1
+        name: make
+        start: {input: {branch: {type: string}}}
+        nodes:
+          impl: {needs: [start], command: "true", workspace: new, branch: "{{ start.branch }}"}
+        end: {output: {}}
+    """)
+    write("main.yaml", """
+        version: 1
+        name: main
+        start: {input: {}}
+        nodes:
+          each: {needs: [start], for_each: '["b", "a"] if history.each else ["c"]', workflow: make.yaml,
+                 with: {branch: "fix/{{ item }}"}}
+          again: {needs: [each], command: "true", routes: [{to: each, max: 1}, {to: end}]}
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "main.yaml"]) == 1
+    assert "`each/0/impl` worked on branch `fix/c` in an earlier pass, and now names `fix/b`" in capsys.readouterr().err

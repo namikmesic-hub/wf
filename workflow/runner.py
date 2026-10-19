@@ -59,7 +59,7 @@ class InputError(Exception):
 
 def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
           detach: bool = False, as_json: bool = False, dry_run: Path | None = None,
-          limit_pairs: list[str] | None = None) -> int:
+          limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
     try:
         overrides = limits.parse(limit_pairs or [])
     except limits.LimitError as error:
@@ -93,15 +93,20 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         return 1
     repo = Path.cwd()
     home = _home(repo)  # once: run.json and the run itself use the same branch and commit
-    run = runs.create(repo, workflow.name, report.files, path, inputs, home=home, dry_run=script is not None,
-                      limits=overrides)
+    try:
+        run = runs.create(repo, workflow.name, report.files, path, inputs, home=home, dry_run=script is not None,
+                          limits=overrides, runs_dir=runs_dir)
+    except OSError as error:  # e.g. --runs-dir names a file
+        print(f"wf run: can't make the run folder in {runs.runs_folder(repo, runs_dir)}: {error.strerror or error}",
+              file=sys.stderr)
+        return 1
     if script is not None:
         script.keep(run.dir / "dry-run")
     if detach:  # a background `wf resume` starts it, with the lock this process takes now
         with run.driving() as lock:
-            pid = operate.detach(run, ["resume", run.id, "--no-input"], lock)
+            pid = operate.detach(run, ["resume", run.id, "--no-input", *_runs_dir_args(runs_dir)], lock)
         _say({"run": run.id, "dir": str(run.dir), "pid": pid}, f"Run {run.id} started in the background. "
-             f"Follow it with: wf wait {run.id}", as_json)
+             f"Follow it with: {run.command('wait')}", as_json)
         return 0
     print(f"Run {run.id}" + (f": {workflow.description}" if workflow.description else ""))
     if script is not None:
@@ -119,7 +124,7 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
 
 
 def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach: bool = False,
-           as_json: bool = False, limit_pairs: list[str] | None = None) -> int:
+           as_json: bool = False, limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
     """Continue a run: retry what failed, answer what's waiting (from `answers_file`, or by
     asking at a terminal), or carry on after a crash. With `detach`, check everything here,
     then let a background process do it. `limit_pairs` (--limit) set new limits for the
@@ -129,7 +134,7 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
     at once can't both answer the same questions: the second gets RunBusy."""
     name = "wf answer" if answers_file else "wf resume"
     try:
-        run = runs.find(Path.cwd(), run_id)
+        run = runs.find(Path.cwd(), run_id, runs_dir)
         workflow = spec.load(run.workflow_file)  # the copy, as it was when the run started
         answers = json.loads(Path(answers_file).read_text(encoding="utf-8")) if answers_file else None
         overrides = limits.parse(limit_pairs or [])
@@ -140,14 +145,16 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
         return 1
     try:
         with run.driving() as lock:
-            return _checked_resume(run, workflow, name, answers, no_input, detach, as_json, lock, overrides, max_agents)
+            return _checked_resume(run, workflow, name, answers, no_input, detach, as_json, lock, overrides, max_agents,
+                                   runs_dir)
     except runs.RunBusy as error:
         print(f"{name}: {error}", file=sys.stderr)
         return 1
 
 
 def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: dict | None, no_input: bool,
-                    detach: bool, as_json: bool, lock: runs.Lock, overrides: dict, max_agents: int | None) -> int:
+                    detach: bool, as_json: bool, lock: runs.Lock, overrides: dict, max_agents: int | None,
+                    runs_dir: Path | None) -> int:
     ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
     asking = interactive() and not no_input and not detach
     if run.info().get("dry_run"):  # a dry run continues with the rest of its script
@@ -162,7 +169,7 @@ def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: 
         still = limits.check(ctx.limits, state.values.get("usage") or {}, state.values.get("elapsed_s", 0.0))
         if still:
             print(f"{name}: run {run.id} is still over a limit ({still[1]}). "
-                  f"Continue it with a bigger one: {limits.hint(run.id, still[0])}", file=sys.stderr)
+                  f"Continue it with a bigger one: {run.command('resume', limits.hint(still[0]))}", file=sys.stderr)
             return 1
     if overrides:
         run.set_limits(overrides)
@@ -175,14 +182,15 @@ def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: 
                 print(f"{name}: {problem}", file=sys.stderr)
             return 1
     if detach:
-        args = ["resume", run.id, "--no-input"]
+        args = ["resume", run.id, "--no-input", *_runs_dir_args(runs_dir)]
         if answers is not None:  # keep the answers with the run, for the background process
             kept = run.dir / "answers" / f"{run.status().get('seq', 0)}.json"  # one per state: we hold the lock
             kept.parent.mkdir(exist_ok=True)
             kept.write_text(json.dumps(answers, indent=2), encoding="utf-8")
             args += ["--answers", str(kept)]
         pid = operate.detach(run, args, lock)
-        _say({"run": run.id, "pid": pid}, f"Run {run.id} continues in the background. Follow it with: wf wait {run.id}", as_json)
+        _say({"run": run.id, "pid": pid}, f"Run {run.id} continues in the background. Follow it with: {run.command('wait')}",
+             as_json)
         return 0
     return _resume(ctx, state, asking, answers)
 
@@ -193,7 +201,7 @@ def _resume(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict |
         if (run.dir / "output.json").exists():
             print(f"Run {run.id} already succeeded.")
             return 0
-        ctx.home = run.info().get("home") or _home(Path.cwd())
+        ctx.home = run.info().get("home") or _home(run.repo)
         try:
             inputs = json.loads((run.dir / "input.json").read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:  # a run killed while it was being created
@@ -203,7 +211,7 @@ def _resume(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict |
         return _drive(ctx, {"input": inputs}, asking)
     saved = state.values.get("run")
     ctx.home = ({"path": saved["repo"], "branch": saved["branch"], "base": saved["base"]} if saved
-                else run.info().get("home") or _home(Path.cwd()))  # stopped before its first step
+                else run.info().get("home") or _home(run.repo))  # stopped before its first step
     print(f"Resuming run {run.id}")
     if state.interrupts:
         command = _continue(state.interrupts, asking, run, answers, ctx.script)
@@ -233,6 +241,12 @@ def _note_uncommitted(workflows: list[spec.Workflow], read_by_wf: list[Path]) ->
               "which start from the last commit. Commit them first if its steps need them.", file=sys.stderr)
 
 
+def _runs_dir_args(runs_dir: Path | None) -> list[str]:
+    """A background driver inherits WF_RUNS_DIR, but not --runs-dir: pass that on, resolved,
+    so the driver finds the run where this process put it."""
+    return ["--runs-dir", str(runs_dir.expanduser().resolve())] if runs_dir else []
+
+
 def _say(data: dict, text: str, as_json: bool) -> None:
     print(json.dumps(data) if as_json else text)
 
@@ -253,12 +267,12 @@ def _drive(ctx: RunContext, command, asking: bool) -> int:
             state = asyncio.run(_stream(ctx, command))
         except KeyboardInterrupt:  # asyncio.run cancels the graph's tasks first, then raises this
             run.set_status("failed", error="stopped by the user")
-            print(f"\nStopped. Continue with: wf resume {run.id}", file=sys.stderr)
+            print(f"\nStopped. Continue with: {run.command('resume')}", file=sys.stderr)
             return STOPPED
         except Exception as error:  # a bug, or the checkpoint store failing: never leave the run `running`
             run.set_status("failed", error=f"{type(error).__name__}: {error}")
             print(f"Run failed: {type(error).__name__}: {error}", file=sys.stderr)
-            print(f"Continue with: wf resume {run.id}", file=sys.stderr)
+            print(f"Continue with: {run.command('resume')}", file=sys.stderr)
             return 1
         if not state.interrupts:
             return _finished(ctx, state.values)
@@ -321,13 +335,13 @@ def _answer(interrupts, asking: bool, run: runs.Run, script=None):
         reason, name = limited[0].get("reason"), limited[0].get("limit")
         run.set_status("limit", reason=reason, limit=name)
         print(f"Run {run.id} paused: a limit was reached ({reason}).", file=sys.stderr)
-        print(f"Continue it with a bigger one: {limits.hint(run.id, name)}", file=sys.stderr)
+        print(f"Continue it with a bigger one: {run.command('resume', limits.hint(name))}", file=sys.stderr)
         return 1
     failed = [i.value for i in interrupts if i.value.get("kind") == "failed"]
     if failed:
         run.set_status("failed", node=failed[0]["node"], error=failed[0]["error"])
         print(f"Run failed: {failed[0]['node']}: {failed[0]['error']}", file=sys.stderr)
-        print(f"Fix the cause, then continue with: wf resume {run.id}")
+        print(f"Fix the cause, then continue with: {run.command('resume')}")
         return 1
     scripted = _scripted_answers(interrupts, script) if script else None
     if scripted is not None:
@@ -355,12 +369,12 @@ def _ask_all(questions, asking: bool, run: runs.Run) -> dict | int:
     names = sorted({name for q in questions for name in _askers(q.value)})
     run.set_status("waiting", nodes=names, questions=operate.questions(questions))
     if not asking:
-        print(f"Waiting for a person ({', '.join(names)}). Answer with: wf resume {run.id}")
+        print(f"Waiting for a person ({', '.join(names)}). Answer with: {run.command('resume')}")
         return 2
     try:
         return {question.id: _answer_one(question.value) for question in questions}
     except (ask.NoAnswer, KeyboardInterrupt) as stop:
-        print(f"\nNo answer yet. Answer later with: wf resume {run.id}")
+        print(f"\nNo answer yet. Answer later with: {run.command('resume')}")
         return STOPPED if isinstance(stop, KeyboardInterrupt) else 2
 
 
@@ -387,9 +401,10 @@ def _finished(ctx: RunContext, values: dict) -> int:
         run.set_output(values["output"])
         run.set_status("succeeded")
         shutil.rmtree(workspaces.temp_root(run.id), ignore_errors=True)
+        run.leave_branches(workspaces.run_worktrees(ctx.home["path"], run.id))  # where it left them, for wf discard
         workspaces.remove_run(ctx.home["path"], run.id)  # worktrees go; their branches stay
         if ctx.script is not None:  # ...except after a dry run: those branches hold scripted work
-            workspaces.delete_branches(ctx.home["path"], run.id)
+            workspaces.delete_branches(ctx.home["path"], run.id, list(run.branches().values()))
         print(f"Run {run.id} succeeded. Output:")
         print(json.dumps(values["output"], indent=2, ensure_ascii=False, default=str))
         return 0

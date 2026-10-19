@@ -10,8 +10,11 @@ Where a node runs (see "Workspaces" in the spec):
 Worktrees live under ~/.wf/worktrees/<run-id>/ (set WF_HOME to move ~/.wf),
 outside the repo, so an agent searching the repo doesn't find copies of it.
 Their branches are wf/<run-id>/<node>, or wf/<run-id>/<node>/<item index>
-for the items of a for_each node. A node keeps its worktree across passes, so
-a loop keeps working on one branch.
+for the items of a for_each node, unless the node's `branch` names one
+(nodes.py checks that name, and records it in the run folder). A name must
+not clash with a branch that exists: git can't have fix/a beside fix/a/b, or
+FIX/a beside fix/a where it ignores case. A node keeps its worktree across
+passes, so a loop keeps working on one branch.
 
 The runner commits, not the agent: Codex's sandbox (and probably Cursor's)
 keeps .git read-only. After an `edit` or `full` agent finishes in a worktree
@@ -67,22 +70,79 @@ def made_by_runner(path: str | Path) -> bool:
     return True
 
 
-def worktree(repo: str | Path, run_id: str, parts: list[str], base: str) -> dict:
+def worktree(repo: str | Path, run_id: str, parts: list[str], base: str, branch: str | None = None) -> dict:
     """The worktree for one node (or item): created on first use, reused on later passes.
-    `parts` is the node path, e.g. ["implement"] or ["build", "2"]."""
+    `parts` is the node path, e.g. ["implement"] or ["build", "2"]. Its branch is `branch`,
+    or wf/<run-id>/<parts>; an existing one is used, so the caller decides if it may be."""
     path = root() / run_id / Path(*parts)
-    branch = "/".join(["wf", run_id, *parts])
+    branch = branch or "/".join(["wf", run_id, *parts])
     commit = _git(repo, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=False)
     if not commit:
         raise WorkspaceError(f"`{base}` isn't a commit in {repo}")
     if not (path / ".git").exists():  # first pass (later passes and resumed runs reuse it)
         path.parent.mkdir(parents=True, exist_ok=True)
         _git(repo, "worktree", "prune", check=False)  # its folder may be gone but still registered
-        if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False):
+        if branch_exists(repo, branch):
             _git(repo, "worktree", "add", "--quiet", str(path), branch)  # the branch outlived its folder
         else:
             _git(repo, "worktree", "add", "--quiet", "-b", branch, str(path), commit)
     return {"path": str(path), "branch": branch, "base": commit}
+
+
+def branch_exists(repo: str | Path, branch: str) -> bool:
+    return tip(repo, branch) is not None
+
+
+def branch_problem(repo: str | Path, branch: str) -> str | None:
+    """Why `branch` can't be a node's branch name, or None if it can."""
+    if not branch:  # before git: check-ref-format's empty output would look like a match
+        return "the name is empty"
+    if clash(branch, "wf", fold=True):  # in any case: where git ignores case, WF/x is in wf/
+        return "wf and wf/... are where wf names branches itself (wf/<run-id>/...)"
+    if _git(repo, "check-ref-format", "--branch", branch, check=False) != branch:  # @{-1} would print another name
+        return "git doesn't allow it as a branch name"
+    return None
+
+
+def clash(a: str, b: str, fold: bool) -> bool:
+    """Can't git have both branches? The same name (in any case, with `fold`), or one under
+    the other, like fix/a and fix/a/b: the ref fix/a can't also be a folder."""
+    if fold:
+        a, b = a.casefold(), b.casefold()
+    return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
+
+
+def ignores_case(repo: str | Path) -> bool:
+    """Does git take FIX/a and fix/a for one branch here? It does with core.ignorecase (git sets
+    it on macOS and Windows), because a branch can be a file named after it."""
+    return _git(repo, "config", "--type=bool", "core.ignorecase", check=False) == "true"
+
+
+def clashing_branch(repo: str | Path, branch: str) -> str | None:
+    """A branch that exists and that git can't have beside `branch` (see clash), if any."""
+    fold = ignores_case(repo)
+    for ref in _git(repo, "for-each-ref", "--format=%(refname)", "refs/heads/", check=False).splitlines():
+        if clash(name := ref.removeprefix("refs/heads/"), branch, fold):
+            return name
+    return None
+
+
+def run_worktrees(repo: str | Path, run_id: str) -> dict[str, tuple[str | None, str]]:
+    """A run's worktrees, by node path (build/2/implement): the branch each has checked out
+    (None if none) and its commit."""
+    folder, found = (root() / run_id).resolve(), {}
+    for block in _git(repo, "worktree", "list", "--porcelain", check=False).split("\n\n"):
+        entry = dict(line.partition(" ")[::2] for line in block.splitlines())
+        path = Path(entry.get("worktree") or "/").resolve()
+        if path.is_relative_to(folder) and path != folder:
+            branch = entry.get("branch", "").removeprefix("refs/heads/") or None
+            found[path.relative_to(folder).as_posix()] = (branch, entry.get("HEAD", ""))
+    return found
+
+
+def tip(repo: str | Path, branch: str) -> str | None:
+    """The commit a branch is on, or None if there's no such branch."""
+    return _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False) or None
 
 
 def head(path: str | Path) -> str:
@@ -146,15 +206,22 @@ def uncommitted(repo: str | Path) -> list[Path]:
     return [Path(top) / entry[3:] for entry in out.split("\0") if len(entry) > 3] if top else []
 
 
-def branches(repo: str | Path, run_id: str) -> list[str]:
-    """A run's wf/<run-id>/... branches."""
-    return _git(repo, "for-each-ref", "--format=%(refname:short)", f"refs/heads/wf/{run_id}/", check=False).splitlines()
+def branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> list[str]:
+    """A run's wf/<run-id>/... branches, and those of `named` (the ones `branch` named) that exist."""
+    found = _git(repo, "for-each-ref", "--format=%(refname:short)", f"refs/heads/wf/{run_id}/", check=False).splitlines()
+    return found + [name for name in named or [] if branch_exists(repo, name)]
 
 
-def delete_branches(repo: str | Path, run_id: str) -> None:
-    """Delete a run's wf/<run-id>/... branches (after a dry run: they hold scripted work)."""
-    for name in branches(repo, run_id):
-        _git(repo, "branch", "--quiet", "-D", name, check=False)
+def delete_branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> dict[str, str]:
+    """Delete a run's branches (after a dry run: they hold scripted work). Returns the ones
+    git didn't delete, with its error: one checked out somewhere, say."""
+    refused = {}
+    for name in branches(repo, run_id, named):
+        try:
+            _git(repo, "branch", "--quiet", "-D", name)
+        except WorkspaceError as error:
+            refused[name] = str(error)
+    return refused
 
 
 # Variables that point git at another repository than the folder it runs in. A git hook

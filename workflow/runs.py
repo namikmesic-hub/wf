@@ -6,6 +6,7 @@ Every `wf run` gets a folder, and `wf resume` finds it again by id:
       workflow/                     copies of the workflow files as they were run
       input.json
       run.json                      the workflow's name and `repo` workspace, for starting it later
+      branches.json                 the branches `branch` named, by node path, and where the run left them
       output.json                   the end output, once the run succeeds
       status.json                   running | waiting | succeeded | failed | limit, with a sequence
                                     number that goes up on every change (while running, also the
@@ -21,6 +22,16 @@ Every `wf run` gets a folder, and `wf resume` finds it again by id:
 `wf resume` loads the copies in workflow/, so editing the YAML doesn't change a
 run already in progress. `.wf/` goes into the repo's .git/info/exclude, so run
 folders never show up in `git status`.
+
+A runs folder (--runs-dir, or WF_RUNS_DIR) keeps run folders outside the repo
+instead: <runs-dir>/<repo key>/<run-id>/, where the key (folder name and a
+hash of its path) keeps two repos' runs apart. Then the repo's working tree and
+.git/info/exclude stay as they were: only `workspace: new` adds branches and
+worktree records under .git. run.json's `repo` workspace is the repo's path,
+so a run folder found by its path alone (Run.at) still knows its repo. The
+commands wf prints for a run in a runs folder (Run.command) name that folder
+with --runs-dir. A runs folder inside the repo goes into
+.git/info/exclude, as .wf/ does.
 
 The checkpoints are LangGraph's; this module only says where they live.
 
@@ -41,10 +52,12 @@ Every status change happens under the lock.
 """
 
 import fcntl
+import hashlib
 import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import string
 import subprocess
@@ -52,7 +65,7 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -70,9 +83,26 @@ class Run:
 
     @classmethod
     def at(cls, folder: Path) -> "Run":
-        """The run in a run folder (<repo>/.wf/runs/<run-id>)."""
+        """The run in a run folder: <repo>/.wf/runs/<run-id>, or one in a runs folder. Raises
+        ValueError for one in a runs folder whose run.json doesn't name its repo."""
         folder = Path(folder).resolve()
-        return cls(folder.name, folder, folder.parent.parent.parent)
+        run = cls(folder.name, folder, folder.parent.parent.parent)  # <repo>/.wf/runs/<run-id>
+        recorded = (run.info().get("home") or {}).get("path")
+        if recorded:
+            return replace(run, repo=Path(recorded))
+        if folder.parent.parent.name != ROOT.parent.name or folder.parent.name != ROOT.name:
+            raise ValueError(f"{folder}/run.json doesn't say which repo the run is in")
+        return run
+
+    def command(self, verb: str, *more: str) -> str:
+        """The wf command that does `verb` to this run, as typed in its repo, e.g. `wf resume <id>`.
+        For a run in a runs folder it ends in --runs-dir, so it finds the run whatever WF_RUNS_DIR
+        holds where it's typed. For one in ./.wf/runs while WF_RUNS_DIR is set, it starts with
+        `WF_RUNS_DIR=`, which turns the setting off: no --runs-dir value names ./.wf/runs."""
+        text = " ".join(["wf", verb, self.id, *more])
+        if self.dir.parent != self.repo.resolve() / ROOT:
+            return f"{text} --runs-dir {shlex.quote(str(self.dir.parent.parent))}"
+        return f"{RUNS_DIR}= {text}" if runs_folder(self.repo) != self.dir.parent else text
 
     @property
     def checkpoints(self) -> Path:
@@ -94,6 +124,35 @@ class Run:
         info = self.info()
         info["limits"] = {**(info.get("limits") or {}), **overrides}
         write_json(self.dir / "run.json", info)
+
+    def branches(self) -> dict[str, str]:
+        """The branches nodes' `branch` named, by node path (build/2/implement)."""
+        return {path: record["branch"] for path, record in self.branch_records().items()}
+
+    def branch_records(self) -> dict[str, dict]:
+        """branches.json, by node path: {"branch": its name}, and "left": the commit the run left
+        it on, once the run removed the node's worktree."""
+        try:
+            records = json.loads((self.dir / "branches.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):  # none yet (or damaged: then the run's branches count as not its own)
+            return {}
+        if not isinstance(records, dict):
+            return {}
+        return {path: r for path, r in records.items() if isinstance(r, dict) and isinstance(r.get("branch"), str)}
+
+    def add_branch(self, path: str, branch: str) -> None:
+        """Record a branch this run made for the node at `path` (call it holding the git lock)."""
+        write_json(self.dir / "branches.json", {**self.branch_records(), path: {"branch": branch}})
+
+    def leave_branches(self, worktrees: dict[str, tuple[str | None, str]]) -> None:
+        """Before the run's worktrees (workspaces.run_worktrees) go: record the commit each named
+        branch is on, so a later `wf discard --branches` deletes it only while it's still there."""
+        records = self.branch_records()
+        for path, (branch, commit) in worktrees.items():
+            if branch and not branch.startswith(f"wf/{self.id}/"):  # a branch it named, recorded or not
+                records[path] = {"branch": branch, "left": commit}
+        if records:
+            write_json(self.dir / "branches.json", records)
 
     @property
     def workflow_file(self) -> Path:
@@ -209,12 +268,31 @@ class RunBusy(Exception):
     """Another process is driving this run."""
 
 
+RUNS_DIR = "WF_RUNS_DIR"
+
+
+def runs_folder(repo: Path, runs_dir: Path | None = None) -> Path:
+    """Where this repo's run folders are: <repo>/.wf/runs, or with a runs folder (`runs_dir`,
+    else WF_RUNS_DIR) <runs folder>/<repo key>, outside the repo. A blank WF_RUNS_DIR is unset."""
+    repo = repo.resolve()
+    chosen = runs_dir or os.environ.get(RUNS_DIR, "")
+    return Path(chosen).expanduser().resolve() / repo_key(repo) if str(chosen).strip() else repo / ROOT
+
+
+def repo_key(repo: Path) -> str:
+    """wf-3f9a1c2b4d5e: the repo folder's name and a hash of its path, so two repos with the
+    same name keep their runs apart in one runs folder."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", repo.name).lstrip(".-") or "repo"
+    return f"{name}-{hashlib.sha256(os.fsencode(repo)).hexdigest()[:12]}"
+
+
 def create(repo: Path, name: str, files: list[Path], main: Path, inputs: dict, home: dict | None = None,
-           dry_run: bool = False, limits: dict | None = None) -> Run:
+           dry_run: bool = False, limits: dict | None = None, runs_dir: Path | None = None) -> Run:
     """A new run folder, with copies of the workflow files and the input."""
     repo = repo.resolve()
     run_id = new_id(name)
-    folder = repo / ROOT / run_id
+    parent = runs_folder(repo, runs_dir)
+    folder = parent / run_id
     folder.mkdir(parents=True)
     copies = folder / "workflow"
     base = _common_folder([f.resolve() for f in files])
@@ -225,24 +303,25 @@ def create(repo: Path, name: str, files: list[Path], main: Path, inputs: dict, h
     write_json(copies / "manifest.json", {"main": str(main.resolve().relative_to(base))})
     write_json(folder / "input.json", inputs)
     write_json(folder / "run.json", {"workflow": name, "home": home, "dry_run": dry_run, **({"limits": limits} if limits else {})})
-    exclude_from_git(repo)
+    exclude_from_git(repo, None if parent == repo / ROOT else parent)  # a runs folder outside the repo needs none
     run = Run(run_id, folder, repo)
     run.set_status("running")
     return run
 
 
-def find(repo: Path, run_id: str) -> Run:
+def find(repo: Path, run_id: str, runs_dir: Path | None = None) -> Run:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id) or ".." in run_id:
         raise FileNotFoundError(f"`{run_id}` isn't a run id")  # it becomes part of paths and branch names
-    folder = repo.resolve() / ROOT / run_id
+    parent = runs_folder(repo, runs_dir)
+    folder = parent / run_id
     if not (folder / "workflow" / "manifest.json").is_file():
-        raise FileNotFoundError(f"no run `{run_id}` in {repo.resolve() / ROOT}")
+        raise FileNotFoundError(f"no run `{run_id}` in {parent}")
     return Run(run_id, folder, repo.resolve())
 
 
-def all_runs(repo: Path) -> list[Run]:
+def all_runs(repo: Path, runs_dir: Path | None = None) -> list[Run]:
     """Every run in this repo, oldest first (by when its folder was made)."""
-    folder = repo.resolve() / ROOT
+    folder = runs_folder(repo, runs_dir)
     if not folder.is_dir():
         return []
     made = [p for p in folder.iterdir() if not p.name.startswith(".") and (p / "workflow" / "manifest.json").is_file()]
@@ -250,19 +329,32 @@ def all_runs(repo: Path) -> list[Run]:
     return [Run(p.name, p, repo.resolve()) for p in made]
 
 
-def discard(run: Run, branches: bool) -> list[str]:
+KEPT = "--branches deletes it"
+NOT_OURS = "wf can't tell it's still this run's work (no worktree of the run has it, and it isn't where the run left it)"
+
+
+def discard(run: Run, branches: bool) -> dict[str, str]:
     """Delete a run: its worktrees, temp folders, folder, and (with `branches`) its branches.
     Holds the run's lock while it does, so a run being driven can't be discarded (RunBusy).
-    Returns what it kept, to say so."""
+    Returns the branches of its that it kept, with why (KEPT, NOT_OURS, or git's error), to say so.
+
+    A branch `branch` named is the run's while one of its worktrees has it checked out, or
+    while it's on the commit the run left it on (Run.leave_branches). After that, somebody
+    else may have made it again or worked on it, so it stays."""
     repo = (run.info().get("home") or {}).get("path") or str(run.repo)
     with run.driving():
+        held = {branch for branch, _ in workspaces.run_worktrees(repo, run.id).values() if branch}  # before they go
+        records = list(run.branch_records().values())
+        named = dict.fromkeys([*(r["branch"] for r in records), *sorted(b for b in held if not b.startswith(f"wf/{run.id}/"))])
+        ours = [b for b in named if b in held or any(
+            r["branch"] == b and r.get("left") and r["left"] == workspaces.tip(repo, b) for r in records)]
         workspaces.remove_run(repo, run.id)
         shutil.rmtree(workspaces.temp_root(run.id), ignore_errors=True)
-        kept = []
-        if branches:
-            workspaces.delete_branches(repo, run.id)
+        kept = {b: NOT_OURS for b in named if b not in ours and workspaces.branch_exists(repo, b)}
+        if branches:  # git keeps a branch that's checked out somewhere: say so
+            kept |= {b: f"git couldn't delete it ({why})" for b, why in workspaces.delete_branches(repo, run.id, ours).items()}
         else:
-            kept = workspaces.branches(repo, run.id)
+            kept |= {b: KEPT for b in workspaces.branches(repo, run.id, ours)}
         gone = run.dir.with_name(f".{run.dir.name}.discarded")  # first, so no new process can find the run
         shutil.rmtree(gone, ignore_errors=True)  # left by a discard that died halfway
         run.dir.rename(gone)  # (the lock file goes with it; this process still holds it)
@@ -299,18 +391,26 @@ def current_branch(repo: Path) -> str | None:
     return None if branch in (None, "HEAD") else branch  # "HEAD" means detached
 
 
-def exclude_from_git(repo: Path) -> None:
-    """Add .wf/ to the repo's .git/info/exclude, once."""
+def exclude_from_git(repo: Path, folder: Path | None = None) -> None:
+    """Add .wf/ to the repo's .git/info/exclude, once. With `folder` (this repo's folder in a runs
+    folder), add that folder instead, if it's in the repo's working tree, and nothing if not."""
     git_dir = git(repo, "rev-parse", "--git-common-dir")
     if git_dir is None:
         return
+    entry = ".wf/"
+    if folder is not None:
+        top = git(repo, "rev-parse", "--show-toplevel")
+        if top is None or not folder.resolve().is_relative_to(Path(top).resolve()):
+            return
+        inside = folder.resolve().relative_to(Path(top).resolve()).as_posix()
+        entry = "/" + re.sub(r"([\\*?\[])", r"\\\1", inside) + "/"  # from the top, with *?[\ taken as they are
     exclude = (repo / git_dir).resolve() / "info" / "exclude"
     try:  # only tidiness: never fail a run because this can't be written
         exclude.parent.mkdir(parents=True, exist_ok=True)
         lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
-        if ".wf/" not in lines:
+        if entry not in lines:
             with exclude.open("a", encoding="utf-8") as file:
-                file.write(("\n" if lines and lines[-1] else "") + ".wf/\n")
+                file.write(("\n" if lines and lines[-1] else "") + entry + "\n")
     except (OSError, UnicodeDecodeError):
         pass
 

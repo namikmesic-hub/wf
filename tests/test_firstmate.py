@@ -15,7 +15,7 @@ from textwrap import dedent
 
 import pytest
 
-from workflow import cli, firstmate, runner
+from workflow import cli, firstmate, runner, runs
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def invoke(operation: str, **data) -> dict:
     }
 
 
-def waiting_run(capsys) -> Path:
+def waiting_run(capsys, runs_dir: Path | None = None) -> Path:
     Path("ask.yaml").write_text(dedent("""
         version: 1
         name: ask
@@ -51,9 +51,9 @@ def waiting_run(capsys) -> Path:
           approve: {needs: [start], human: "Go?", output: {ok: {type: boolean}}}
         end: {output: {ok: "{{ approve.ok }}"}}
     """))
-    assert cli.main(["run", "ask.yaml"]) == 2
+    assert cli.main(["run", "ask.yaml", *(["--runs-dir", str(runs_dir)] if runs_dir else [])]) == 2
     capsys.readouterr()
-    (folder,) = (Path(".wf") / "runs").iterdir()
+    (folder,) = runs.runs_folder(Path.cwd(), runs_dir).iterdir()
     return folder.resolve()
 
 
@@ -80,6 +80,24 @@ def test_poll_returns_a_runs_new_state_once(repo, monkeypatch, capsys):
     assert (state["status"], state["questions"][0]["node"]) == ("waiting", "approve")
     again = call(monkeypatch, capsys, "invoke", invoke("source.poll", source_id="ask-run", config_ref=f"wf-run:{folder}"))
     assert again["result"] == {"status": "no-result", "output": ""}  # nothing new since the last poll
+
+
+def test_poll_follows_a_run_kept_in_a_runs_folder_outside_the_repo(repo, monkeypatch, capsys, tmp_path_factory):
+    folder = waiting_run(capsys, tmp_path_factory.mktemp("runs"))
+    assert not folder.is_relative_to(repo.resolve()) and not (repo / ".wf").exists()
+    reply = call(monkeypatch, capsys, "invoke", invoke("source.poll", source_id="ask-run", config_ref=f"wf-run:{folder}"))
+    state = json.loads(reply["result"]["output"])
+    assert (state["status"], state["dir"], state["questions"][0]["node"]) == ("waiting", str(folder), "approve")
+    assert state["answer"] == f"wf answer {folder.name} <answers.json> --runs-dir {folder.parent.parent}"
+    assert runs.Run.at(folder).repo == repo.resolve()
+
+
+def test_poll_refuses_a_runs_folder_run_that_does_not_record_its_repo(repo, monkeypatch, capsys, tmp_path_factory):
+    folder = waiting_run(capsys, tmp_path_factory.mktemp("runs"))
+    (folder / "run.json").write_text("{}")
+    reply = call(monkeypatch, capsys, "invoke", invoke("source.poll", source_id="ask-run", config_ref=f"wf-run:{folder}"))
+    assert (reply["ok"], reply["error"]["code"]) == (False, "unavailable")
+    assert "doesn't say which repo the run is in" in reply["error"]["diagnostic"]
 
 
 @pytest.mark.parametrize("status, kind, terminal", [

@@ -41,7 +41,11 @@ A limit reached while it waits ends the wait, and the attempt doesn't start.
 Workspaces: `new` is a git worktree (workspaces.py). For an `edit` or `full`
 agent in a worktree the runner made, a retry starts from the commit the job
 started from, and when the agent succeeds the runner commits what it left
-(`edit` agents are told not to commit themselves).
+(`edit` agents are told not to commit themselves). A node's `branch` names
+its worktree's branch on its first pass; the run folder's branches.json
+records it, so later passes and `wf resume` keep using it, and no other node
+or run can take it over. An item's `branch` renders on every pass, and must
+name the branch its index already has.
 
 Workflow nodes (_workflow) run their sub-workflow with the same graph, as a
 separate LangGraph thread in the run's checkpoints: one thread per attempt.
@@ -73,7 +77,7 @@ from langgraph.types import interrupt
 
 from . import capacity, dryrun, output_tool, schemas, templates, workspaces
 from .context import RunContext
-from .runs import now, write_json
+from .runs import Run, now, write_json
 from .harnesses import SessionSpec, Unavailable, Usage
 from .spec import seconds
 from .state import Finished, Job
@@ -150,11 +154,51 @@ async def _workspace(job: Job, ctx: RunContext, variables: dict) -> dict:
         if not base:
             raise _Failed("`workspace: new` needs a git repo with at least one commit", job["attempt"])
         parts = [*ctx.prefix, node_id] + ([str(job["index"])] if job["index"] is not None else [])  # e.g. build/2/implement
-        return await _git(ctx, workspaces.worktree, ctx.home["path"], ctx.run.id, parts, base)
+        template = ctx.workflow.setting(node_id, "branch")
+        if template is None:  # "" is a name too, and an empty one is refused
+            return await _git(ctx, workspaces.worktree, ctx.home["path"], ctx.run.id, parts, base)
+        # A node keeps the name its first pass gave. An item renders it again on every pass:
+        # another item may be at its index now (node ids start with a letter, indexes are digits)
+        named = ctx.root.run.branches().get("/".join(parts))
+        if named is None or any(part.isdigit() for part in parts):
+            named = templates.render(template, variables).strip()
+        return await _git(ctx, _named_worktree, ctx.root.run, ctx.home["path"], parts, base, named)
     shared = job["vars"]["workspace"].get(kind)
     if shared is None:
         raise _Failed(f"`{kind}` hasn't run yet, so it has no workspace to share", job["attempt"])
     return shared
+
+
+def _named_worktree(run: Run, repo: str, parts: list[str], base: str, branch: str) -> dict:
+    """The worktree on the branch a node's `branch` named: one this run made for it, or a new one.
+    A branch that exists and that this run didn't make is never taken over, and neither is one
+    that git can't have beside a branch that exists (fix/a beside fix/a/b, or FIX/a where git
+    ignores case)."""
+    path = "/".join(parts)
+    if problem := workspaces.branch_problem(repo, branch):
+        raise workspaces.WorkspaceError(f"can't name the branch `{branch}`: {problem}")
+    made = run.branches()
+    if path in made:  # a later pass, or the run resumed
+        if made[path] != branch:
+            raise workspaces.WorkspaceError(f"`{path}` worked on branch `{made[path]}` in an earlier pass, and now names "
+                                            f"`{branch}`: worktrees go by item index, so keep each item at its index")
+        return workspaces.worktree(repo, run.id, parts, base, branch)
+    if workspaces.run_worktrees(repo, run.id).get(path, (None,))[0] == branch:  # made, but not recorded: the run stopped
+        run.add_branch(path, branch)
+        return workspaces.worktree(repo, run.id, parts, base, branch)
+    fold = workspaces.ignores_case(repo)
+    if owner := next((p for p, b in made.items() if workspaces.clash(b, branch, fold)), None):
+        taken = made[owner]
+        raise workspaces.WorkspaceError(f"`{owner}` already works on branch `{taken}` in this run" if taken == branch else
+                                        f"`{owner}` works on branch `{taken}` in this run, and git can't have both "
+                                        f"`{taken}` and `{branch}`")
+    if existing := workspaces.clashing_branch(repo, branch):
+        raise workspaces.WorkspaceError(
+            f"branch `{branch}` already exists and this run didn't make it; delete it or name another" if existing == branch
+            else f"branch `{existing}` exists, and git can't have both `{existing}` and `{branch}`; delete it or name another")
+    workspace = workspaces.worktree(repo, run.id, parts, base, branch)
+    run.add_branch(path, branch)  # once it exists: the record lists only branches this run made
+    return workspace
 
 
 _GIT = threading.Lock()  # held by the thread itself: see _git

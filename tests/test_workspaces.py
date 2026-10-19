@@ -1,4 +1,5 @@
-"""`workspace: new` end to end: worktrees, the runner's commits, resets before retries, cleanup.
+"""`workspace: new` end to end: worktrees, the runner's commits, resets before retries, cleanup,
+and the branch names `branch` gives them.
 
 Worktrees go under WF_HOME, which each test points at its own folder.
 """
@@ -253,3 +254,199 @@ def test_a_key_waiting_for_a_touch_fails_the_node_quickly(repo, monkeypatch, tmp
         time.sleep(0.1)
     else:
         pytest.fail("the signing program still runs")
+
+
+# ---------- branch ----------
+
+NAMED = 'impl: {needs: [start], instruction: work, access: edit, workspace: new, branch: "{{ start.branch }}"}'
+BRANCH_INPUT = "{branch: {type: string}}"
+
+
+def test_branch_names_the_worktrees_branch(repo, monkeypatch):
+    use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "x"}))
+    write(NAMED + "\nother: {needs: [start], command: 'true', workspace: new}", inputs=BRANCH_INPUT,
+          end='{branch: "{{ workspace.impl.branch }}", other: "{{ workspace.other.branch }}"}')
+    assert cli.main(["run", "flow.yaml", "branch= fm/task "]) == 0  # the name is stripped
+    assert output() == {"branch": "fm/task", "other": f"wf/{only_run().name}/other"}  # without `branch`: as before
+    assert git("show", "fm/task:new.txt") == "made"
+    branches = json.loads((only_run() / "branches.json").read_text())
+    assert branches == {"impl": {"branch": "fm/task", "left": git("rev-parse", "fm/task")}}  # where the run left it
+
+
+def test_a_branch_that_already_exists_is_refused(repo, monkeypatch, capsys):
+    git("branch", "fm/task")
+    use(monkeypatch)  # the agent never starts
+    write(NAMED, inputs=BRANCH_INPUT)
+    assert cli.main(["run", "flow.yaml", "branch=fm/task"]) == 1
+    assert "branch `fm/task` already exists and this run didn't make it" in capsys.readouterr().err
+    assert git("rev-parse", "fm/task") == git("rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("existing, name", [("fm", "fm/task"), ("fm/task/review", "fm/task")])
+def test_a_branch_git_cannot_have_beside_an_existing_one_is_refused(repo, monkeypatch, capsys, existing, name):
+    git("branch", existing)
+    use(monkeypatch)
+    write(NAMED, inputs=BRANCH_INPUT)
+    assert cli.main(["run", "flow.yaml", f"branch={name}"]) == 1
+    assert f"branch `{existing}` exists, and git can't have both `{existing}` and `{name}`" in capsys.readouterr().err
+
+
+def test_where_git_ignores_case_a_name_in_other_case_is_the_same_branch(repo, monkeypatch, capsys):
+    git("config", "core.ignorecase", "true")
+    git("branch", "fm/task")
+    use(monkeypatch)
+    write(NAMED, inputs=BRANCH_INPUT)
+    assert cli.main(["run", "flow.yaml", "branch=FM/task"]) == 1
+    assert "branch `fm/task` exists, and git can't have both `fm/task` and `FM/task`" in capsys.readouterr().err
+    assert run("""
+        each: {needs: [start], for_each: '["a", "A"]', max_parallel: 1, command: "true", workspace: new,
+               branch: "fix/{{ item }}"}
+    """) == 1
+    assert "`each/0` works on branch `fix/a` in this run, and git can't have both `fix/a` and `fix/A`" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name, problem", [
+    ("bad name", "git doesn't allow it as a branch name"),
+    ("wf/mine", "where wf names branches itself"),
+    ("wf", "where wf names branches itself"),  # git can't have wf/<run-id>/... beside it
+    ("WF/mine", "where wf names branches itself"),  # in wf/ where git ignores case
+    ("", "the name is empty"),
+    ("   ", "the name is empty"),  # names are stripped
+])
+def test_a_branch_name_git_or_wf_would_refuse_fails_the_node(repo, monkeypatch, capsys, name, problem):
+    use(monkeypatch)
+    write(NAMED, inputs=BRANCH_INPUT)
+    assert cli.main(["run", "flow.yaml", f"branch={name}"]) == 1
+    assert problem in capsys.readouterr().err
+    assert git("branch", "--list") == "* " + git("branch", "--show-current")  # no wf/ branch in its place
+
+
+def test_a_resumed_run_keeps_the_branch_it_made(repo, monkeypatch, tmp_path):
+    use(monkeypatch, edits({"half.txt": "x\n"}), talk(), talk())  # never submits
+    write(NAMED.replace("workspace: new", "workspace: new, retry: 0"), inputs=BRANCH_INPUT,
+          end='{branch: "{{ workspace.impl.branch }}"}')
+    assert cli.main(["run", "flow.yaml", "branch=fm/task"]) == 1
+    shutil.rmtree(tmp_path / "home" / "worktrees")  # the branch outlives its worktree
+    git("worktree", "prune")  # and git's record of it: only branches.json says the run made the branch
+    use(monkeypatch, edits({"good.txt": "ok\n"}, {"summary": "done"}))
+    assert cli.main(["resume", only_run().name]) == 0
+    assert output() == {"branch": "fm/task"}
+    assert git("ls-tree", "--name-only", "fm/task").splitlines() == ["README", "good.txt"]
+
+
+def test_a_run_that_stopped_before_recording_its_branch_takes_it_up_again(repo, monkeypatch):
+    use(monkeypatch, talk(), talk(), talk())  # never submits
+    write(NAMED.replace("workspace: new", "workspace: new, retry: 0"), inputs=BRANCH_INPUT,
+          end='{branch: "{{ workspace.impl.branch }}"}')
+    assert cli.main(["run", "flow.yaml", "branch=fm/task"]) == 1
+    (only_run() / "branches.json").unlink()  # as if the run had stopped between making the branch and recording it
+    use(monkeypatch, edits({"good.txt": "ok\n"}, {"summary": "done"}))
+    assert cli.main(["resume", only_run().name]) == 0
+    assert output() == {"branch": "fm/task"}
+    assert json.loads((only_run() / "branches.json").read_text())["impl"]["branch"] == "fm/task"
+
+
+def test_a_loop_keeps_the_branch_its_first_pass_named(repo, monkeypatch):
+    use(monkeypatch, edits({"a.txt": "1\n"}, {"summary": "one"}), edits({"b.txt": "2\n"}, {"summary": "two"}))
+    assert run("""
+        impl: {needs: [start], instruction: work, access: edit, workspace: new, branch: "try-{{ history.impl | length }}"}
+        check:
+          needs: [impl]
+          workspace: impl
+          command: "test -e b.txt"
+          check: false
+          routes: [{when: "check.exit_code != 0", to: impl, max: 3}, {to: end}]
+    """, end='{branch: "{{ workspace.impl.branch }}"}') == 0
+    assert output() == {"branch": "try-0"}
+    assert git("log", "--format=%s", "HEAD..try-0").count("wf: impl") == 2
+    assert git("branch", "--list", "try-1") == ""
+
+
+def test_each_item_names_its_own_branch_and_two_items_cannot_share_one(repo, monkeypatch, capsys):
+    use(monkeypatch, edits({"f.txt": "a\n"}, {"summary": "a"}), edits({"f.txt": "b\n"}, {"summary": "b"}))
+    assert run("""
+        each: {needs: [start], for_each: '["a", "b"]', max_parallel: 1, instruction: "{{ item }}", access: edit,
+               workspace: new, branch: "fix/{{ item }}"}
+    """) == 0
+    assert [git("show", f"fix/{name}:f.txt") for name in "ab"] == ["a", "b"]
+    use(monkeypatch, submit({"summary": "x"}))
+    assert run("""
+        each: {needs: [start], for_each: '["c", "c"]', max_parallel: 1, instruction: "{{ item }}", access: edit,
+               workspace: new, branch: "fix/{{ item }}"}
+    """) == 1
+    assert "`each/0` already works on branch `fix/c` in this run" in capsys.readouterr().err
+    assert run("""
+        each: {needs: [start], for_each: '["d", "d/e"]', max_parallel: 1, command: "true", workspace: new,
+               branch: "fix/{{ item }}"}
+    """) == 1
+    assert "`each/0` works on branch `fix/d` in this run, and git can't have both `fix/d` and `fix/d/e`" in capsys.readouterr().err
+
+
+def test_an_item_keeps_its_branch_only_while_its_index_holds_the_same_item(repo, monkeypatch, capsys):
+    loop = """
+        each: {needs: [start], for_each: 'ITEMS', command: "true", workspace: new, branch: "fix/{{ item }}"}
+        again: {needs: [each], command: "true", routes: [{to: each, max: 1}, {to: end}]}
+    """
+    assert run(loop.replace("ITEMS", '["a"]')) == 0  # the second pass works on fix/a again
+    capsys.readouterr()
+    assert run(loop.replace("ITEMS", '["b", "a"] if history.each else ["c"]')) == 1
+    assert "`each/0` worked on branch `fix/c` in an earlier pass, and now names `fix/b`" in capsys.readouterr().err
+    assert git("branch", "--list", "fix/b") == ""
+
+
+def test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work(repo, monkeypatch, capsys):
+    use(monkeypatch, *[edits({"f.txt": f"{n}\n"}, {"summary": "x"}) for n in range(3)])
+    write(NAMED, inputs=BRANCH_INPUT)
+    folders = Path(".wf") / "runs"
+    assert cli.main(["run", "flow.yaml", "branch=fm/task"]) == 0
+    (first,) = [p.name for p in folders.iterdir()]
+    git("branch", "-D", "fm/task")
+    assert cli.main(["run", "flow.yaml", "branch=fm/task"]) == 0  # another run makes it again
+    (second,) = {p.name for p in folders.iterdir()} - {first}
+    made_again = git("rev-parse", "fm/task")
+    capsys.readouterr()
+    assert cli.main(["discard", first, "--branches"]) == 0
+    assert "kept branch fm/task: wf can't tell it's still this run's work" in capsys.readouterr().out
+    assert git("rev-parse", "fm/task") == made_again
+    assert cli.main(["discard", second, "--branches"]) == 0
+    assert git("branch", "--list", "fm/task") == ""
+    assert cli.main(["run", "flow.yaml", "branch=fm/gone"]) == 0
+    git("branch", "-D", "fm/gone")
+    capsys.readouterr()
+    assert cli.main(["discard", only_run().name]) == 0
+    assert "fm/gone" not in capsys.readouterr().out  # a branch that's gone isn't kept
+
+
+def test_discard_says_which_branches_git_would_not_delete(repo, monkeypatch, capsys):
+    use(monkeypatch, submit({"summary": "x"}))
+    write(NAMED, inputs=BRANCH_INPUT)
+    assert cli.main(["run", "flow.yaml", "branch=fm/checked"]) == 0
+    git("checkout", "-q", "fm/checked")  # git can't delete the branch you're on
+    capsys.readouterr()
+    assert cli.main(["discard", only_run().name, "--branches"]) == 0
+    assert "kept branch fm/checked: git couldn't delete it (" in capsys.readouterr().out
+    assert git("branch", "--show-current") == "fm/checked"
+
+
+def test_discard_deletes_the_branch_a_run_made_without_recording_it(repo, monkeypatch):
+    use(monkeypatch, talk(), talk(), talk())  # never submits: the worktree stays for wf resume
+    write(NAMED.replace("workspace: new", "workspace: new, retry: 0"), inputs=BRANCH_INPUT)
+    assert cli.main(["run", "flow.yaml", "branch=fm/lost"]) == 1
+    (only_run() / "branches.json").unlink()
+    assert cli.main(["discard", only_run().name, "--branches"]) == 0
+    assert git("branch", "--list", "fm/lost") == ""  # its worktree had it checked out
+
+
+def test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them(repo, monkeypatch, capsys):
+    use(monkeypatch, submit({"summary": "x"}), submit({"summary": "y"}))
+    write(NAMED, inputs=BRANCH_INPUT)
+    for name, discard in (("fm/kept", []), ("fm/gone", ["--branches"])):
+        assert cli.main(["run", "flow.yaml", f"branch={name}"]) == 0
+        (run_id,) = [p.name for p in (Path(".wf") / "runs").iterdir()]
+        capsys.readouterr()
+        assert cli.main(["discard", run_id, *discard]) == 0
+        assert ("kept its branches fm/kept" in capsys.readouterr().out) == (not discard)
+    assert git("branch", "--list", "fm/*") == "fm/kept"
+    Path("script.yaml").write_text('agents: {impl: [{summary: "scripted"}]}\n')
+    assert cli.main(["run", "flow.yaml", "branch=fm/dry", "--dry-run", "script.yaml"]) == 0
+    assert git("branch", "--list", "fm/dry") == ""  # it held scripted work

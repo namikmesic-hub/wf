@@ -9,7 +9,9 @@ with a verb argument (`handshake` or `invoke`), one JSON request on stdin, and
 one JSON response on stdout.
 
 This module is that executable's logic. A source is one wf run, named by its
-run folder in the source's config reference: `wf-run:/abs/repo/.wf/runs/<id>`.
+run folder in the source's config reference: `wf-run:/abs/repo/.wf/runs/<id>`,
+or `wf-run:/abs/runs-dir/<repo key>/<id>` for a run kept in a runs folder
+(--runs-dir, WF_RUNS_DIR) outside the repo.
 
     source.poll      wait up to POLL_SECONDS for the run to need attention (operate.wait),
                      with the source as the consumer, so each state is reported once:
@@ -128,33 +130,38 @@ def _poll(data: dict) -> dict:
     if not isinstance(source, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source):
         raise _Refusal("invalid-request", "source_id must be a path-safe name")
     if not isinstance(reference, str) or not reference.startswith(REFERENCE):
-        raise _Refusal("invalid-request", f"config_ref must look like {REFERENCE}/absolute/path/to/.wf/runs/<run-id>")
+        raise _Refusal("invalid-request", f"config_ref must look like {REFERENCE}/absolute/path/to/<run folder>")
     folder = Path(reference[len(REFERENCE):])
     if not folder.is_absolute() or os.path.normpath(folder) != str(folder):
         raise _Refusal("invalid-request", "config_ref must name a normalized absolute path")
     if not (folder / "workflow" / "manifest.json").is_file():
         raise _Refusal("unavailable", f"{folder} isn't a wf run folder")
-    found = operate.wait(Run.at(folder), POLL_SECONDS, consumer=f"firstmate-{source}")
+    try:
+        run = Run.at(folder)
+    except ValueError as error:  # a runs folder's run, with a damaged run.json
+        raise _Refusal("unavailable", str(error)) from error
+    found = operate.wait(run, POLL_SECONDS, consumer=f"firstmate-{source}")
     if found is None:
         return {"status": "no-result", "output": ""}
-    return {"status": "result", "output": _bounded(found)}
+    return {"status": "result", "output": _bounded(found, run.command("status", "--json"))}
 
 
-def _bounded(state: dict) -> str:
-    """The run's state as JSON, cut down to fit a firstmate result."""
+def _bounded(state: dict, more: str) -> str:
+    """The run's state as JSON, cut down to fit a firstmate result. `more` is the command
+    that prints all of it."""
     text = json.dumps(state, ensure_ascii=False, default=str)
     if len(text.encode("utf-8")) <= MAX_OUTPUT:
         return text
     slim = {k: v for k, v in state.items() if k != "output"}
     if "output" in state:
         slim["output_file"] = str(Path(state["dir"]) / "output.json")
-    slim["questions"] = [{**q, "message": q["message"][:2000], "schema": {"see": f"wf status {state['run']} --json"}}
+    slim["questions"] = [{**q, "message": q["message"][:2000], "schema": {"see": more}}
                          for q in state.get("questions", [])]
     text = json.dumps(slim, ensure_ascii=False, default=str)
     if len(text.encode("utf-8")) <= MAX_OUTPUT:
         return text
     keep = ("run", "status", "seq", "dir", "workflow", "nodes", "answer", "resume")
-    return json.dumps({k: state[k] for k in keep if k in state} | {"more": f"wf status {state['run']} --json"})
+    return json.dumps({k: state[k] for k in keep if k in state} | {"more": more})
 
 
 def _status(data: dict) -> str:

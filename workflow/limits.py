@@ -16,7 +16,7 @@ its retry, and a sub-workflow the limit stopped continues its own steps.
 
 This module is plain functions: parse() reads `--limit` arguments, effective()
 combines them with the workflow file's, check() says which limit (if any) a
-run has reached, and hint() turns that into the command that continues it.
+run has reached, and hint() turns that into the --limit option that continues it.
 """
 
 from typing import Any
@@ -73,9 +73,9 @@ def check(limits: Limits, used: dict, elapsed_s: float) -> tuple[str, str] | Non
     return None
 
 
-def hint(run_id: str, name: str | None) -> str:
-    """The command that continues a run the limit `name` (from check()) stopped."""
-    return f"wf resume {run_id} --limit {name or 'cost_usd'}=<more>"
+def hint(name: str | None) -> str:
+    """The option that lets `wf resume` continue a run the limit `name` (from check()) stopped."""
+    return f"--limit {name or 'cost_usd'}=<more>"
 
 
 def describe(limits: Limits) -> str:

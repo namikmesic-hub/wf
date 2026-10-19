@@ -151,6 +151,7 @@ class _Node(_Model):
     on_item_error: Literal["fail", "continue"] | None = None
     workspace: str | None = None
     base: str | None = None
+    branch: str | None = None
     timeout: Duration | None = None
     retry: int | None = Field(None, ge=0)
     description: str | None = None
@@ -223,7 +224,7 @@ class HarnessSettings(_Model):
 
 class Defaults(_Model):
     """Settings every node inherits. Not `needs`, `routes`, `for_each`, the kind keys,
-    or fields that only make sense per node (`output`, `with`, `description`)."""
+    or fields that only make sense per node (`output`, `with`, `branch`, `description`)."""
 
     harness: NameOrList | None = None
     harnesses: dict[Literal["claude-code", "codex", "cursor"], HarnessSettings] = {}

@@ -16,6 +16,9 @@ For an operator that isn't at a terminal (operate.py):
     wf discard <run-id>...           delete runs: folders, worktrees, temp folders
     wf integrate firstmate <dir>     write the firstmate extension package (firstmate.py)
 
+Every command that makes or finds runs takes --runs-dir DIR (default: WF_RUNS_DIR) to keep run
+folders outside the repo, in a folder per repo under DIR, instead of in ./.wf/runs (runs.py).
+
 main() parses the arguments and returns the exit code. The pyproject entry
 point (`wf = "workflow.cli:main"`) passes that code to the shell.
 
@@ -79,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     graph.set_defaults(handler=_graph)
 
     no_input = {"action": "store_true", "help": "never ask questions: pause instead (exit code 2)"}
+    runs_dir = {"type": _folder, "metavar": "DIR", "help": "run folders are in DIR, a folder per repo, "
+                                                           "instead of ./.wf/runs (default: WF_RUNS_DIR)"}
     run = commands.add_parser("run", help="validate, then run a workflow")
     limit_help = {"help": "a limit for this run instead of the file's: cost_usd=20, tokens=5000000, "
                           "duration=2h, or NAME=none for no limit (repeat for several)"}
@@ -90,8 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--json", action="store_true", help="with --detach: print the run id as JSON")
     run.add_argument("--dry-run", type=Path, metavar="SCRIPT", help="run with scripted agent results, answers and command results instead of real agents")
     run.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
+    run.add_argument("--runs-dir", **runs_dir)
     run.set_defaults(handler=lambda a: runner.start(a.file, a.inputs, a.input_file, a.no_input, a.detach, a.json,
-                                                    a.dry_run, a.limits))
+                                                    a.dry_run, a.limits, a.runs_dir))
 
     resume = commands.add_parser("resume", help="continue a paused or failed run")
     resume.add_argument("run_id", metavar="run-id")
@@ -100,24 +106,29 @@ def main(argv: list[str] | None = None) -> int:
     resume.add_argument("--detach", action="store_true", help="continue in the background")
     resume.add_argument("--json", action="store_true", help="with --detach: print the run id as JSON")
     resume.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
-    resume.set_defaults(handler=lambda a: runner.resume(a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits))
+    resume.add_argument("--runs-dir", **runs_dir)
+    resume.set_defaults(handler=lambda a: runner.resume(a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits,
+                                                        a.runs_dir))
 
     answer = commands.add_parser("answer", help="answer the questions a run waits on, and continue it")
     answer.add_argument("run_id", metavar="run-id")
     answer.add_argument("answers", type=Path, metavar="answers.json", help="{question key: answers}, keys from wf status")
     answer.add_argument("--detach", action="store_true", help="continue in the background")
     answer.add_argument("--json", action="store_true")
-    answer.set_defaults(handler=lambda a: runner.resume(a.run_id, True, a.answers, a.detach, a.json))
+    answer.add_argument("--runs-dir", **runs_dir)
+    answer.set_defaults(handler=lambda a: runner.resume(a.run_id, True, a.answers, a.detach, a.json, runs_dir=a.runs_dir))
 
     wait = commands.add_parser("wait", help="block until a run needs attention; print its state as JSON")
     wait.add_argument("run_id", metavar="run-id")
     wait.add_argument("--timeout", type=float, default=3600, help="seconds (default 3600); exit code 3 if nothing happened")
     wait.add_argument("--consumer", metavar="NAME", help="report each state to NAME only once")
+    wait.add_argument("--runs-dir", **runs_dir)
     wait.set_defaults(handler=_wait)
 
     status = commands.add_parser("status", help="where a run stands")
     status.add_argument("run_id", metavar="run-id")
     status.add_argument("--json", action="store_true")
+    status.add_argument("--runs-dir", **runs_dir)
     status.set_defaults(handler=_status)
 
     examples = commands.add_parser("examples", help="copy wf's complete example workflows into a folder")
@@ -126,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
 
     listing = commands.add_parser("list", help="every run in this folder, newest first")
     listing.add_argument("--json", action="store_true")
+    listing.add_argument("--runs-dir", **runs_dir)
     listing.set_defaults(handler=_list)
 
     reporting = commands.add_parser("report", help="what runs did, per node: evidence for improving a workflow")
@@ -136,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     kind.add_argument("--dry-runs", action="store_true", help="only dry runs")
     reporting.add_argument("--version", metavar="V", help="only runs of this version of the workflow files (see runs[].version)")
     reporting.add_argument("--json", action="store_true")
+    reporting.add_argument("--runs-dir", **runs_dir)
     reporting.set_defaults(handler=_report)
 
     discarding = commands.add_parser("discard", help="delete runs: their folders, worktrees and temp folders")
@@ -143,7 +156,9 @@ def main(argv: list[str] | None = None) -> int:
     discarding.add_argument("--workflow", metavar="NAME", help="every run of this workflow in this folder")
     discarding.add_argument("--dry-runs", action="store_true", help="only dry runs (with --workflow)")
     discarding.add_argument("--branches", action="store_true",
-                            help="delete their wf/<run-id>/ branches too (a dry run's always go)")
+                            help="delete their branches too: wf/<run-id>/, and the ones `branch` named while they're still "
+                                 "the run's work (a dry run's always go)")
+    discarding.add_argument("--runs-dir", **runs_dir)
     discarding.set_defaults(handler=_discard)
 
     integrate = commands.add_parser("integrate", help="connect wf to another tool")
@@ -163,6 +178,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:  # anywhere the runner doesn't handle it itself
         print("\nStopped.", file=sys.stderr)
         return runner.STOPPED
+
+
+def _folder(text: str) -> Path | None:
+    """A folder option's value: a blank one is no folder, as if the option weren't there
+    (Path("") would be the current folder)."""
+    return Path(text) if text.strip() else None
 
 
 def _init(args) -> int:
@@ -221,16 +242,16 @@ def _count(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def _find(run_id: str) -> runs.Run | None:
+def _find(run_id: str, runs_dir: Path | None) -> runs.Run | None:
     try:
-        return runs.find(Path.cwd(), run_id)
+        return runs.find(Path.cwd(), run_id, runs_dir)
     except FileNotFoundError as error:
         print(f"wf: {error}", file=sys.stderr)
         return None
 
 
 def _wait(args) -> int:
-    run = _find(args.run_id)
+    run = _find(args.run_id, args.runs_dir)
     if run is None:
         return 1
     try:
@@ -246,7 +267,7 @@ def _wait(args) -> int:
 
 
 def _status(args) -> int:
-    run = _find(args.run_id)
+    run = _find(args.run_id, args.runs_dir)
     if run is None:
         return 1
     current = operate.state(run)
@@ -255,7 +276,7 @@ def _status(args) -> int:
 
 
 def _list(args) -> int:
-    states = [operate.state(run) for run in reversed(runs.all_runs(Path.cwd()))]
+    states = [operate.state(run) for run in reversed(runs.all_runs(Path.cwd(), args.runs_dir))]
     if args.json:
         print(json.dumps(states, indent=2, ensure_ascii=False, default=str))
     else:
@@ -267,11 +288,11 @@ def _list(args) -> int:
 def _describe(current: dict) -> str:
     status, run_id = current.get("status"), current.get("run")
     if status == "waiting":
-        detail = f"waiting for a person: {', '.join(current.get('nodes', []))} (wf answer {run_id} <answers.json>)"
+        detail = f"waiting for a person: {', '.join(current.get('nodes', []))} ({current.get('answer')})"
     elif status == "failed":
-        detail = f"failed: {current.get('node', '?')}: {current.get('error', '')} (wf resume {run_id})"
+        detail = f"failed: {current.get('node', '?')}: {current.get('error', '')} ({current.get('resume')})"
     elif status == "stopped":
-        detail = f"stopped: {current.get('reason')} (wf resume {run_id})"
+        detail = f"stopped: {current.get('reason')} ({current.get('resume')})"
     elif status == "limit":
         detail = f"paused at a limit: {current.get('reason')} ({current.get('resume')})"
     elif status == "running" and current.get("agents_waiting"):
@@ -286,12 +307,13 @@ def _chosen(args, dry_runs: bool | None) -> list[runs.Run] | None:
     ones (False) if asked. None if a named run doesn't exist."""
     chosen = []
     for run_id in dict.fromkeys(args.run_ids):  # once each, in order
-        run = _find(run_id)
+        run = _find(run_id, args.runs_dir)
         if run is None:
             return None
         chosen.append(run)
     if args.workflow:
-        chosen += [r for r in runs.all_runs(Path.cwd()) if r.info().get("workflow") == args.workflow and r not in chosen]
+        chosen += [r for r in runs.all_runs(Path.cwd(), args.runs_dir)
+                   if r.info().get("workflow") == args.workflow and r not in chosen]
     if dry_runs is not None:
         chosen = [r for r in chosen if bool(r.info().get("dry_run")) == dry_runs]
     return chosen
@@ -343,7 +365,9 @@ def _discard(args) -> int:
         except OSError as error:
             print(f"wf discard: can't delete run {run.id}: {error.strerror or error}", file=sys.stderr)
             return 1
-        note = f"; kept its branches {', '.join(kept)} (--branches deletes them)" if kept else ""
+        own = [branch for branch, why in kept.items() if why == runs.KEPT]
+        note = f"; kept its branches {', '.join(own)} (--branches deletes them)" if own else ""
+        note += "".join(f"; kept branch {branch}: {why}" for branch, why in kept.items() if why != runs.KEPT)
         print(f"Discarded run {run.id}{note}")
     return 0
 

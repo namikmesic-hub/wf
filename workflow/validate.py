@@ -10,7 +10,7 @@ The checks run in this order, because later ones lean on earlier ones:
 3. sub-workflows: each is checked too (its problems are reported with its
    own file name), and its end output becomes the parent node's output schema
 4. per node: templates and expressions, for_each, harness, workspace, `with`
-5. end outputs, then the warnings that need the whole graph
+5. `branch` names, end outputs, then the warnings that need the whole graph
 
 Templates are checked without running them. templates.references() lists every
 name a template reads and its field path; _roots() says what each name holds,
@@ -24,6 +24,8 @@ any other node without `{% if node %}` gets a warning.
 """
 
 import difflib
+import functools
+import itertools
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -75,6 +77,7 @@ class _Result:
     harnesses: set[str] = field(default_factory=set)  # every harness an agent here could run on
     files: list[Path] = field(default_factory=list)  # this file and its sub-workflows
     worktrees: bool = False  # does it (or a sub-workflow) create worktrees with `workspace: new`?
+    branches: list["_Branch"] = field(default_factory=list)  # the names `branch` gives, here and in sub-workflows
 
 
 def _check(path: Path, stack: tuple[Path, ...], tainted: frozenset[str], cache: dict) -> _Result:
@@ -103,7 +106,9 @@ class _Checker:
         self.harnesses: set[str] = set()
         self.cost_refs: list[str] = []  # where templates read run.cost_usd
         self.end_fields: dict[str, dict] = {}
+        self.branches: list[_Branch] = []
         self._warned: set = set()
+        self._tainting: set[str] = set()  # nodes whose `branch` _branch_tainted() is reading
 
     def error(self, where: str, message: str) -> None:
         self.problems.append(Problem(where, message, "error", self.path))
@@ -126,6 +131,7 @@ class _Checker:
         self.order = _Order(self.topo)
         for node_id in self.nodes:
             self._node(node_id)
+        self._branches()
         self._end()
         self._concurrent_edits()
         self._cost()
@@ -135,7 +141,7 @@ class _Checker:
         }
         files = [self.path] + [f for sub in self.subs.values() for f in sub.files]
         worktrees = any(self.wf.setting(n, "workspace") == "new" for n in self.nodes) or any(s.worktrees for s in self.subs.values())
-        return _Result(self.problems, self.wf, end_schema, self.harnesses, files, worktrees)
+        return _Result(self.problems, self.wf, end_schema, self.harnesses, files, worktrees, self.branches)
 
     # ---------- 1. structure ----------
 
@@ -318,6 +324,8 @@ class _Checker:
             fields += [(f"with.{k}", v) for k, v in node.with_.items() if isinstance(v, str)]
         if node.base is not None:
             fields.append(("base", node.base))
+        if node.branch is not None:
+            fields.append(("branch", node.branch))
         for name, source in fields:
             refs = self._template(f"{at}.{name}", source, node_id, "node")
             if refs and name == "command":
@@ -450,6 +458,9 @@ class _Checker:
             candidate = bool(self.tainted) if not path else path[0] in self.tainted
         elif name in self.nodes or name in ("history", "errors"):
             candidate = True
+        elif name == "workspace" and path and path[0] in self.nodes:
+            steps = [step for step in path[1:] if isinstance(step, str)]  # past a for_each node's item
+            candidate = (not steps or steps[0] == "branch") and self._branch_tainted(path[0])
         elif name == "item" and node_id is not None and self.nodes[node_id].for_each is not None:
             try:
                 refs = templates.references(self.nodes[node_id].for_each, expression=True)
@@ -467,11 +478,29 @@ class _Checker:
                 return False  # validated as a number or boolean
         return candidate
 
+    def _branch_tainted(self, node_id: str) -> bool:
+        """Could the branch of this node's workspace carry text an agent wrote? Only if a `branch`
+        names it from such text: wf names the others wf/<run-id>/..., and `repo` is your checkout."""
+        seen = set()
+        while (workspace := self.wf.setting(node_id, "workspace")) in self.nodes and node_id not in seen:
+            seen.add(node_id)
+            node_id = workspace  # it runs in that node's workspace
+        source = self.nodes[node_id].branch if workspace == "new" else None
+        if source is None or node_id in self._tainting:
+            return False
+        self._tainting.add(node_id)
+        try:
+            return any(self._tainted(ref, node_id) for ref in templates.references(source))
+        except TemplateError:
+            return False
+        finally:
+            self._tainting.discard(node_id)
+
     def _unquoted(self, where: str, refs: list[Ref], node_id: str) -> None:
         names = []
         for ref in refs:
             if ref.output and not ref.quoted and self._tainted(ref, node_id):
-                names.append(f"start.{ref.path[0]}" if ref.name == "start" and ref.path else ref.name)
+                names.append(f"{ref.name}.{ref.path[0]}" if ref.name in ("start", "workspace") and ref.path else ref.name)
         if names:
             listed = ", ".join(f"`{n}`" for n in dict.fromkeys(names))
             self.warn(where, f"puts output from {listed} into the shell unquoted; pass it through `env` and use \"$NAME\", or add `| quote`")
@@ -598,7 +627,88 @@ class _Checker:
             return schemas.types_of(schema) if schema else None
         return None if templates.single_expression(value) is not None else {"string"}
 
-    # ---------- 5. end outputs and whole-graph warnings ----------
+    # ---------- 5. branch names, end outputs and whole-graph warnings ----------
+
+    def _branches(self) -> None:
+        """`branch` names a `workspace: new` worktree's branch: one per item, never `wf` or under
+        wf/, and never one that git can't have beside another node's, in this file or in a
+        sub-workflow it runs."""
+        for node_id, node in self.nodes.items():
+            if node.branch is None:
+                continue
+            where, workspace = f"nodes.{node_id}.branch", self.wf.setting(node_id, "workspace")
+            if workspace != "new":
+                self.error(where, f"`branch` names a `workspace: new` worktree's branch, but this node's workspace is `{workspace}`")
+                continue
+            try:
+                refs, pattern = templates.references(node.branch), _folded(templates.pattern(node.branch))
+            except TemplateError:
+                continue  # reported with the node's other templates
+            if node.for_each is not None and not any(r.name in ("item", "index") for r in refs):
+                self.error(where, "a for_each node makes a worktree per item, so `branch` must use `item` or `index`")
+            if any(r.name == "workspace" and r.path and r.path[0] == node_id for r in refs):
+                self.error(where, "`branch` renders before this node's worktree exists, so it can't read its workspace")
+            fixed = "".join(t for t in itertools.takewhile(lambda t: isinstance(t, str), pattern))
+            if not pattern:
+                self.error(where, "`branch` is empty: name a branch, or leave `branch` out for wf/<run-id>/...")
+                continue
+            if fixed == "wf" and len(fixed) == len(pattern) or fixed.startswith("wf/"):
+                self.error(where, "wf and wf/... are where wf names branches itself (wf/<run-id>/...); pick another name")
+            self.branches.append(_Branch(node_id, pattern, self._inputs_read(refs, node_id), where))
+        for node_id, sub in self.subs.items():
+            self.branches += self._lifted(node_id, sub)
+        for i, b in enumerate(self.branches):
+            for a in self.branches[:i]:
+                if (a.via is None or a.via != b.via) and _clash(a.pattern, b.pattern):  # one sub-workflow's: checked there
+                    self.error(b.where, f"`{a.label}` and `{b.label}` could name the same branch, or one under the other "
+                                        "(fix/a and fix/a/b, which git can't have both of): make their fixed text differ, "
+                                        "like fix/... and review/..., or name it on one node and run the other in its workspace")
+                    break
+
+    def _lifted(self, node_id: str, sub: _Result) -> list["_Branch"]:
+        """The names a sub-workflow's `branch` fields give, as this file sees them: with what `with`
+        passes in for {{ start.<input> }}, and reading this file's inputs through `with`."""
+        node, found = self.nodes[node_id], []
+        for b in sub.branches:
+            pattern, reads, per_item = [], set(), False
+            for token in b.pattern:
+                given = node.with_.get(token.input) if isinstance(token, templates.Hole) else None
+                if not isinstance(token, templates.Hole):
+                    pattern.append(token)
+                elif isinstance(given, str):
+                    try:
+                        pattern += templates.pattern(given)
+                    except TemplateError:
+                        pattern.append(templates.Hole())
+                else:
+                    pattern.append(templates.Hole())  # the sub-workflow's own input: no input of this file
+            for name in b.reads:
+                given = node.with_.get(name)
+                try:
+                    refs = templates.references(given) if isinstance(given, str) else []
+                except TemplateError:
+                    continue
+                reads |= self._inputs_read(refs, node_id)
+                per_item |= any(r.name in ("item", "index") for r in refs)
+            if node.for_each is not None and not per_item:
+                self.error(f"nodes.{node_id}.with", f"`{node_id}` runs {node.workflow} once per item, and its `{b.label}` "
+                                                    "would name the same branch every time: give that node's `branch` "
+                                                    "an input that `with` fills from `item` or `index`")
+            found.append(_Branch(f"{node_id}/{b.label}", _folded(pattern), frozenset(reads), f"nodes.{node_id}", node_id))
+        return found
+
+    def _inputs_read(self, refs: list[Ref], node_id: str) -> frozenset[str]:
+        """The start inputs these refs of a node read, and the ones its for_each list reads if they
+        read `item` or `index`: the inputs a `branch` name depends on."""
+        node = self.nodes[node_id]
+        if node.for_each is not None and any(r.name in ("item", "index") for r in refs):
+            try:
+                refs = [*refs, *templates.references(node.for_each, expression=True)]
+            except TemplateError:
+                pass
+        if any(r.name == "start" and not r.path for r in refs):
+            return frozenset(self.wf.start.input)
+        return frozenset(r.path[0] for r in refs if r.name == "start" and isinstance(r.path[0], str))
 
     def _end(self) -> None:
         for name, value in self.wf.end.output.items():
@@ -769,6 +879,59 @@ def _cycles(graph: dict[str, tuple | list]) -> list[list[str]]:
         if node not in state:
             visit(node, [])
     return found
+
+
+@dataclass(frozen=True)
+class _Branch:
+    """A name a `branch` field gives, as one file sees it."""
+
+    label: str  # the node's path, e.g. impl, or each/impl in the sub-workflow `each` runs
+    pattern: tuple  # see _folded
+    reads: frozenset[str]  # the start inputs of this file the name depends on
+    where: str  # where a problem with it is reported
+    via: str | None = None  # the workflow node it comes through, if it's a sub-workflow's
+
+
+def _folded(pattern) -> tuple:
+    """A templates.pattern() ready to compare: each run of fixed text stripped, since the name is
+    stripped and can't hold whitespace, and casefolded on every machine, since git ignores case
+    on macOS and Windows and a workflow file that validates here may run there."""
+    found, text = [], ""
+    for token in (*pattern, None):
+        if isinstance(token, str):
+            text += token
+            continue
+        found += text.strip().casefold()
+        text = ""
+        if token is not None:
+            found.append(token)
+    return tuple(found)
+
+
+def _clash(a: tuple, b: tuple) -> bool:
+    """Could two `branch` patterns (_folded) name the same branch, or one under the other, like
+    fix/a and fix/a/b? A Hole stands for any text without a `/`: an input that holds one is
+    caught when the run makes the branch."""
+    return _meet(a, b) or _meet((*a, "/"), b, prefix=True) or _meet((*b, "/"), a, prefix=True)
+
+
+def _meet(p: tuple, q: tuple, prefix: bool = False) -> bool:
+    """Is there a name p can give that q can give too (with `prefix`: that a name q gives starts with)?"""
+
+    @functools.cache
+    def at(i: int, j: int) -> bool:
+        if i == len(p):
+            return prefix or all(isinstance(t, templates.Hole) for t in q[j:])
+        if j == len(q):
+            return all(isinstance(t, templates.Hole) for t in p[i:])
+        x, y = p[i], q[j]
+        if isinstance(x, templates.Hole):  # x writes nothing more, or y's next character too
+            return at(i + 1, j) or (y != "/" and at(i, j + 1))
+        if isinstance(y, templates.Hole):
+            return at(i, j + 1) or (x != "/" and at(i + 1, j))
+        return x == y and at(i + 1, j + 1)
+
+    return at(0, 0)
 
 
 def _hint(name: str, options) -> str:

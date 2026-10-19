@@ -78,7 +78,8 @@ likely causes and the change that fixes each.
 1. **Gather evidence.** `wf report --workflow <name> --real --json` over its
    recent runs (`--version` keeps one version of the file). For each node the
    notes name, read its attempt logs
-   (`.wf/runs/<run-id>/nodes/<node>/<pass>/attempt-<n>.log`). Done when every
+   (`<run folder>/nodes/<node>/<pass>/attempt-<n>.log`; `wf status <run-id> --json`
+   gives the run folder as `dir`). Done when every
    note in the report has a cause written next to it.
 2. **Change one thing per cause**, the smallest change that removes it.
 3. **Prove it.** Validate, dry-run the paths you touched, and after the next

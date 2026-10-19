@@ -26,6 +26,11 @@ source does the waiting. Writing, changing or improving a workflow file is the
 
 Work in the project folder the workflow belongs to: wf keeps runs in that
 folder's `.wf/runs/`, and every later `wf` command for the run must run there.
+With `WF_RUNS_DIR` set (or `--runs-dir <dir>` on every command), the run folders
+go outside the project instead, to `<dir>/<repo key>/`. Then the project's
+working tree and `.git/info/exclude` stay as they were: only `workspace: new`
+adds its branches and worktree records under `.git`. Use that for a clone you
+must not write into. The commands wf prints for the run include `--runs-dir`.
 
 1. `wf validate <workflow.yaml>`. Fix errors before going on; read warnings.
 2. `wf run <workflow.yaml> name=value ... --detach --json`. It prints
@@ -86,9 +91,10 @@ acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`.
 
 `succeeded`
 : `output` is the workflow's end output. Code changes are on branches named
-  `wf/<run-id>/...` (their worktrees are already removed); wf never merges or
-  pushes unless the workflow does. Hand any branch to the project's normal
-  ship path. The source retires itself.
+  `wf/<run-id>/...`, or on the branch a node's `branch` names (a workflow can
+  take it as an input, such as `branch=fm/<task>`). Their worktrees are already
+  removed. wf never merges or pushes unless the workflow does. Hand any branch
+  to the project's normal ship path. The source retires itself.
 
 To abandon a run, retire its source with the printed owner token
 (`bin/fm-procevent.sh retire wf-<run-id> --if-owner <token>`) and tell the

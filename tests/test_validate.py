@@ -425,6 +425,96 @@ def test_workspace_values(tmp_path):
     ])
 
 
+def test_branch_names_a_new_worktree_once_per_item(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, branch: fm/a}
+        b: {needs: [start], command: x, workspace: new, for_each: '["x", "y"]', branch: fm/b}
+        c: {needs: [start], command: x, workspace: new, for_each: '["x", "y"]', branch: "c/{{ index }}"}
+        d: {needs: [start], command: x, workspace: new, branch: "d/{{ workspace.d.path }}"}
+        e: {needs: [start], command: x, workspace: new, branch: "wf/{{ start.task }}"}
+        f: {needs: [start], command: x, workspace: new, branch: "f/{{ nope }}"}
+        g: {needs: [start], command: x, workspace: new, branch: ""}
+        h: {needs: [start], command: x, workspace: new, branch: "  "}
+    """))
+    assert_problems(report, [
+        ("error", "nodes.f.branch", "unknown name `nope`"),
+        ("error", "nodes.a.branch", "but this node's workspace is `repo`"),
+        ("error", "nodes.b.branch", "must use `item` or `index`"),
+        ("error", "nodes.d.branch", "can't read its workspace"),
+        ("error", "nodes.e.branch", "where wf names branches itself"),
+        ("error", "nodes.g.branch", "`branch` is empty"),
+        ("error", "nodes.h.branch", "`branch` is empty"),
+    ])
+
+
+@pytest.mark.parametrize("name", ["wf", "WF/{{ start.task }}", " wf "])
+def test_branch_cannot_be_wf_or_under_it_in_any_case(tmp_path, name):
+    report = check(tmp_path, flow(f'a: {{needs: [start], command: x, workspace: new, branch: "{name}"}}'))
+    assert_problems(report, [("error", "nodes.a.branch", "wf and wf/... are where wf names branches itself")])
+
+
+def test_two_nodes_that_could_name_the_same_branch_are_refused(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, branch: "fix/{{ start.task }}"}
+        b: {needs: [start], command: x, branch: "fix/{{ start.task }}"}
+        c: {needs: [start], command: x, branch: "review/{{ start.task }}"}
+        d: {needs: [start], command: x, branch: "review/{{ start.task }}/2"}
+        e: {needs: [start], command: x, branch: pick/one}
+        f: {needs: [start], command: x, for_each: '["one", "two"]', branch: "pick/{{ item }}"}
+        g: {needs: [start], command: x, branch: " pick/one "}
+    """).replace("defaults:\n", "defaults:\n  workspace: new\n"))
+    assert_problems(report, [
+        ("error", "nodes.b.branch", "`a` and `b` could name the same branch"),
+        ("error", "nodes.d.branch", "`c` and `d` could name the same branch"),
+        ("error", "nodes.f.branch", "`e` and `f` could name the same branch"),
+        ("error", "nodes.g.branch", "`e` and `g` could name the same branch"),  # names are stripped
+    ])
+
+
+def test_branches_git_cannot_have_side_by_side_are_refused(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, branch: fm/task}
+        b: {needs: [start], command: x, branch: fm/task/review}
+        c: {needs: [start], command: x, branch: FIX/one}
+        d: {needs: [start], command: x, branch: fix/one}
+        e: {needs: [start], command: x, branch: "pick {{ start.task }}"}
+        f: {needs: [start], command: x, branch: pick}
+    """).replace("defaults:\n", "defaults:\n  workspace: new\n"))
+    assert_problems(report, [
+        ("error", "nodes.b.branch", "`a` and `b` could name the same branch, or one under the other"),
+        ("error", "nodes.d.branch", "`c` and `d` could name the same branch"),  # on any machine: git ignores case on macOS
+        ("error", "nodes.f.branch", "`e` and `f` could name the same branch"),  # an empty task renders `pick`
+    ])
+
+
+def test_fixed_text_between_expressions_tells_branches_apart(tmp_path):
+    report = check(tmp_path, flow("""
+        author: {needs: [start], command: x, for_each: '["a", "b"]', branch: "fm/{{ start.task }}/author/{{ index }}"}
+        review: {needs: [start], command: x, for_each: '["a", "b"]', branch: "fm/{{ start.task }}/review/{{ index }}"}
+    """).replace("defaults:\n", "defaults:\n  workspace: new\n"))
+    assert_problems(report, [])
+
+
+SUB_BRANCH = flow(
+    'impl: {needs: [start], command: x, workspace: new, branch: "{{ start.branch }}"}',
+    inputs="branch: {type: string}",
+)
+
+
+def test_branches_named_in_a_sub_workflow_are_checked_against_the_parent(tmp_path):
+    report = check(tmp_path, flow("""
+        ship: {needs: [start], command: x, workspace: new, branch: fm/task}
+        same: {needs: [start], workflow: sub.yaml, with: {branch: fm/task}}
+        apart: {needs: [start], workflow: sub.yaml, with: {branch: "review/{{ start.task }}"}}
+        each: {needs: [start], workflow: sub.yaml, for_each: '["a", "b"]', with: {branch: "fix/{{ item }}"}}
+        every: {needs: [start], workflow: sub.yaml, for_each: '["a", "b"]', with: {branch: "all/{{ start.task }}"}}
+    """), sub=SUB_BRANCH)
+    assert_problems(report, [
+        ("error", "nodes.every.with", "`every` runs sub.yaml once per item, and its `impl` would name the same branch"),
+        ("error", "nodes.same", "`ship` and `same/impl` could name the same branch"),
+    ])
+
+
 # ---------- warnings ----------
 
 BRANCHES = """
@@ -485,6 +575,24 @@ def test_unquoted_agent_output_in_a_command_warns(tmp_path):
     assert_problems(report, [
         ("warning", "nodes.raw.command", "output from `a` into the shell unquoted"),
         ("warning", "nodes.loop.command", "output from `a` into the shell unquoted"),
+    ])
+
+
+def test_a_branch_named_from_agent_output_is_untrusted_in_a_command(tmp_path):
+    report = check(tmp_path, flow("""
+        plan: {needs: [start], instruction: x, output: {slug: {type: string}}}
+        work: {needs: [plan], command: x, workspace: new, branch: "fm/{{ plan.slug }}"}
+        mine: {needs: [start], command: x, workspace: new, branch: "own/{{ start.task }}"}
+        raw: {needs: [work], command: "echo shipping {{ workspace.work.branch }}"}
+        shared: {needs: [work], command: x, workspace: work}
+        through: {needs: [shared], command: "echo {{ workspace.shared.branch }}"}
+        quoted: {needs: [work], command: "echo {{ workspace.work.branch | quote }}"}
+        path: {needs: [work], command: "cd {{ workspace.work.path }}"}
+        input: {needs: [mine], command: "echo {{ workspace.mine.branch }}"}
+    """))
+    assert_problems(report, [
+        ("warning", "nodes.raw.command", "output from `workspace.work` into the shell unquoted"),
+        ("warning", "nodes.through.command", "output from `workspace.shared` into the shell unquoted"),
     ])
 
 

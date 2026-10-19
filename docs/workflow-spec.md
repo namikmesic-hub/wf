@@ -17,7 +17,8 @@ typed, later steps, conditions and fan-outs can rely on their fields, and
 - **Pass**: one run of a node. A node inside a loop has several passes.
 - **Item**: one element of a `for_each` list. Each item runs separately.
 - **Attempt**: one try at a pass or item. Retries and fallbacks add attempts.
-- **Run**: one execution of a workflow, with its own folder under `.wf/runs/`.
+- **Run**: one execution of a workflow, with its own folder under `.wf/runs/` (or in a runs
+  folder, see [Run folder](#run-folder)).
 
 ## Example
 
@@ -136,6 +137,12 @@ end:
 
 `wf run` exit codes: 0 succeeded, 1 failed or stopped by a limit, 2 paused waiting for a person
 (only with `--no-input` or when there's no terminal).
+
+Every command that makes or finds runs (`run`, `resume`, `answer`, `wait`, `status`, `list`,
+`report`, `discard`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
+[Run folder](#run-folder)). The commands that wf prints for a run in a runs folder, like
+`wf resume <run-id>`, include the option, so they find the run whether or not
+`WF_RUNS_DIR` is set where you type them.
 
 ### Setup
 
@@ -291,6 +298,7 @@ Fields every kind accepts:
 | `on_item_error` | `fail` | `fail` or `continue`. |
 | `workspace` | `repo` | Where the node runs. See [Workspaces](#workspaces). |
 | `base` | the workflow's base commit | Git ref that a `new` workspace branches from. |
+| `branch` | `wf/<run-id>/...` | The name of a `new` workspace's branch, as a template. See [Workspaces](#workspaces). |
 | `timeout` | `60m` (none for human and workflow nodes) | Per attempt. Written like `90s`, `30m`, `2h`. An agent attempt's timeout starts once it has an [agent slot](#agent-slots). A workflow node's steps have their own timeouts. |
 | `retry` | 1 for agent nodes, 0 for others | Extra attempts after a failure. |
 | `description` | none | Shown in progress output and by `wf graph`. |
@@ -600,22 +608,22 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | Runs of the user that use the same `~/.wf` | They share one set of slots, in `~/.wf/agent-slots/`. Runs with another `WF_HOME` have slots of their own. | `workflow/capacity.py:54` | `test_two_runs_in_separate_processes_share_the_cap`, `test_each_wf_home_has_its_own_slots`, `test_a_slot_file_names_its_holder` |
-| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:397` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
+| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:441` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
 | `WF_MAX_AGENTS` is set | It sets the same cap, and wins over `max_agents` in the file, which is still checked. | `workflow/capacity.py:64`, `workflow/capacity.py:66` | `test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home`, `test_a_bad_cap_stops_wf_run_before_the_run_exists` |
-| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:136` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
+| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:141` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
 | `config.yaml` names a setting wf doesn't know, or doesn't hold settings by name | The same. So a misspelt `max_agents` can't quietly mean no cap. | `workflow/settings.py:50` | `test_a_wrong_file_fails_every_read` in `tests/test_settings.py`, `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
-| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:402`, `workflow/nodes.py:420` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
+| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:446`, `workflow/nodes.py:464` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
 | An attempt holds a slot | The slot is the file `~/.wf/agent-slots/<n>`, which the attempt's process locks with `flock`. The file names its holder: pid, run, node and attempt. | `workflow/capacity.py:96`, `workflow/capacity.py:98`, `workflow/capacity.py:107` | `test_a_slot_has_one_holder_at_a_time`, `test_a_slot_file_names_its_holder` |
-| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:211` | `test_a_retry_and_a_fallback_take_a_slot_again` |
-| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:186`, `workflow/nodes.py:397` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
+| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:255` | `test_a_retry_and_a_fallback_take_a_slot_again` |
+| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:230`, `workflow/nodes.py:441` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
 | Several attempts wait for one slot | Each tries again every `POLL_SECONDS` (0.2 seconds), and the first try after the slot comes free gets it. So they get it one at a time, in an order that is not defined. | `workflow/capacity.py:46`, `workflow/capacity.py:117`, `workflow/capacity.py:120` | `test_a_wait_tries_again_every_0_2_seconds`, `test_attempts_that_wait_for_one_slot_take_it_one_at_a_time` |
-| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:410`, `workflow/nodes.py:213`, `workflow/nodes.py:214` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
-| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:406`, `workflow/nodes.py:416`, `workflow/context.py:153`, `workflow/cli.py:277` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
-| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:414` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
+| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:454`, `workflow/nodes.py:257`, `workflow/nodes.py:258` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
+| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:450`, `workflow/nodes.py:460`, `workflow/context.py:153`, `workflow/cli.py:298` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
+| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:458` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
 | A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:98` | `test_a_killed_process_frees_its_slot` |
 | A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:58` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
 | Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. | `workflow/capacity.py:95` | `test_a_smaller_cap_uses_only_the_first_slots` |
-| A `wf run` or `wf resume` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:69`, `workflow/runner.py:136` | `test_wf_run_and_wf_resume_read_the_cap_once_when_they_start` |
+| A `wf run` or `wf resume` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:69`, `workflow/runner.py:141` | `test_wf_run_and_wf_resume_read_the_cap_once_when_they_start` |
 
 ## The output tool
 
@@ -666,6 +674,22 @@ the context to fix them.
 
 - Branch names are `wf/<run-id>/` followed by the path of node ids and item indexes, for
   example `wf/<run-id>/build/2/implement`.
+- `branch` names a node's branch instead, as a template: `branch: "{{ start.branch }}"`
+  lets whoever starts the run choose the branch that carries the result. The name is
+  rendered on the node's first pass; later passes and `wf resume` keep that branch. A
+  `for_each` item, also one in a sub-workflow that a `for_each` node runs, renders its
+  name again on every pass. Worktrees go by item index, so the item fails if its index
+  names another branch than before.
+- The name can't be empty, `wf`, or under `wf/`, in any case. A branch that already
+  exists is refused, unless this run made it for the same node. So is a name that git
+  can't have beside an existing branch: `fix/a` beside `fix/a/b`, or `FIX/a` beside
+  `fix/a` where git ignores case (`core.ignorecase`, as on macOS and Windows).
+  `branches.json` in the run folder records the branches a run made.
+- `wf discard --branches` deletes a named branch while a worktree of the run has it
+  checked out, or while the branch is on the commit that the run left it on. After that,
+  somebody may have made it again or worked on it, so it stays, and discard says so. It
+  also says when git refuses to delete a branch, for example one that is checked out. A
+  dry run that succeeds deletes its named branches.
 - A node keeps the same worktree across passes, so a loop keeps working on one branch.
   Each item gets its own.
 - Worktrees live outside the repo, under `~/.wf/worktrees/`, so agents searching the repo
@@ -689,6 +713,7 @@ the context to fix them.
 .wf/runs/<run-id>/              <run-id> is like 20261018-1432-implement-k3f9
   workflow/                     copies of the workflow files as they were run
   input.json
+  branches.json                 the branches `branch` named, and where the run left them
   output.json                   the end output, once the run succeeds
   status.json                   running | waiting | succeeded | failed | limit
   events.jsonl                  one line per event: node started, finished, route taken, ...
@@ -703,6 +728,17 @@ the context to fix them.
 - `.wf/` is added to the repo's `.git/info/exclude`, so it never shows up in `git status`.
 - While a run is `running`, `agents_waiting` in `status.json` lists the attempts waiting
   for an [agent slot](#agent-slots).
+- A runs folder keeps run folders outside the repo instead: `--runs-dir <dir>`, or the
+  `WF_RUNS_DIR` environment variable (the option wins). Run folders then go to
+  `<dir>/<repo key>/<run-id>/`. The repo key is the repo folder's name and a hash of its
+  path, like `wf-3f9a1c2b4d5e`, so the runs of two repos never mix. The repo's working
+  tree and `.git/info/exclude` then stay as they were. `workspace: new` still adds its
+  branches, and git's records of its worktrees in `.git/worktrees/`; the worktree folders
+  are under `~/.wf/worktrees/` (see [Workspaces](#workspaces)). A runs folder inside the
+  repo goes into `.git/info/exclude`, as `.wf/` does. Later commands for the run need the
+  same setting, in the same folder. A blank value counts as no setting. For a run in
+  `.wf/runs/` while `WF_RUNS_DIR` is set, the commands that wf prints start with
+  `WF_RUNS_DIR=`, which turns the setting off for that command.
 - `wf resume` uses the copies in `workflow/`, so editing the YAML doesn't change a run
   that's already in progress.
 
@@ -729,12 +765,25 @@ Errors:
 10. Each short-form end output is a single field reference.
 11. Each sub-workflow exists and is valid, no workflow includes itself (directly or
     indirectly), and `with` sets every required input with a matching type.
+12. `branch` is only on nodes with `workspace: new`. On a `for_each` node it uses `item` or
+    `index`. A `for_each` workflow node gives `item` or `index`, through `with`, to each
+    `branch` in its sub-workflow. `branch` isn't empty, isn't `wf` or under `wf/` in any
+    case, and doesn't read the node's own workspace.
+    No two `branch` fields, in a file and the sub-workflows it runs, can name the same
+    branch, or a branch and one under it (`fix/a` and `fix/a/b`). Names compare with case
+    ignored, on every machine: git ignores case on macOS and Windows, so a file that
+    validates on Linux must also run there. The spaces around a name don't count. The
+    check reads each `{{ }}` or `{% %}` as text without a `/`, and a sub-workflow's
+    `{{ start.<input> }}` as the value that `with` gives. So `fix/{{ start.task }}` and
+    `review/{{ start.task }}` are apart, and so are `fm/{{ start.task }}/author` and
+    `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`
   that checks it.
 - A `command` uses node outputs without `env` or `| quote`, or uses a `start` input that a
-  parent workflow fills from node output.
+  parent workflow fills from node output, or a `workspace.<node>.branch` that a `branch`
+  names from node output.
 - An agent with `access: full` reads output from a node with `web: true`. Web pages can
   contain instructions aimed at agents, and this passes them to one with no restrictions.
 - Two `edit` nodes could run at the same time in the same workspace.
