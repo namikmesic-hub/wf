@@ -476,6 +476,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         if source:
             emit({"event": "session_continued", **_label(job), "attempt": number})
             (folder / "instruction.md").write_text(instruction, encoding="utf-8")
+        spec.emit({"event": "session_started", "model": model, "effort": effort, "pid": os.getpid(),
+                   "log": _in_run(ctx, spec.log)})
         spent_before, spent = usage.cost_usd, Usage()
         try:
             for turn, text in enumerate([instruction] + [output_tool.REMINDER] * output_tool.REMINDERS, 1):
@@ -508,7 +510,10 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             ctx.add_usage(cut_off)
             session_facts["id"] = session.id
             record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
-            await session.close()
+            try:
+                await session.close()
+            finally:
+                spec.emit({"event": "session_ended"})
 
     result, number = await _attempts(job, ctx, emit, attempt, names,
                                      slot=lambda number, name: _agent_slot(job, ctx, emit, number, name))
@@ -521,6 +526,14 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
 
 DONT_COMMIT = "Don't commit: the runner commits your changes when you're done."
+
+
+def _in_run(ctx: RunContext, path: Path) -> str:
+    """A path in the run folder, as the run folder's events name it: nodes/<node>/<pass>/attempt-<n>.log."""
+    try:
+        return str(path.relative_to(ctx.root.run.dir))
+    except ValueError:
+        return str(path)
 
 
 def _rendered_setting(job: Job, ctx: RunContext, harness: str, name: str, variables: dict) -> str | None:

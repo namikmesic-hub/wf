@@ -16,12 +16,17 @@ For an operator that isn't at a terminal (operate.py):
     wf run <file> --detach --json    start in the background
     wf wait <run-id>                 block until the run needs attention
     wf answer <run-id> <file>        answer what it's waiting on, and continue
-    wf status <run-id> / wf list     where runs stand (newest first)
+    wf status <run-id> / wf list     where runs stand (newest first), and in status, how far, as an estimate (progress.py)
     wf report <run-id>... | --workflow NAME   what runs did, per node (report.py)
     wf trace <run-id> [--node N] [--pass P] [--field F] [--var PATH]
                                      what one run read, decided and did, from its trace (trace_view.py)
     wf discard <run-id>...           delete runs: folders, worktrees, temp folders
     wf integrate firstmate <dir>     write the firstmate extension package (firstmate.py)
+
+To see runs as they happen (observe.py, ui.py):
+    wf sessions [run-id]             each agent session that runs now
+    wf watch <run-id>                the run's steps and tool calls, as they come
+    wf ui                            a web page on this machine: runs, graph, progress, metrics, transcripts
 
 Every command that makes or finds runs takes --runs-dir DIR (default: WF_RUNS_DIR) to keep run
 folders outside the repo, in a folder per repo under DIR, instead of in ./.wf/runs (runs.py).
@@ -40,12 +45,13 @@ import argparse
 import asyncio
 import getpass
 import json
+import os
 import re
 import sys
 import webbrowser
 from pathlib import Path
 
-from . import diagram, firstmate, operate, report, runner, runs, spec, trace_view, validate, workspaces
+from . import diagram, firstmate, observe, operate, progress, report, runner, runs, spec, trace_view, ui, validate, workspaces
 from .tools import keychain, signin
 from .tools.catalog import TOOLS
 
@@ -142,6 +148,25 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--json", action="store_true")
     status.add_argument("--runs-dir", **runs_dir)
     status.set_defaults(handler=_status)
+
+    sessions = commands.add_parser("sessions", help="each agent session that runs now, in this folder's runs or in one run")
+    sessions.add_argument("run_id", nargs="?", metavar="run-id")
+    sessions.add_argument("--json", action="store_true")
+    sessions.add_argument("--runs-dir", **runs_dir)
+    sessions.set_defaults(handler=_sessions)
+
+    watching = commands.add_parser("watch", help="print a run's steps and tool calls as they come, until it needs attention")
+    watching.add_argument("run_id", metavar="run-id")
+    watching.add_argument("--from-start", action="store_true", help=f"print every event so far first, not the last {observe.WATCH_BACK}")
+    watching.add_argument("--runs-dir", **runs_dir)
+    watching.set_defaults(handler=_watch)
+
+    page = commands.add_parser("ui", help="a web page on this machine that shows runs: graph, progress, metrics, transcripts")
+    page.add_argument("--port", type=int, default=ui.PORT, help=f"the port on 127.0.0.1 (default {ui.PORT}, or 0 for any free one)")
+    page.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
+    page.add_argument("--open", action="store_true", help="open the page in the browser")
+    page.add_argument("--runs-dir", **runs_dir)
+    page.set_defaults(handler=_ui)
 
     examples = commands.add_parser("examples", help="copy wf's complete example workflows into a folder")
     examples.add_argument("dir", nargs="?", type=Path, default=Path("wf-examples"))
@@ -311,8 +336,50 @@ def _status(args) -> int:
     if run is None:
         return 1
     current = operate.state(run)
-    print(json.dumps(current, indent=2, ensure_ascii=False, default=str) if args.json else _describe(current))
+    current["progress"] = progress.of(run, current.get("status"))
+    if args.json:
+        print(json.dumps(current, indent=2, ensure_ascii=False, default=str))
+    else:
+        how_far = current["progress"] and current.get("status") != "succeeded"
+        print(_describe(current) + (f"\n  {progress.describe(current['progress'])}" if how_far else ""))
     return 0
+
+
+def _sessions(args) -> int:
+    if args.run_id:
+        run = _find(args.run_id, args.runs_dir)
+        if run is None:
+            return 1
+        chosen = [run]
+    else:
+        chosen = runs.all_runs(Path.cwd(), args.runs_dir)
+    found = [session for run in chosen for session in observe.sessions(run)]
+    print(json.dumps(found, indent=2, ensure_ascii=False, default=str) if args.json else observe.table(found))
+    return 0
+
+
+def _watch(args) -> int:
+    run = _find(args.run_id, args.runs_dir)
+    if run is None:
+        return 1
+    try:
+        current = observe.watch(run, back=None if args.from_start else observe.WATCH_BACK)
+    except KeyboardInterrupt:  # the usual way to stop watching
+        return 0
+    print(_describe(current))
+    return 0
+
+
+def _ui(args) -> int:
+    if args.all_repos and not (args.runs_dir or os.environ.get(runs.RUNS_DIR, "").strip()):
+        print("wf ui: --all-repos needs a runs folder: --runs-dir DIR, or WF_RUNS_DIR", file=sys.stderr)
+        return 1
+    try:
+        return ui.serve(ui.Source(Path.cwd(), args.runs_dir, args.all_repos), args.port,
+                        opened=webbrowser.open if args.open else None)
+    except OSError as error:
+        print(f"wf ui: can't listen on {ui.HOST}:{args.port}: {error.strerror or error}", file=sys.stderr)
+        return 1
 
 
 def _list(args) -> int:

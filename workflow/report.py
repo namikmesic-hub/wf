@@ -34,13 +34,13 @@ from .runs import Run
 def build(runs: list[Run]) -> dict:
     summaries, nodes, routes, failures_at = [], defaultdict(_empty), {}, Counter()
     for run in runs:
-        events = _events(run)
+        logged = events(run)
         status = run.status()
         summary = {
             "run": run.id, "workflow": run.info().get("workflow"), "status": status.get("status"),
             "dry_run": bool(run.info().get("dry_run")), "version": version(run),
-            "started": events[0]["time"] if events else None, "ended": events[-1]["time"] if events else None,
-            "duration_s": _seconds(events[0]["time"], events[-1]["time"]) if events else 0,
+            "started": logged[0]["time"] if logged else None, "ended": logged[-1]["time"] if logged else None,
+            "duration_s": _seconds(logged[0]["time"], logged[-1]["time"]) if logged else 0,
             "tokens": 0, "cost_usd": 0.0,
         }
         if status.get("status") == "failed":
@@ -49,7 +49,7 @@ def build(runs: list[Run]) -> dict:
         seen, started, counted = set(), {}, {}  # counted: what each (node, pass) has reported spending
         failed_pass: dict = {}  # node -> its pass that failed: `wf retry` reruns it, timed from its next event
         taken_here: Counter = Counter()  # by the route's key and the exact place (build[2]/review)
-        for event in events:
+        for event in logged:
             kind, name = event.get("event"), _name(event.get("node") or "")
             if not name:  # run-level events (limit, warnings) belong to no node
                 continue
@@ -246,7 +246,8 @@ def text(found: dict) -> str:
     return "\n".join(lines)
 
 
-def _events(run: Run) -> list[dict]:
+def events(run: Run) -> list[dict]:
+    """The run's events.jsonl, one dict per line (a damaged line is left out)."""
     path = run.dir / "events.jsonl"
     if not path.exists():
         return []

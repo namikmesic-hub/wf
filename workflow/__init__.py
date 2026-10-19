@@ -42,5 +42,8 @@ Then the tools around runs, none of which LangGraph knows about:
                    played by harnesses/scripted.py
     report.py      `wf report`: what runs did, per node and route
     trace_view.py  `wf trace`: what one run read, decided and did, from its trace
+    progress.py    how far a run is on its way from start to end, as an estimate (`wf status`)
+    observe.py     the agent sessions that run now (`wf sessions`), and the event stream (`wf watch`)
+    ui.py          `wf ui`: a web page on this machine (ui/: the page) with the graph, progress and transcripts
     examples/      two complete workflows (`wf examples` copies them out)
 """

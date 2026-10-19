@@ -220,6 +220,6 @@ def test_a_paused_limit_names_the_limit_to_raise(repo, capsys):
     cli.main(["status", only_run().name, "--json"])
     assert json.loads(capsys.readouterr().out)["retry"] == f"wf retry {only_run().name} --limit cost_usd=<more>"
     cli.main(["status", only_run().name])
-    line = capsys.readouterr().out.strip()
+    line = capsys.readouterr().out.splitlines()[0]
     assert ": paused at a limit: " in line
     assert line.endswith(f"(wf retry {only_run().name} --limit cost_usd=<more>)")
