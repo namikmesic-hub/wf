@@ -1,0 +1,61 @@
+# wf for firstmate
+
+Lets a [firstmate](https://github.com/kunchenguid/firstmate) first mate start wf
+runs, get woken when one needs attention, answer its questions, resume it after
+a failure, and report the result.
+
+It has two parts:
+
+- **An extension package** (`process-event-adapter/1`), written by
+  `wf integrate firstmate <dir>`. firstmate polls it for each watched run and
+  wakes the first mate on every new state: waiting, failed, stopped, limit,
+  succeeded. The logic is in `workflow/firstmate.py`; the package is a small
+  shim that runs it with this wf's Python.
+- **A skill**, `wf/SKILL.md`, that tells the first mate how to start, watch,
+  answer, resume and report wf runs.
+
+## Setup
+
+1. Put `wf` on the first mate's PATH, for example
+   `uv tool install --editable /path/to/wf`.
+2. Write the package to a folder outside any git repository, then bind it in
+   your firstmate checkout (firstmate's consent step):
+
+   ```sh
+   wf integrate firstmate ~/.local/share/firstmate-packages/wf
+   bin/fm-extension.sh bind ~/.local/share/firstmate-packages/wf \
+     --adapter wf --trust-same-user-code --consent artifact-references
+   bin/fm-extension.sh verify io.github.namikmesic.wf
+   ```
+
+3. Copy `wf/SKILL.md` into your firstmate checkout as
+   `.agents/skills/wf/SKILL.md`, and add a trigger line to
+   `.agents/skills/agent-skill-trigger-index/SKILL.md`:
+
+   ```
+   - `wf` - load before starting a wf run, on any `procevent wf <source-id> <sequence>` check wake, and before answering, resuming or reporting a wf run.
+   ```
+
+4. So the first mate can also write and improve workflows, install
+   `skills/wf-workflows/` the same way (see [skills/README.md](../../skills/README.md)).
+
+The binding points at a copy firstmate keeps in its home. After changing
+`workflow/firstmate.py`, nothing needs rebinding; after `wf integrate` writes a
+new package version, bind it again.
+
+## What the first mate gets
+
+| Command | Use |
+|---|---|
+| `wf run <file> ... --detach --json` | start a run in the background |
+| `wf answer <run-id> <answers.json> [--detach]` | answer the questions a run waits on |
+| `wf resume <run-id> --detach` | continue a failed or stopped run |
+| `wf status <run-id> --json`, `wf list --json` | where runs stand |
+| `wf wait <run-id> [--consumer NAME]` | block until a run needs attention (what the adapter polls) |
+
+Only one process drives a run at a time (a lock in the run folder), so the
+first mate can't resume a run that is still going.
+
+firstmate gives its built-in answers channel only to its own adapters, so the
+first mate answers wf questions itself with `wf answer`, under its usual
+ask-user rules.

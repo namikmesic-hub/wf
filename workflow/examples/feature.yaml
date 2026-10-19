@@ -1,0 +1,78 @@
+version: 1
+name: feature
+description: Plan a feature, build each part in parallel, merge, open a PR.
+
+defaults:
+  harness: claude-code
+  harnesses:
+    claude-code: {model: claude-opus-5-5, effort: high}
+
+limits:
+  cost_usd: 60
+  tokens: 20000000     # the review step runs on Codex, which reports no dollar cost
+
+types:
+  task:
+    title: {type: string}
+    details: {type: string, description: What to build and how to check it}
+
+start:
+  input:
+    feature: {type: string, description: The feature to build}
+
+nodes:
+  plan:
+    needs: [start]
+    instruction: |
+      Split this feature into independent tasks that change different files:
+      {{ start.feature }}
+    output:
+      tasks: {type: array, maxItems: 5, items: {$ref: task}}
+
+  approve:
+    needs: [plan]
+    human: |
+      Build these tasks?
+      {% for t in plan.tasks %}
+      - {{ t.title }}
+      {% endfor %}
+    output:
+      approved: {type: boolean}
+    routes:
+      - when: approve.approved
+        to: build
+      - to: end
+
+  build:
+    for_each: plan.tasks
+    workflow: implement.yaml
+    with:
+      task: "{{ item.title }}: {{ item.details }}"
+    max_parallel: 3
+    on_item_error: continue
+    routes:
+      - when: build | selectattr("passed") | list
+        to: merge
+      - to: end
+
+  merge:
+    access: full
+    workspace: new
+    instruction: |
+      Merge these branches into the current branch and resolve any conflicts:
+      {% for b in build if b.passed %}
+      - {{ b.branch }}: {{ b.summary }}
+      {% endfor %}
+    output:
+      summary: {type: string}
+
+  open_pr:
+    needs: [merge]
+    command: git push -u origin HEAD && gh pr create --fill
+    workspace: merge
+
+end:
+  output:
+    pr_url:
+      type: [string, "null"]
+      value: "{{ open_pr.stdout | trim if open_pr else none }}"

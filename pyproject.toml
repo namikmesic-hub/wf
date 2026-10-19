@@ -1,0 +1,44 @@
+[project]
+name = "wf"
+version = "0.1.0"
+description = "wf: run YAML workflows of coding-agent steps (Claude Code and Codex; Cursor planned) on LangGraph."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "claude-agent-sdk>=0.2.168",
+    "jinja2>=3.1.6",
+    "jsonschema>=4.26.0",
+    "langgraph>=1.2.16",
+    "langgraph-checkpoint-sqlite>=3.1.2",
+    "pydantic>=2.14",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+wf = "workflow.cli:main"
+
+[project.optional-dependencies]
+cursor = [
+    "cursor-sdk>=1.0.38",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "workflow"
+module-root = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+markers = [
+    "harness: runs a real coding agent, which costs money or quota. Opt in with `-m harness`.",
+]
+addopts = "-m 'not harness'"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

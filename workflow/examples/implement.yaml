@@ -1,0 +1,95 @@
+version: 1
+name: implement
+description: Make a change, test it, and loop until review passes.
+
+defaults:
+  harness: claude-code
+  harnesses:
+    claude-code: {model: claude-opus-5-5, effort: high}
+
+start:
+  input:
+    task: {type: string, description: The change to make}
+    test_command: {type: string, default: uv run pytest -q, description: Runs the tests}
+
+nodes:
+  explore:
+    needs: [start]
+    instruction: |
+      Find the code involved in this task and plan the change. Don't edit anything.
+      {{ start.task }}
+    output:
+      plan: {type: string}
+      files: {type: array, items: {type: string}}
+
+  implement:
+    needs: [explore]
+    access: edit
+    workspace: new
+    instruction: |
+      {{ start.task }}
+
+      Plan: {{ explore.plan }}
+      Start with: {{ explore.files | join(", ") }}
+      {% if history.implement %}
+
+      This is attempt {{ history.implement | length + 1 }}. Your earlier work is committed on
+      this branch, so run `git log` and `git diff {{ workspace.implement.base }}` first.
+      Notes from earlier attempts:
+      {% for attempt in history.implement %}
+      - {{ attempt.notes }}
+      {% endfor %}
+      {% endif %}
+      {% if tests and tests.exit_code != 0 %}
+
+      The tests failed after your last attempt (exit code {{ tests.exit_code }}):
+      {{ tests.stdout }}
+      {{ tests.stderr }}
+      {% endif %}
+      {% if review and review.blocking_issues %}
+
+      A reviewer found problems with your last attempt. Fix all of them:
+      {% for issue in review.blocking_issues %}
+      - {{ issue }}
+      {% endfor %}
+      {% endif %}
+    output:
+      summary: {type: string}
+      notes: {type: string, description: "What you changed, what you tried and dropped, open concerns"}
+
+  tests:
+    needs: [implement]
+    command: "{{ start.test_command }}"
+    workspace: implement
+    check: false
+
+  review:
+    needs: [tests]
+    harness: codex
+    workspace: implement
+    instruction: |
+      Review the changes on this branch (git diff {{ workspace.implement.base }}...HEAD).
+      The task was: {{ start.task }}
+
+      Tests exited with code {{ tests.exit_code }}:
+      {{ tests.stdout }}
+      {{ tests.stderr }}
+
+      Earlier reviews: {{ history.review | tojson }}
+      Only list problems that must be fixed, and check that earlier ones were fixed.
+    output:
+      blocking_issues: {type: array, items: {type: string}}
+    routes:
+      - when: tests.exit_code == 0 and not review.blocking_issues
+        to: end
+      - to: implement
+        max: 3
+      - to: end
+
+end:
+  output:
+    branch: "{{ workspace.implement.branch }}"
+    summary: "{{ implement.summary }}"
+    passed:
+      type: boolean
+      value: "{{ tests.exit_code == 0 and not review.blocking_issues }}"
