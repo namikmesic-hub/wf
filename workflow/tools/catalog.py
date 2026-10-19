@@ -146,6 +146,6 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in [
         resource=False,
         issuer="https://accounts.google.com",
         probe=("list_labels", {}),
-        reads=frozenset({"search_threads", "get_thread", "get_message", "list_labels", "list_drafts", "get_draft"}),
+        reads=frozenset({"search_threads", "get_thread", "get_message", "list_labels", "list_drafts"}),
     ),
 ]}

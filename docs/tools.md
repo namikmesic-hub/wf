@@ -215,7 +215,8 @@ These are the operations a node gets without `write: true`.
 An operation a server offers that isn't listed counts as a write, and so does a new one.
 The agent isn't told about it, and wf refuses a call to it.
 The lists are in `workflow/tools/catalog.py`, and `test_the_documented_reads_are_the_catalogs` checks that this table matches them.
-They follow the names each server listed on 2026-10-19.
+The Slack, Granola, Linear and Notion lists follow the names each server listed on 2026-10-19.
+The Gmail list follows the tools in Google's Gmail MCP reference for the server wf uses, last updated on 2026-07-21.
 Doctor checks each list against its server's own list, as the Doctor section says.
 So `wf tools <name> setup`, which runs doctor, checks the Gmail and Notion lists at the first sign-in.
 
@@ -225,7 +226,7 @@ So `wf tools <name> setup`, which runs doctor, checks the Gmail and Notion lists
 | `granola` | `query_granola_meetings`, `list_meetings`, `get_meetings`, `get_meeting_transcript`, `get_meeting_attachment`, `list_meeting_folders`, `get_account_info` | `switch_workspace`, which changes the workspace in the Granola app, and `sign_out` |
 | `linear` | `list_issues`, `get_issue`, `list_comments`, `list_issue_statuses`, `get_issue_status`, `list_issue_labels`, `list_projects`, `get_project`, `list_project_labels`, `list_milestones`, `get_milestone`, `list_initiatives`, `get_initiative`, `list_initiative_labels`, `get_status_updates`, `list_documents`, `get_document`, `get_attachment`, `extract_images`, `list_cycles`, `list_teams`, `get_team`, `list_users`, `get_user`, `get_workspace`, `list_custom_views`, `list_templates`, `get_template`, `get_triage_responsibility`, `get_notifications`, `list_releases`, `get_release`, `list_release_notes`, `get_release_note`, `list_release_pipelines`, `list_diffs`, `get_diff`, `get_diff_threads`, `list_agent_skills`, `get_agent_skill`, `search_documentation` | the `save_`, `create_`, `delete_`, `restore_` and `retire_` operations, and the ones that mark, share, merge or review |
 | `notion` | `notion-search`, `notion-ai-search`, `notion-fetch`, `notion-get-self`, `notion-get-users`, `notion-get-teams`, `notion-get-groups`, `notion-get-comments`, `notion-get-tool-access`, `notion-get-async-task`, `notion-list-private-pages`, `notion-list-shared-pages`, `notion-list-favorite-pages`, `notion-list-recent-pages`, `notion-list-page-backlinks`, `notion-query-data-sources`, `notion-query-multiple-data-sources`, `notion-query-meeting-notes`, `notion-memory-search`, `notion-get-file-download-urls`, `notion-download-attachment`, `notion-get-enabled-skills`, `notion-download-skill`, `notion-search-agents`, `notion-query-sessions`, `notion-search-sessions`, `notion-get-session-status`, `notion-wait-session`, `notion-list-session-events`, `notion-read-session-event`, `notion-calendar-list-calendars`, `notion-calendar-list-events`, `notion-calendar-list-coworkers-events`, `notion-calendar-list-contacts`, `notion-calendar-list-calendar-resources` | creating, changing, moving, deleting and restoring pages, databases, views, comments and skills, and starting, stopping or messaging a Custom Agent session |
-| `gmail` | `search_threads`, `get_thread`, `get_message`, `list_labels`, `list_drafts`, `get_draft` | `create_draft`, `update_draft`, `delete_draft`, `send_message`, `reply`, `forward`, `create_label`, `update_label`, `delete_label`, `label_message`, `label_thread`, `unlabel_message`, `unlabel_thread`, `update_message_labels`, `apply_sensitive_message_label`, `apply_sensitive_thread_label`, `trash_message`, `trash_thread`, `untrash_message`, `untrash_thread`, `mark_message_spam`, `mark_thread_spam`, `unmark_message_spam`, `unmark_thread_spam` |
+| `gmail` | `search_threads`, `get_thread`, `get_message`, `list_labels`, `list_drafts` | `create_draft`, `create_label`, `label_message`, `label_thread`, `unlabel_message`, `unlabel_thread` |
 
 The Notion list is wf's own choice, made from Notion's tool descriptions.
 It has `notion-ai-search`, Notion's older search, which Notion's page calls read-only and which some connections still list.
@@ -308,7 +309,8 @@ So wf gives a node with tools one of the "Yes" places only with `tools_with_shel
 Setup asks Slack and Linear for read scopes only, unless you give `--write`.
 So a Slack or Linear token that an agent read could only read, unless setup had `--write`.
 That doesn't hold for the other vendors, whose sign-ins can't be narrowed.
-A Gmail token can also draft and send mail, with the `gmail.compose` scope that Google's server needs.
+A Gmail token can also draft and send mail through the Gmail API, with the `gmail.compose` scope that Google's server needs.
+Google's server itself has no tool that sends.
 Granola and Notion tokens can do everything their servers offer.
 
 ## Sources
@@ -325,8 +327,9 @@ Checked on 2026-10-19.
 | [Notion MCP](https://developers.notion.com/docs/mcp), [getting started](https://developers.notion.com/docs/get-started-with-mcp) | The endpoint, OAuth, MCP tokens, and the local server no longer maintained |
 | [Notion's supported tools](https://developers.notion.com/docs/mcp-supported-tools) | The tools and what each does |
 | [Configure the Gmail MCP server](https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server) | The endpoint, Developer Preview, the Web application client, the scopes, and `access_type=offline` |
+| [Gmail MCP reference](https://developers.google.com/workspace/gmail/api/reference/mcp), last updated on 2026-07-21 | The Gmail operation names, for `https://gmailmcp.googleapis.com/mcp/v1`: the ten tools in its toolset table, and `create_label`, which its contents name |
 | [Google OAuth 2.0: refresh token expiration](https://developers.google.com/identity/protocols/oauth2#expiration) | Refresh tokens that expire after 7 days for an External app in Testing |
 | [MCP authorization, 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization), [its server discovery](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery) | Protected resource metadata, the discovery order, client registration and its priority, PKCE, `resource`, and `iss` |
 | [MCP versioning](https://modelcontextprotocol.io/specification/versioning) | 2026-07-28 is the current revision |
 | Each server's metadata, at `/.well-known/oauth-protected-resource` and its authorization server's `/.well-known/oauth-authorization-server` | The endpoints and scopes above |
-| Each server's tool list, as the claude.ai connectors to the same servers listed it on 2026-10-19 | The operation names. Google's page lists nine Gmail tools, and the live list had the Gmail operations above, `get_message` and `get_draft` among them. The connector's schemas are Google's own (they carry `x-google-enum-descriptions`). Doctor checks each list against wf's own connection at the first sign-in. |
+| The Slack, Granola, Linear and Notion tool lists, as the claude.ai connectors to the same servers listed them on 2026-10-19 | Those servers' operation names. claude.ai's Gmail connector listed other operations than Google's reference does, so its list doesn't give the Gmail names. Doctor checks each list against wf's own connection at the first sign-in. |
