@@ -270,9 +270,10 @@ def absent_as_none(value: Any, schema: Mapping) -> Any:
     if not isinstance(schema, Mapping):
         return value
     properties, items = schema.get("properties"), schema.get("items")
-    if isinstance(value, dict) and isinstance(properties, Mapping):
-        filled = {k: absent_as_none(v, properties.get(k, ANY)) for k, v in value.items()}
-        return filled | {k: None for k in properties if k not in value and k not in schema.get("required", ())}
+    if isinstance(value, dict):
+        filled = {k: absent_as_none(v, _field(schema, k)) for k, v in value.items()}
+        declared = properties if isinstance(properties, Mapping) else {}
+        return filled | {k: None for k in declared if k not in value and k not in schema.get("required", ())}
     if isinstance(value, list) and isinstance(items, Mapping):
         return [absent_as_none(v, items) for v in value]
     return value
@@ -286,13 +287,21 @@ def without_none(value: Any, schema: Mapping) -> Any:
     """
     if not isinstance(schema, Mapping):
         return value
-    properties, items = schema.get("properties"), schema.get("items")
+    items = schema.get("items")
     if isinstance(value, dict):
-        fields, required = properties if isinstance(properties, Mapping) else {}, schema.get("required", ())
-        return {k: without_none(v, fields.get(k, ANY)) for k, v in value.items() if v is not None or k in required}
+        required = schema.get("required", ())
+        return {k: without_none(v, _field(schema, k)) for k, v in value.items() if v is not None or k in required}
     if isinstance(value, list) and isinstance(items, Mapping):
         return [without_none(v, items) for v in value]
     return value
+
+
+def _field(schema: Mapping, name: str) -> Any:
+    """The schema of one field of an object: its own in `properties`, else `additionalProperties`."""
+    properties, others = schema.get("properties"), schema.get("additionalProperties")
+    if isinstance(properties, Mapping) and name in properties:
+        return properties[name]
+    return others if isinstance(others, Mapping) else ANY
 
 
 # ---------- looking up fields ----------

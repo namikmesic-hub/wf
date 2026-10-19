@@ -237,6 +237,13 @@ def test_an_effort_that_renders_to_none_fails_the_item_before_a_session_starts(r
     assert "item 1: `effort` of node `review` renders to none for codex, but it must be a non-empty string" in capsys.readouterr().err
 
 
+def test_a_rendered_model_and_effort_lose_their_outer_whitespace(repo, monkeypatch):
+    fake = Fake("claude-code", submit({"steps": []}))
+    install(monkeypatch, fake)
+    assert cli.main(["run", flow(PLAN + "  model: \"{{ ' opus ' }}\"\n  effort: \"{{ ' high ' }}\"\n")]) == 0
+    assert (fake.specs[0].model, fake.specs[0].effort) == ("opus", "high")
+
+
 @pytest.mark.parametrize("model, shown", [('"{{ none }}"', "none"), ('"{{ \' \' }}"', '" "'), ('"{{ 5 }}"', "5")])
 def test_a_model_must_render_to_text(repo, monkeypatch, capsys, model, shown):
     fake = Fake("claude-code", submit({"steps": []}))

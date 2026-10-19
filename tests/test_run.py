@@ -428,12 +428,12 @@ def test_an_optional_field_left_out_reads_as_none_later_and_in_the_end_output(re
     assert json.loads((folder / "nodes" / "approve" / "1" / "output.json").read_text()) == {"ok": True, "note": None}
 
 
-@pytest.mark.parametrize("fields, required, error", [
-    ("{ok: {type: boolean}, note: {type: string}}", "[ok]", None),
-    ("{ok: {type: boolean}}", "[ok]", None),  # an end schema that leaves the field out
+@pytest.mark.parametrize("fields, required, result", [
+    ("{ok: {type: boolean}, note: {type: string}}", "[ok]", {"ok": True, "note": None}),
+    ("{ok: {type: boolean}}", "[ok]", {"ok": True}),  # an end schema that leaves the field out
     ("{ok: {type: boolean}, note: {type: string}}", "[ok, note]", "answer: note: None is not of type 'string'"),
 ])
-def test_an_end_output_schema_that_requires_a_left_out_field_still_fails(repo, monkeypatch, capsys, fields, required, error):
+def test_an_end_output_schema_that_requires_a_left_out_field_still_fails(repo, monkeypatch, capsys, fields, required, result):
     write("note.yaml", NOTE.replace("    said: \"{{ after.stdout }}\"\n", f"""    answer:
       type: object
       properties: {fields}
@@ -442,11 +442,12 @@ def test_an_end_output_schema_that_requires_a_left_out_field_still_fails(repo, m
       value: "{{{{ approve }}}}"
 """))
     answers(monkeypatch, "yes", "")
-    assert cli.main(["run", "note.yaml"]) == (1 if error else 0)
-    if error:
-        assert error in capsys.readouterr().err
+    failing = isinstance(result, str)
+    assert cli.main(["run", "note.yaml"]) == (1 if failing else 0)
+    if failing:
+        assert result in capsys.readouterr().err
     else:
-        assert output(only_run())["answer"]["ok"] is True
+        assert output(only_run()) == {"note": None, "answer": result}
 
 
 # ---------- resume ----------

@@ -218,8 +218,9 @@ becomes
 
 - Every field is required unless it has `optional: true`. That key is removed from the
   final schema. A missing optional field reads as `none` in templates and end outputs,
-  at any depth, and a node's `output.json` records it as null. To let an agent or a
-  person give null, use `type: [string, "null"]`.
+  at any depth: in nested objects, list items and `additionalProperties` values. A
+  node's `output.json` records it as null. To let an agent or a person give null, use
+  `type: [string, "null"]`.
 - A value a template makes for `with` or for an end output's schema can hold that `none`.
   There, `none` in any field the schema doesn't require counts as left out: a `with`
   input that has a `default` gets the default, and an output with a missing optional

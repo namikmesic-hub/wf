@@ -298,6 +298,32 @@ def test_templates_in_model_and_effort_are_checked_where_they_are_set(tmp_path):
     ])
 
 
+
+def test_model_and_effort_are_checked_for_the_harnesses_a_node_can_run_on(tmp_path):
+    report = check(tmp_path, dedent("""
+        version: 1
+        name: t
+        defaults:
+          harness: claude-code
+          effort: "{{ nope }}"
+          harnesses: {cursor: {model: "{{ cursor_only }}"}}
+        start:
+          input:
+            seats:
+              type: array
+              maxItems: 2
+              items: {type: object, properties: {harness: {enum: [claude-code, codex]}, model: {type: string}}}
+        nodes:
+          a: {needs: [start], for_each: start.seats, instruction: x, harness: "{{ item.harness }}", model: "{{ item.model }}", effort: high}
+          b: {needs: [start], instruction: x, model: {claude-code: opus, codex: "{{ start.nope }}"}, effort: low}
+          c: {needs: [start], instruction: x}
+        end: {output: {}}
+    """))
+    assert_problems(report, [  # `a` can't run on cursor, so its default isn't checked there
+        ("error", "nodes.b.model.codex", "`start.nope`: no field `nope`"),
+        ("error", "defaults.effort", "unknown name `nope`"),
+    ])
+
 # ---------- 10. end outputs ----------
 
 

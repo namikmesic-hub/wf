@@ -419,3 +419,32 @@ def test_a_left_out_optional_field_fits_a_narrower_input_and_takes_its_default(r
     """)
     assert cli.main(["run", "main.yaml"]) == 0
     assert output() == {"said": "argon high\n"}
+
+
+def test_an_optional_field_a_sub_workflows_end_output_leaves_out_reads_as_none_in_the_parent(repo):
+    write("child.yaml", """
+        version: 1
+        name: child
+        start: {input: {}}
+        nodes:
+          say: {needs: [start], command: echo hi}
+        end:
+          output:
+            result:
+              type: object
+              properties: {said: {type: string}, note: {type: string}}
+              required: [said]
+              additionalProperties: false
+              value: "{{ {'said': say.stdout} }}"
+    """)
+    write("main.yaml", """
+        version: 1
+        name: main
+        start: {input: {}}
+        nodes:
+          child: {needs: [start], workflow: child.yaml}
+          after: {needs: [child], command: "echo {{ (child.result.note or 'no note') | quote }}"}
+        end: {output: {said: "{{ after.stdout }}", note: "{{ child.result.note }}"}}
+    """)
+    assert cli.main(["run", "main.yaml"]) == 0
+    assert output() == {"said": "no note\n", "note": None}

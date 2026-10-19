@@ -146,15 +146,20 @@ def test_check_reports_each_problem_with_its_field_path():
 NOTED = {"task": {"title": {"type": "string"}, "notes": {"type": "string", "optional": True}}}
 
 
+DEEP = schemas.object_schema({
+    "tasks": {"type": "array", "items": {"$ref": "task"}},
+    "lead": {"$ref": "task", "optional": True},
+    "by_owner": {"type": "object", "additionalProperties": {"$ref": "task"}},
+}, NOTED)
+
+
 def test_optional_fields_left_out_become_none_at_any_depth():
-    schema = schemas.object_schema(
-        {"tasks": {"type": "array", "items": {"$ref": "task"}}, "lead": {"$ref": "task", "optional": True}}, NOTED
-    )
-    value = {"tasks": [{"title": "a"}, {"title": "b", "notes": "n"}]}
-    assert schemas.absent_as_none(value, schema) == {
+    value = {"tasks": [{"title": "a"}, {"title": "b", "notes": "n"}], "by_owner": {"ada": {"title": "c"}}}
+    assert schemas.absent_as_none(value, DEEP) == {
         "tasks": [{"title": "a", "notes": None}, {"title": "b", "notes": "n"}], "lead": None,
+        "by_owner": {"ada": {"title": "c", "notes": None}},
     }
-    assert value == {"tasks": [{"title": "a"}, {"title": "b", "notes": "n"}]}  # a copy: the value itself is kept
+    assert value["tasks"][0] == {"title": "a"}  # a copy: the value itself is kept
 
 
 def test_none_counts_as_left_out_in_every_field_that_is_not_required():
@@ -164,6 +169,8 @@ def test_none_counts_as_left_out_in_every_field_that_is_not_required():
     assert schemas.without_none(filled, schema) == {"tasks": [{"title": "a"}]}
     # a required field keeps its none, and so fails; a field the schema doesn't declare loses it
     assert schemas.without_none({"tasks": [{"title": None, "other": None}]}, schema) == {"tasks": [{"title": None}]}
+    in_a_map = {"by_owner": {"ada": {"title": None, "notes": None}}}
+    assert schemas.without_none(in_a_map, DEEP) == {"by_owner": {"ada": {"title": None}}}
 
 
 # ---------- looking up fields (for template checks) ----------

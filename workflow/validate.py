@@ -523,10 +523,29 @@ class _Checker:
         if "cursor" in possible and self.wf.harness_setting(node_id, "cursor", "model") is None:
             self.error(at, "this node can run on cursor, which needs a `model` (set `model` here, or defaults.harnesses.cursor.model)")
         self.harnesses |= possible
-        names = [h for h in HARNESSES if h in possible] or HARNESSES
-        settings = {self.wf.harness_setting_at(node_id, name, key) for name in names for key in ("model", "effort")}
+        if not possible and isinstance(harness, str) and ("{{" in harness or "{%" in harness):
+            possible = self._named_by(harness, node_id)
+        self._model_and_effort(node_id, possible or set(HARNESSES))
+
+    def _named_by(self, harness: str, node_id: str) -> set[str]:
+        """The harnesses a template like "{{ item.harness }}" can give, from its field's enum; none known otherwise."""
+        path = templates.pure_path(harness)
+        schema = self._resolve(path, node_id) if path else None
+        names = ([schema["const"]] if "const" in schema else schema.get("enum")) if schema else None
+        return {name for name in names if name in HARNESSES} if isinstance(names, list) else set()
+
+    def _model_and_effort(self, node_id: str, harnesses: set[str]) -> None:
+        """model and effort are templates: check every value the node sets, and each default its harnesses read."""
+        node, settings = self.nodes[node_id], set()
+        for key in ("model", "effort"):
+            own = getattr(node, key)
+            if isinstance(own, dict):
+                settings |= {(f"nodes.{node_id}.{key}.{name}", value) for name, value in own.items()}
+            elif own is not None:
+                settings.add((f"nodes.{node_id}.{key}", own))
+            settings |= {self.wf.harness_setting_at(node_id, name, key) for name in harnesses}
         for where, value in sorted(settings, key=lambda setting: setting[0] or ""):
-            if isinstance(value, str):  # model and effort are templates, like harness
+            if isinstance(value, str):
                 self._template(where, value, node_id, "node")
 
     def _workspace(self, node_id: str) -> None:
