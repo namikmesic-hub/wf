@@ -9,7 +9,7 @@ The checks run in this order, because later ones lean on earlier ones:
 2. schemas: `types`, start.input, node outputs, end output schemas
 3. sub-workflows: each is checked too (its problems are reported with its
    own file name), and its end output becomes the parent node's output schema
-4. per node: templates and expressions, for_each, harness, workspace, `with`
+4. per node: templates and expressions, for_each, harness, tools, workspace, `with`
 5. `branch` names, end outputs, then the warnings that need the whole graph
 
 Templates are checked without running them. templates.references() lists every
@@ -29,11 +29,13 @@ import itertools
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import schemas, spec, templates
+from . import harnesses, schemas, spec, templates
 from .scheduler import END, START, Topology
 from .schemas import ANY, EACH, NoField
 from .spec import HARNESSES, NODE_ID, RESERVED, Problem, SpecError, Workflow
 from .templates import Ref, TemplateError
+from .tools import keychain
+from .tools.catalog import TOOLS
 
 _WORKSPACE = schemas.object_schema(
     {"path": {"type": "string"}, "branch": {"type": ["string", "null"]}, "base": {"type": ["string", "null"]}}
@@ -334,7 +336,7 @@ class _Checker:
             if refs and name == "instruction":
                 self._web_to_full(f"{at}.instruction", refs, node_id)
         if node.kind == "agent":
-            self._harness(node_id)
+            self._tools(node_id, self._harness(node_id))
         if node.kind == "workflow":
             self._with(node_id)
         for i, route in enumerate(node.routes):
@@ -521,12 +523,13 @@ class _Checker:
             self.warn(where, f"an agent with `access: full` reads output from `{source}`, which has `web: true`; "
                              "web pages can carry instructions aimed at agents")
 
-    def _harness(self, node_id: str) -> None:
+    def _harness(self, node_id: str) -> set[str]:
+        """Check the node's harness; returns every harness it could run on."""
         node, at = self.nodes[node_id], f"nodes.{node_id}"
         harness = self.wf.setting(node_id, "harness")
         if harness is None:
             self.error(at, "no harness: set `harness` here or `defaults.harness`")
-            return
+            return set()
         where = f"{at}.harness" if node.harness is not None else "defaults.harness"
         choices = ", ".join(HARNESSES)
         possible: set[str] = set()
@@ -560,6 +563,7 @@ class _Checker:
         if not possible and isinstance(harness, str) and ("{{" in harness or "{%" in harness):
             possible = self._named_by(harness, node_id)
         self._model_and_effort(node_id, possible or set(HARNESSES))
+        return possible
 
     def _named_by(self, harness: str, node_id: str) -> set[str]:
         """The harnesses a template like "{{ item.harness }}" can give, from its field's enum; none known otherwise."""
@@ -586,6 +590,31 @@ class _Checker:
             refs = self._template(where, value, node_id, "node") or []
             if any(ref.name == "session" for ref in refs):
                 self.error(where, "`session` isn't available here: the model and effort are chosen before the session starts")
+
+    def _tools(self, node_id: str, possible: set[str]) -> None:
+        uses = self.wf.setting(node_id, "tools")
+        where = f"nodes.{node_id}.tools" if self.nodes[node_id].tools is not None else "defaults.tools"
+        seen = set()
+        for i, use in enumerate(uses):
+            if use.name not in TOOLS:
+                self.error(f"{where}[{i}]", f"unknown tool `{use.name}` (choose from {', '.join(TOOLS)}){_hint(use.name, TOOLS)}")
+            elif use.name in seen:
+                self.error(f"{where}[{i}]", f"`{use.name}` is listed twice")
+            else:
+                seen.add(use.name)
+                self._set_up(where, use.name)
+        for name in sorted(possible - set(harnesses.ATTACH_TOOLS) if seen else ()):
+            self.error(where, f"this node can run on {name}, which can't attach wf tools yet "
+                              f"(only {' and '.join(harnesses.ATTACH_TOOLS)} can)")
+
+    def _set_up(self, where: str, name: str) -> None:
+        try:
+            stored = keychain.load(name)
+        except keychain.Unavailable as error:
+            self.warn(where, f"{error}, so wf can't tell whether `{name}` is set up")
+            return
+        if stored is None:
+            self.warn(where, f"`{name}` isn't set up on this machine, so the node fails when it runs: run `wf tools {name} setup`")
 
     def _workspace(self, node_id: str) -> None:
         workspace = self.wf.setting(node_id, "workspace")

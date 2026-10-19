@@ -23,6 +23,12 @@ every call, unknown tools and errors included; a missing reply would hang
 the turn. Only the reply's text reaches the model, so problems are spelled
 out there.
 
+wf tools (spec.tools) are dynamic tools too: a namespace per tool, named after
+it, holding the operations the node may use. A call arrives with that
+`namespace` and is passed on to the vendor (tools/relay.py). Such a call can
+take a while, so every request from the app server is answered in a task of
+its own, and the connection keeps reading meanwhile.
+
 Access levels map to Codex's sandbox: read-only, workspace-write and
 danger-full-access, with approvalPolicy "never" so nothing stops to ask (any
 approval request that still arrives is declined). Web search is "live" with
@@ -151,7 +157,7 @@ class CodexSession:
             "ephemeral": not spec.continuable,  # saved only when a later pass may fork it
             "config": config,
             "dynamicTools": [{"type": "function", "name": output_tool.NAME, "description": output_tool.DESCRIPTION,
-                              "inputSchema": spec.tool.schema}],
+                              "inputSchema": spec.tool.schema}] + [_namespace(server) for server in spec.tools],
         }
         try:
             if spec.fork_from:
@@ -277,6 +283,7 @@ class _Connection:
         self.ids = itertools.count(1)
         self.pending: dict[int, asyncio.Future] = {}
         self.threads: dict[str, CodexSession] = {}
+        self.answering: set[asyncio.Task] = set()  # replies to the app server's requests, in progress
         self.dead: str | None = None  # why the connection ended, once it has
         self.reader = asyncio.ensure_future(self._read())
 
@@ -321,7 +328,9 @@ class _Connection:
                 except json.JSONDecodeError:
                     continue
                 if "method" in message and "id" in message:
-                    await self._answer(message)
+                    task = asyncio.ensure_future(self._answer(message))
+                    self.answering.add(task)
+                    task.add_done_callback(self.answering.discard)
                 elif "method" in message:
                     session = self.threads.get((message.get("params") or {}).get("threadId"))
                     if session is not None:
@@ -348,21 +357,27 @@ class _Connection:
         method, params, request_id = message["method"], message.get("params") or {}, message["id"]
         try:
             if method == "item/tool/call":
-                result = self._tool_call(params)
+                result = await self._tool_call(params)
             elif method in DECLINE:
                 result = DECLINE[method]
             elif method == "currentTime/read":
                 result = {"currentTimeAt": int(time.time())}
             else:
-                await self._write({"id": request_id, "error": {"code": -32601, "message": f"wf doesn't handle {method}"}})
-                return
+                result = None
         except Exception as error:  # never leave the app server waiting
             result = _tool_reply(f"Error: {type(error).__name__}: {error}", False)
-        await self._write({"id": request_id, "result": result})
+        reply = {"result": result} if result is not None else {
+            "error": {"code": -32601, "message": f"wf doesn't handle {method}"}}
+        with contextlib.suppress(OSError):  # the app server is gone: the reader notices that
+            await self._write({"id": request_id, **reply})
 
-    def _tool_call(self, params: dict) -> dict:
+    async def _tool_call(self, params: dict) -> dict:
         session = self.threads.get(params.get("threadId"))
-        if session is None or params.get("tool") != output_tool.NAME:
+        server = next((t for t in session.spec.tools if t.name == params.get("namespace")), None) if session else None
+        if server is not None:
+            content, is_error = await server.call(params.get("tool"), params.get("arguments"))
+            return {"success": not is_error, "contentItems": [_content_item(block) for block in content]}
+        if session is None or params.get("namespace") or params.get("tool") != output_tool.NAME:
             return _tool_reply(f"Error: there's no tool called `{params.get('tool')}` here. "
                                f"Call `{output_tool.NAME}` with your result.", False)
         text, is_error = session.spec.tool.submit(params.get("arguments"))  # (item/started already showed the call)
@@ -382,14 +397,29 @@ class _Connection:
                     self.process.kill()
                 await self.process.wait()
         self.reader.cancel()
+        for task in self.answering:
+            task.cancel()
         # gather() hands back the reader's own cancellation as a value, but still lets a
         # cancellation of this task (Ctrl-C during teardown) through
-        await asyncio.gather(self.reader, return_exceptions=True)
+        await asyncio.gather(self.reader, *self.answering, return_exceptions=True)
         self.stderr.close()
 
 
 def _tool_reply(text: str, success: bool) -> dict:
     return {"success": success, "contentItems": [{"type": "inputText", "text": text}]}
+
+
+def _namespace(server) -> dict:
+    """A wf tool as a namespace of dynamic tools: the operations its node may use."""
+    return {"type": "namespace", "name": server.name, "description": server.description,
+            "tools": [{"type": "function", "name": op.name, "description": op.description, "inputSchema": op.input_schema}
+                      for op in server.operations]}
+
+
+def _content_item(block: dict) -> dict:
+    if block.get("type") == "image":
+        return {"type": "inputImage", "imageUrl": f"data:{block['mimeType']};base64,{block['data']}"}
+    return {"type": "inputText", "text": block.get("text", "")}
 
 
 def _code(error: dict):

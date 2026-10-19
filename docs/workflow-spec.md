@@ -134,6 +134,9 @@ end:
 | `wf graph <file>` | Prints the workflow as a Mermaid diagram. |
 | `wf run <file> [name=value ...]` | Validates, then runs the workflow. Inputs come from `name=value` pairs (a value that parses as JSON is used as JSON), from `--input file.json`, or from prompts for anything missing. Prints progress, then the end output. |
 | `wf resume <run-id> [--limit NAME=VALUE]` | Continues a paused or failed run, or one a limit stopped (with a bigger limit). Finished nodes and items aren't rerun. |
+| `wf tools list` | Lists the tools agent nodes can use (see [docs/tools.md](tools.md)), how each signs in, and whether it's set up. |
+| `wf tools <name> setup` | Signs in to a tool once, in the browser or with a pasted token, and keeps the secret in the macOS Keychain. |
+| `wf tools <name> doctor`, `wf tools doctor` | Checks that a tool's sign-in is there and still good, and makes one harmless read call. Prints pass or fail with the next step. |
 
 `wf run` exit codes: 0 succeeded, 1 failed or stopped by a limit, 2 paused waiting for a person
 (only with `--no-input` or when there's no terminal).
@@ -157,6 +160,8 @@ Each harness needs its own login, and only the harnesses a workflow uses need to
   Runs use that login, not an API key: the runner removes `CURSOR_API_KEY` from the environment Cursor and its agents see.
   Each cursor-agent process gets a settings folder of its own, outside the repo, so your `~/.cursor` settings don't apply and aren't changed.
   `wf` is tested against one cursor-agent version and warns when the installed one differs, because it reads the messages Cursor writes.
+- **Tools** (Slack, Granola, Linear, Notion, Gmail): only the ones a workflow's nodes list.
+  `wf tools <name> setup` signs in once per machine; [docs/tools.md](tools.md) has the steps.
 
 `wf init my-flow` writes:
 
@@ -315,6 +320,7 @@ Fields every kind accepts:
 | `web` | `false` | Allow web search and page fetching. |
 | `session` | `fresh` | `fresh` starts a new agent session for every pass: the code carries over through the workspace, and the instruction carries the feedback. `continue` carries the conversation over too. See [Sessions](#sessions). |
 | `max_turns`, `budget_usd` | none | Passed to harnesses that support them. |
+| `tools` | none | wf tools the agent may use: `[slack, linear]`. Each gets only its read operations, unless the entry is `{name: ..., write: true}`. See [docs/tools.md](tools.md). |
 
 Access levels:
 - `read-only`: read and search files, and run commands that don't change anything, such
@@ -667,6 +673,11 @@ Each agent attempt gets one tool, `submit_result`. Its input schema is the node'
 Each call arrives tied to its session: a process, a thread id or a session's URL.
 So a result can only reach the attempt it belongs to.
 
+A node's `tools` reach the agent the same way: wf connects to each vendor's MCP server itself,
+and offers the agent the operations the node may use as tools of its own (an SDK MCP server
+per tool on Claude Code, a namespace of dynamic tools on Codex). Each call comes back to the
+runner, which passes it on with the stored sign-in, so the secret never reaches the agent.
+
 The runner uses this tool instead of each harness's own structured-output feature because
 it works the same everywhere, and the agent gets validation errors back while it still has
 the context to fix them.
@@ -810,6 +821,8 @@ Errors:
     `{{ start.<input> }}` as the value that `with` gives. So `fix/{{ start.task }}` and
     `review/{{ start.task }}` are apart, and so are `fm/{{ start.task }}/author` and
     `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.
+13. Each `tools` entry names a known tool, and no tool is listed twice. A node with `tools`
+    can't run on `cursor`, which can't attach them yet.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`
@@ -823,6 +836,7 @@ Warnings:
 - A `for_each` reads a list whose schema has no `maxItems`.
 - The workflow uses `run.cost_usd` or `limits.cost_usd` with a harness that doesn't report cost, or `run.tokens` or `limits.tokens` with one that doesn't report tokens.
 - A node that can run on `cursor` sets `effort`.
+- A node uses a tool that isn't set up on this machine (`wf tools <name> setup`).
 
 ## Implementation notes (Python, LangGraph)
 
@@ -844,11 +858,12 @@ workflow/
     mcp_http.py     submit_result as an MCP server over HTTP, for Cursor
   settings.py       ~/.wf/config.yaml: wf's own settings, and the names it knows
   capacity.py       the agent slots: one cap on live agent sessions across all runs
+  tools/            wf tools: the five vendor servers, sign-in and the Keychain, the relay, doctor
   nodes.py          runs one attempt of each node kind, including the reminder loop
   scheduler.py      the rules in "When a node runs": pending, settled, routes, end
   graph.py          LangGraph wiring
   runs.py           run folder, events, resume
-  cli.py            init, validate, graph, run, resume
+  cli.py            init, validate, graph, run, resume, tools
 ```
 
 The `wf` command is a `[project.scripts]` entry in `pyproject.toml`:
@@ -897,6 +912,7 @@ start, and sends the runner to the next harness. The attempt loop is written onc
 | Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | the turn's last message: a sign-in, plan or payment notice, or `[resource_exhausted]` |
 | Usage | tokens and dollars | tokens | none |
 | `session: continue` | fork with `fork_session` | fork with `thread/fork` | `session/load` (no fork) |
+| wf tools | an SDK MCP server per tool | a namespace of dynamic tools per tool | not yet |
 
 Notes:
 - Every setting is passed on every session. Codex fills any gap from your

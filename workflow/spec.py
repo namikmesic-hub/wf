@@ -109,6 +109,15 @@ def _text(value: Any) -> Any:
     return str(value) if isinstance(value, (int, float)) else value
 
 
+def _tool_use(value: Any) -> Any:
+    """`slack` is short for {name: slack}, which reads only."""
+    if isinstance(value, str):
+        return {"name": value}
+    if isinstance(value, (dict, BaseModel)):
+        return value
+    raise PydanticCustomError("tool_use", "expected a tool name, or {name: ..., write: true}")
+
+
 def _end_value(value: Any) -> str | dict:
     if isinstance(value, (str, dict)):
         return value
@@ -127,6 +136,16 @@ class _Model(BaseModel):
 
 
 # ---------- nodes ----------
+
+
+class ToolUse(_Model):
+    """A tool an agent node may use (`wf tools list`). `write: true` adds the operations that aren't reads."""
+
+    name: str
+    write: bool = False
+
+
+Tools = list[Annotated[ToolUse, BeforeValidator(_tool_use)]]
 
 
 class Route(_Model):
@@ -169,6 +188,7 @@ class AgentNode(_Node):
     session: Literal["fresh", "continue"] | None = None
     max_turns: int | None = Field(None, ge=1)
     budget_usd: float | None = Field(None, gt=0)
+    tools: Tools | None = None
 
 
 class CommandNode(_Node):
@@ -232,6 +252,7 @@ class Defaults(_Model):
     effort: PerHarness | None = None
     access: Access | None = None
     web: bool | None = None
+    tools: Tools | None = None
     session: Literal["fresh", "continue"] | None = None
     max_turns: int | None = Field(None, ge=1)
     budget_usd: float | None = Field(None, gt=0)
@@ -268,6 +289,7 @@ _BUILTIN = {
     "workspace": "repo",
     "access": "read-only",
     "web": False,
+    "tools": (),
     "session": "fresh",
     "check": True,
 }

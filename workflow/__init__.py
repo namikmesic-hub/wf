@@ -22,6 +22,8 @@ Then the runner, built on LangGraph:
     runs.py        the run folder on disk
     workspaces.py  git worktrees for `workspace: new`, and the runner's commits
     output_tool.py submit_result: how an agent hands back its typed result
+    tools/         wf tools (Slack, Linear, ...): sign-in, the Keychain, and the
+                   relay that attaches them to agent sessions
     harnesses/     the coding-agent adapters: base.py, then claude_code.py,
                    codex.py, cursor.py (with mcp_http.py, which serves it
                    submit_result), and git_tool.py (read-only git without a shell)

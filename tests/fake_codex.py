@@ -6,6 +6,7 @@ scenario.json: {"models": [...], "silent": [method, ...], "turns": [[action, ...
 Requests for a "silent" method never get an answer (a wedged app server). Each turn/start
 takes the next list of actions:
     {"tool": {"arguments": {...}, "name": "submit_result"}}  call a dynamic tool, wait for the reply
+    {"tool": {"arguments": {...}, "name": "...", "namespace": "linear"}}   one in a namespace
     {"approval": "item/commandExecution/requestApproval"}  ask for approval, wait for the reply
     {"item": {"type": "commandExecution", "command": "ls"}} item/started + item/completed
     {"tokens": 1200}                                         a response of 1200 tokens: thread/tokenUsage/updated
@@ -64,6 +65,7 @@ async def main() -> None:
             if "tool" in action:
                 reply = await call("item/tool/call", {"threadId": thread, "turnId": turn, "callId": f"call-{next(ids)}",
                                                       "tool": action["tool"].get("name", "submit_result"),
+                                                      "namespace": action["tool"].get("namespace"),
                                                       "arguments": action["tool"]["arguments"]})
                 log("reply", reply)
             elif "approval" in action:

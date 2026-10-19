@@ -40,6 +40,12 @@ timeout starts once the attempt has its slot, and the wait shows in
 events.jsonl (slot_waiting, slot_taken) and in status.json (agents_waiting).
 A limit reached while it waits ends the wait, and the attempt doesn't start.
 
+An agent node's wf tools (`tools`) are connected for each attempt and handed
+to the session in SessionSpec.tools (tools/relay.py). A tool that isn't set up
+fails the job at once, since a retry would find it the same; a server that
+didn't answer fails just the attempt. Dry runs connect none: scripted results
+don't call tools.
+
 Workspaces: `new` is a git worktree (workspaces.py). For an `edit` or `full`
 agent in a worktree the runner made, a retry starts from the commit the job
 started from, and when the agent succeeds the runner commits what it left
@@ -80,7 +86,7 @@ from langgraph.types import interrupt
 from . import capacity, dryrun, output_tool, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
-from .harnesses import SessionSpec, Unavailable, Usage
+from .harnesses import ATTACH_TOOLS, SessionSpec, Unavailable, Usage
 from .spec import seconds
 from .state import Finished, Job
 
@@ -338,16 +344,24 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     names = list(harness) if isinstance(harness, list) else [templates.render(harness, variables).strip()]
     chosen = {name: tuple(_rendered_setting(job, ctx, name, key, variables) for key in ("model", "effort")) for name in names}
     schema = schemas.node_output_schema(wf, node_id)
+    uses = () if ctx.root.script else wf.setting(node_id, "tools")
 
     async def attempt(number: int, name: str) -> dict:
         # Every attempt but the job's very first starts from the commit the job started from:
         # retries, and attempts after a crash or `wf resume` (which may find half-done edits)
         if start and (number > job["attempt"] or entered_before):
             await _git(ctx, workspaces.reset, workspace["path"], start)
+        if uses and name not in ATTACH_TOOLS:
+            raise _Unavailable(f"{name} can't attach wf tools yet")
         try:
             agent = await ctx.harness(name)
         except Unavailable as error:
             raise _Unavailable(str(error)) from error
+        async with _attached(uses, number) as tools:
+            return await converse(number, name, agent, tools)
+
+    async def converse(number: int, name: str, agent, tools: list) -> dict:
+        """One session: the instruction, then reminders, until submit_result has a result."""
         model, effort = chosen[name]
         source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
         if why_not:
@@ -368,6 +382,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             continuable=continuing,
             fork_from=source["id"] if source else None,
             prior_cost_usd=source["cost_usd"] if source else 0.0,
+            tools=tools,
         )
         try:
             session = await agent.session(spec)
@@ -473,6 +488,23 @@ async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str
     finally:
         if slot is not None:
             slot.release()
+
+
+@asynccontextmanager
+async def _attached(uses, number: int):
+    """The node's wf tools, connected for one attempt."""
+    if not uses:
+        yield []
+        return
+    from .tools import keychain, relay, signin  # relay loads the MCP client, which runs without tools don't need
+
+    try:
+        async with relay.attach(uses) as tools:
+            yield tools
+    except (signin.NotSetUp, keychain.Unavailable) as error:  # a retry would find it the same
+        raise _Failed(str(error), number) from error
+    except signin.Unreachable as error:
+        raise _AttemptFailed(str(error)) from error
 
 
 async def _start_commit(ctx: RunContext, folder: Path, workspace: dict) -> tuple[str, bool]:

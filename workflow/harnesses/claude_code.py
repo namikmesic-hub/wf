@@ -9,6 +9,11 @@ calls it like any tool, and the call arrives here as a Python function call.
 Claude Code names MCP tools mcp__<server>__<tool>, so the agent sees
 mcp__wf__submit_result.
 
+wf tools (spec.tools) are in-process MCP servers too, one per tool, named after
+it: the agent sees mcp__slack__slack_read_channel, and each call comes back
+here to be passed on (tools/relay.py). Each operation the node may use is in
+allowed_tools; the server lists no others.
+
 Access levels (`options()`):
 - read-only: Read, Grep and Glob, plus the runner's own `git` tool
   (git_tool.py) for diff, log, show, blame and status. No shell: even
@@ -102,6 +107,10 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
         tools, allowed, mode, disallowed = None, [], "bypassPermissions", ([] if spec.web else list(WEB))
     use_api_key = os.environ.get("WF_CLAUDE_AUTH") == "api-key"
     own_tools = [_submit_tool(spec.tool)] + ([_git_tool(spec.cwd)] if spec.access == "read-only" else [])
+    servers = {SERVER: create_sdk_mcp_server(SERVER, tools=own_tools)}
+    for server in spec.tools:
+        servers[server.name] = create_sdk_mcp_server(server.name, tools=[_relayed(server, op) for op in server.operations])
+        allowed += [f"mcp__{server.name}__{op.name}" for op in server.operations]
     budget = spec.budget_usd
     if budget is not None and spec.fork_from:
         budget += spec.prior_cost_usd  # the SDK caps the session's total, which includes what it was forked from
@@ -117,7 +126,7 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
         permission_mode=mode,
         setting_sources=["project"],
         system_prompt={"type": "preset", "preset": "claude_code"},
-        mcp_servers={SERVER: create_sdk_mcp_server(SERVER, tools=own_tools)},
+        mcp_servers=servers,
         env={} if use_api_key else {name: "" for name in API_KEY_VARS},
         resume=spec.fork_from,
         fork_session=spec.fork_from is not None,
@@ -131,6 +140,17 @@ def _submit_tool(result_tool: ResultTool):
         return {"content": [{"type": "text", "text": text}], "is_error": is_error}
 
     return submit_result
+
+
+def _relayed(server, operation):
+    """One operation of a wf tool, as an SDK MCP tool that passes each call on."""
+
+    @tool(operation.name, operation.description, operation.input_schema, annotations=operation.annotations)
+    async def relay(args: dict) -> dict:
+        content, is_error = await server.call(operation.name, args)
+        return {"content": content, "is_error": is_error}
+
+    return relay
 
 
 def _git_tool(cwd):
