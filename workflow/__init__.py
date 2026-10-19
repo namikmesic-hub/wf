@@ -9,6 +9,7 @@ Read the modules in this order. The first group knows nothing about LangGraph:
     schemas.py     field maps -> JSON Schema, and checking values against them
     templates.py   sandboxed Jinja, plus reading templates without running them
     scheduler.py   the graph, and the rules for which node runs next
+    shape.py       the graph without its loops: steps and loops, for progress.py and diagram.py
     validate.py    every check in the spec's Validation section
     diagram.py     `wf graph`: the workflow as a Mermaid flowchart
 

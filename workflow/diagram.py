@@ -8,13 +8,13 @@ Solid arrows are `needs` edges; dotted arrows are routes, labelled with their
 Mermaid ids get a prefix (n_<id>, wf_start, wf_end) because some words, such
 as `end`, are Mermaid keywords.
 
-layout() puts each node in the row of its step (progress.Shape): start in row
+layout() puts each node in the row of its step (shape.py): start in row
 0, end in the row after the last step. In a row, a node goes near the mean
 place of the nodes before it, and file order breaks ties. The page draws the
 boxes and the edges from that.
 """
 
-from .progress import Shape
+from .shape import Shape
 from .scheduler import END, START
 from .spec import Workflow
 
