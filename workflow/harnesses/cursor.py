@@ -73,8 +73,10 @@ The paragraph can come in several chunks, so the adapter reads the whole
 message since the last tool call. A paragraph in the form Cursor writes an
 error, "Error: [code] ..." or "Error: SomeError: ...", fails the turn, and a
 sign-in, plan or payment notice, or an unauthenticated or resource_exhausted
-error (a usage limit), makes it unavailable. Other text that starts with
-"Error:" is the agent's own. Any stopReason but end_turn fails the turn.
+error (a usage limit), makes it unavailable. A RetriableError, even with
+[resource_exhausted] in it, isn't a usage limit: it fails the turn, and the
+retry waits RETRY_AFTER_S first. Other text that starts with "Error:" is the
+agent's own. Any stopReason but end_turn fails the turn.
 
 Usage: ACP reports neither tokens nor cost, so Cursor turns count as zero.
 
@@ -135,6 +137,8 @@ NOTICES = (  # Cursor's own messages when the account needs attention
 )
 ERROR = re.compile(r"\n\nError: (?:\[[a-z_]+\] |\w*Error: )")  # how Cursor reports a failed request
 UNAVAILABLE = (*NOTICES, "[unauthenticated]", "[resource_exhausted]")  # in a notice: it can't run here now
+RETRIABLE = "Error: RetriableError: "  # a notice that starts so is worth sending again soon
+RETRY_AFTER_S = 30
 AUTH_REQUIRED = -32000  # ACP's error code for "authenticate first"
 LABELS = {"read": "read", "edit": "edit", "delete": "delete", "move": "move", "search": "search",
           "execute": "command", "fetch": "web fetch"}
@@ -318,6 +322,8 @@ class CursorSession:
         stop = result.get("stopReason")
         transcript(log, "turn", stop_reason=stop)
         failure = notice(message)
+        if failure.startswith(RETRIABLE):
+            return TurnEnd("failed", f"cursor: {failure}", retry_after_s=RETRY_AFTER_S)
         if any(sign in failure for sign in UNAVAILABLE):
             return TurnEnd("unavailable", f"cursor: {failure}")
         if failure:

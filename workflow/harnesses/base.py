@@ -79,6 +79,7 @@ class TurnEnd:
     status: Literal["done", "unavailable", "failed"]
     message: str = ""
     usage: Usage = field(default_factory=Usage)
+    retry_after_s: float = 0  # failed: how long the next attempt on this harness waits
 
 
 class Session(Protocol):

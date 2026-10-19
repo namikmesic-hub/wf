@@ -21,6 +21,7 @@ from textwrap import dedent, indent
 import pytest
 
 from workflow import cli, harnesses, runner, schemas
+from workflow.harnesses import cursor as cursor_harness
 from workflow.harnesses.base import SessionSpec
 from workflow.harnesses.cursor import TESTED, WRITES_WITHOUT_ASKING, Cursor
 from workflow.output_tool import FINISH, NEW_RESULT, REMINDER, ResultTool
@@ -304,6 +305,36 @@ def test_a_usage_limit_or_a_login_problem_makes_cursor_unavailable(repo, monkeyp
     out = capsys.readouterr().out
     assert f"cursor is unavailable: cursor: {notice}" in out
     assert "attempt 2" not in out  # no retry on the same harness
+
+
+RETRIABLE = "Error: RetriableError: [resource_exhausted] Error"  # Cursor's notice on 2026-10-19, with no usage limit reached
+
+
+def test_a_retriable_error_fails_the_attempt_and_the_retry_runs_after_a_wait(repo, monkeypatch, capsys):
+    monkeypatch.setattr(cursor_harness, "RETRY_AFTER_S", 0.5)
+    log = cursor(monkeypatch, repo, [{"text": "Working on it"}, {"error": RETRIABLE}], [GOOD])
+    began = time.monotonic()
+    assert run() == 0
+    assert time.monotonic() - began >= 0.5
+    out = capsys.readouterr().out
+    assert f"attempt 1 failed: cursor: {RETRIABLE}; retrying in 0.5s" in out
+    assert "unavailable" not in out
+    assert len(entries(log, "start")) == 2
+
+
+def test_a_retriable_error_on_the_last_attempt_falls_back_without_a_wait(repo, monkeypatch, capsys):
+    from fakes import Fake, submit
+    monkeypatch.setattr(cursor_harness, "RETRY_AFTER_S", 60)
+    cursor(monkeypatch, repo, [{"error": RETRIABLE}])
+    claude = Fake("claude-code", submit({"summary": "from claude"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", claude.factory)
+    began = time.monotonic()
+    assert run("retry: 0\nharness: [cursor, claude-code]\nmodel: {cursor: composer-2.5, claude-code: opus}\n") == 0
+    assert time.monotonic() - began < 30
+    assert output() == {"out": "from claude"}
+    out = capsys.readouterr().out
+    assert f"attempt 1 failed: cursor: {RETRIABLE}\n" in out
+    assert "falling back to claude-code" in out
 
 
 def test_a_notice_sent_in_several_chunks_is_still_read(repo, monkeypatch, capsys):

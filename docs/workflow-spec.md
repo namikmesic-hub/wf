@@ -354,7 +354,7 @@ The tests named below are in `tests/test_tools.py`, unless another file is named
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | A node with `tools` can run on Claude Code or Cursor at `edit` or `full`, or on Codex at `full`, and doesn't set `tools_with_shell: true` | `wf validate` errors, naming each such harness and the access level, so the run doesn't start. | `workflow/validate.py:616`, `workflow/harnesses/__init__.py:46` | `test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in`, `test_a_harness_list_names_each_harness_whose_shell_reaches_the_keychain` |
-| A template picks such a harness at run time, which `wf validate` can't see, and the node doesn't set `tools_with_shell: true` | The run refuses that harness, and the node fails without a session. | `workflow/nodes.py:366` | `tests/test_tool_sessions.py::test_a_run_refuses_a_harness_whose_shell_reaches_the_keychain_without_the_opt_in` |
+| A template picks such a harness at run time, which `wf validate` can't see, and the node doesn't set `tools_with_shell: true` | The run refuses that harness, and the node fails without a session. | `workflow/nodes.py:375` | `tests/test_tool_sessions.py::test_a_run_refuses_a_harness_whose_shell_reaches_the_keychain_without_the_opt_in` |
 | The node sets `tools_with_shell: true` | `wf validate` warns, naming the node and its tools: its agent could read every stored sign-in. The run attaches the tools. | `workflow/validate.py:613` | `test_a_node_that_opts_in_gets_a_warning_naming_it_and_its_tools`, `tests/test_tool_sessions.py::test_a_run_lets_a_node_that_opted_in_have_tools_and_a_shell` |
 | A node with `tools` is read-only on any harness, or on Codex at `edit` | It needs no opt-in: its commands can't reach the Keychain. | `workflow/harnesses/__init__.py:46` | `test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in` |
 | A node has no tools, `tools: []` included | `wf validate` says nothing about its shell. | `workflow/validate.py:609` | `test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools` |
@@ -593,6 +593,9 @@ sub-workflow fails.
 - `harness: [claude-code, codex]` tries harnesses in order, and each gets `1 + retry`
   attempts. If a harness reports a usage limit or can't start, the runner moves to the next
   harness straight away.
+- A harness can ask for a wait before the retry on the same harness.
+  Cursor does this for its `RetriableError`: the next attempt starts 30 seconds later, and the
+  `attempt_failed` event says so in `retry_in_s`.
 - An agent attempt that waits for an [agent slot](#agent-slots) hasn't started yet: the
   wait isn't a failure and uses no retry.
 - When a node, or an item with `on_item_error: fail`, runs out of attempts, the run stops:
@@ -640,18 +643,18 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | Runs of the user that use the same `~/.wf` | They share one set of slots, in `~/.wf/agent-slots/`. Runs with another `WF_HOME` have slots of their own. | `workflow/capacity.py:54` | `test_two_runs_in_separate_processes_share_the_cap`, `test_each_wf_home_has_its_own_slots`, `test_a_slot_file_names_its_holder` |
-| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:479` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
+| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:488` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
 | `WF_MAX_AGENTS` is set | It sets the same cap, and wins over `max_agents` in the file, which is still checked. | `workflow/capacity.py:64`, `workflow/capacity.py:66` | `test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home`, `test_a_bad_cap_stops_wf_run_before_the_run_exists` |
 | The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:145` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
 | `config.yaml` names a setting wf doesn't know, or doesn't hold settings by name | The same. So a misspelt `max_agents` can't quietly mean no cap. | `workflow/settings.py:50` | `test_a_wrong_file_fails_every_read` in `tests/test_settings.py`, `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
-| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:484`, `workflow/nodes.py:502` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
+| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:493`, `workflow/nodes.py:511` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
 | An attempt holds a slot | The slot is the file `~/.wf/agent-slots/<n>`, which the attempt's process locks with `flock`. The file names its holder: pid, run, node and attempt. | `workflow/capacity.py:96`, `workflow/capacity.py:98`, `workflow/capacity.py:107` | `test_a_slot_has_one_holder_at_a_time`, `test_a_slot_file_names_its_holder` |
-| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:277` | `test_a_retry_and_a_fallback_take_a_slot_again` |
-| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:252`, `workflow/nodes.py:479` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
+| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:278` | `test_a_retry_and_a_fallback_take_a_slot_again` |
+| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:253`, `workflow/nodes.py:488` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
 | Several attempts wait for one slot | Each tries again every `POLL_SECONDS` (0.2 seconds), and the first try after the slot comes free gets it. So they get it one at a time, in an order that is not defined. | `workflow/capacity.py:46`, `workflow/capacity.py:117`, `workflow/capacity.py:120` | `test_a_wait_tries_again_every_0_2_seconds`, `test_attempts_that_wait_for_one_slot_take_it_one_at_a_time` |
-| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:492`, `workflow/nodes.py:279`, `workflow/nodes.py:280` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
-| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:488`, `workflow/nodes.py:498`, `workflow/context.py:153`, `workflow/cli.py:326` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
-| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:496` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
+| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:501`, `workflow/nodes.py:280`, `workflow/nodes.py:281` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
+| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:497`, `workflow/nodes.py:507`, `workflow/context.py:153`, `workflow/cli.py:326` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
+| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:505` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
 | A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:98` | `test_a_killed_process_frees_its_slot` |
 | A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:58` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
 | Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. | `workflow/capacity.py:95` | `test_a_smaller_cap_uses_only_the_first_slots` |
@@ -761,9 +764,9 @@ The tests named below are in `tests/test_workspaces.py`.
 | `wf resume` of a run that has ended | There is no test commit. It says how the run ended. | `workflow/runner.py:189` | `test_resuming_a_run_that_succeeded_says_so_without_checking_the_key` |
 | The background process of a detached run fails the test | `status.json` says `failed`, with the error, so `wf wait` reports the cause and not a crash. | `workflow/runner.py:192` | `test_a_detached_run_whose_background_check_fails_records_why` |
 | The runner's commit fails | The error says that signing failed only after a timeout, or when a signed test commit fails and an unsigned one works. Otherwise it is git's own error, as `git commit failed: ...`. | `workflow/workspaces.py:197`, `workflow/workspaces.py:263` | `test_a_commit_that_cant_be_signed_says_so`, `test_a_commit_that_fails_for_another_reason_doesnt_blame_signing`, `test_a_commit_whose_signing_test_cant_write_either_doesnt_blame_signing` |
-| An agent succeeds, and then the runner's commit fails | The node fails with the attempt that ran, so `wf resume` starts at the next attempt number. | `workflow/nodes.py:450` | `test_a_failed_commit_keeps_the_attempt_number_so_a_resume_starts_at_the_next_one` |
+| An agent succeeds, and then the runner's commit fails | The node fails with the attempt that ran, so `wf resume` starts at the next attempt number. | `workflow/nodes.py:459` | `test_a_failed_commit_keeps_the_attempt_number_so_a_resume_starts_at_the_next_one` |
 | wf stops git: after `SIGNING_TIMEOUT`, for a cancelled job, on Ctrl-C, SIGHUP or SIGTERM | Its process group, with the signing program, gets SIGTERM, so git removes its temporary files. Whatever still runs 5 seconds later (`GRACE`) gets SIGKILL. | `workflow/workspaces.py:457`, `workflow/workspaces.py:462` | `test_a_signing_timeout_lets_git_remove_its_temporary_file`, `test_a_signing_program_that_ignores_sigterm_is_killed` |
-| A job is cancelled, for example by a node's `timeout` or Ctrl-C during a run | Its git command stops, and none of its later git commands starts. Its error says it was stopped, not that signing failed. | `workflow/nodes.py:239`, `workflow/workspaces.py:418` | `test_cancelling_a_job_stops_its_git_command_and_the_signing_program`, `test_a_job_cancelled_while_it_waits_for_git_starts_none`, `test_a_stopped_commit_isnt_called_a_signing_failure` |
+| A job is cancelled, for example by a node's `timeout` or Ctrl-C during a run | Its git command stops, and none of its later git commands starts. Its error says it was stopped, not that signing failed. | `workflow/nodes.py:240`, `workflow/workspaces.py:418` | `test_cancelling_a_job_stops_its_git_command_and_the_signing_program`, `test_a_job_cancelled_while_it_waits_for_git_starts_none`, `test_a_stopped_commit_isnt_called_a_signing_failure` |
 | Ctrl-C while git runs in wf's main thread, as in the test before a run | git stops, and wf stops as for any Ctrl-C. | `workflow/workspaces.py:449` | `test_ctrl_c_stops_git_and_the_signing_program` |
 | wf gets SIGHUP (its terminal closed) or SIGTERM | It stops every git command, also one that is just starting, and starts no new one. Then it exits by that signal, as before. SIGKILL can't be handled, so it still leaves git running. | `workflow/cli.py:204`, `workflow/workspaces.py:374`, `workflow/workspaces.py:383` | `test_wf_stops_git_and_the_signing_program_when_its_terminal_closes_or_it_is_killed`, `test_wf_stops_the_runners_commit_and_starts_no_more_git_when_it_is_killed`, `test_a_signal_while_git_starts_still_stops_that_git` |
 | SIGHUP is ignored when wf starts, as under `nohup` | It stays ignored. | `workflow/workspaces.py:364` | `test_a_hangup_that_wf_ignores_stays_ignored` |
@@ -916,8 +919,8 @@ class Session(Protocol):
 ```
 
 `SessionSpec` holds the working folder, access level, `web`, model, effort, the attempt's
-`submit_result` tool and the session to fork from. `TurnEnd` says how the turn ended and
-what it used. `unavailable` means a usage limit, a login problem or a harness that can't
+`submit_result` tool and the session to fork from. `TurnEnd` says how the turn ended,
+what it used, and for a failed turn how long the retry waits. `unavailable` means a usage limit, a login problem or a harness that can't
 start, and sends the runner to the next harness. The attempt loop is written once, in
 `nodes.py`, for every harness: send the instruction, then up to 2 reminders, and stop once
 `submit_result` has a result. Each adapter only maps settings and events.
@@ -931,7 +934,7 @@ start, and sends the runner to the next harness. The attempt loop is written onc
 | `full` | `permission_mode="bypassPermissions"` | sandbox `danger-full-access` | everything allowed |
 | `web: false` | no WebSearch or WebFetch | `web_search: "disabled"` (the default is `cached`) | web search and fetch requests refused |
 | Repo instructions | `setting_sources=["project"]`, `claude_code` system prompt | `AGENTS.md`, always loaded | the repo's rules and `AGENTS.md`, but not its `.cursor/cli.json` |
-| Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | the turn's last message: a sign-in, plan or payment notice, or `[resource_exhausted]` |
+| Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | the turn's last message: a sign-in, plan or payment notice, or `[resource_exhausted]` that isn't a `RetriableError` |
 | Usage | tokens and dollars | tokens | none |
 | `session: continue` | fork with `fork_session` | fork with `thread/fork` | `session/load` (no fork) |
 | wf tools | an SDK MCP server per tool | a namespace of dynamic tools per tool | an MCP server over HTTP per tool, a URL per session |
@@ -966,6 +969,9 @@ Notes:
 - `--disable-project-configs` keeps the repo's `.cursor/cli.json` from changing Cursor's permissions.
 - Cursor reports a failed request as a paragraph at the end of the turn's last message, not as an error.
   So the adapter reads that message to tell a usage limit or a login problem from other failures.
+- A `RetriableError` notice, such as `Error: RetriableError: [resource_exhausted] Error`, isn't a usage limit.
+  It fails the attempt, and the retry on Cursor waits 30 seconds first.
+  On 2026-10-19 a Cursor turn ended with that notice while the account had used about half its monthly allowance.
 - What Cursor can't switch off: a web fetch that Cursor's server marks as needing no approval runs even with `web: false`.
 
 How it maps onto LangGraph:

@@ -484,7 +484,8 @@ def describe(event: dict) -> str | None:
     if kind == "item_failed":
         return f"✗ {where}: {event['error']} (continuing without it)"
     if kind == "attempt_failed":
-        return f"  {where}: attempt {event['attempt']} failed: {event['error']}"
+        wait = f"; retrying in {event['retry_in_s']:g}s" if event.get("retry_in_s") else ""
+        return f"  {where}: attempt {event['attempt']} failed: {event['error']}{wait}"
     if kind == "attempt_started":
         fallback = f", falling back to {event['harness']}" if event.get("fallback") else ""
         return f"↻ {where}: attempt {event['attempt']}{fallback}"

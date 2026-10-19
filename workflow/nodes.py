@@ -21,7 +21,8 @@ once for every harness: open a session, send the instruction, then up to two
 reminders, and stop as soon as submit_result has a result. A harness that
 reports itself unavailable (usage limit, login, can't start) sends the loop
 straight to the next harness in the node's list; other failures count
-against `retry`. What an attempt spends is counted even when it fails; for a
+against `retry`. A failed turn can ask the retry to wait (TurnEnd.retry_after_s),
+as Cursor does for its RetriableError. What an attempt spends is counted even when it fails; for a
 turn cut off by the timeout, that's what the harness reported before it.
 With `session: continue`, a pass forks the session the node's last pass ended
 in (Claude Code's fork_session, Codex's thread/fork), so that session is never
@@ -272,7 +273,7 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
             on = {"harness": harness} if harness else {}
             fallback = {"fallback": True} if position and not tries and not handed_over else {}
             handed_over = False
-            deadline = None
+            deadline, wait = None, 0.0
             try:
                 async with slot(number, harness):  # an attempt starts once it has its slot
                     if number > 1:
@@ -294,12 +295,16 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
                 handed_over = True
                 break
             except _AttemptFailed as failure:
-                error = str(failure)
+                error, wait = str(failure), failure.wait
             except dryrun.ScriptExhausted as failure:  # another attempt would find no entry either
                 emit({"event": "attempt_failed", **label, **on, "attempt": number, "error": str(failure)})
                 raise _Failed(str(failure), number) from None
-            emit({"event": "attempt_failed", **label, **on, "attempt": number, "error": error})
+            wait = wait if tries < retry else 0  # only before a retry on this harness
+            emit({"event": "attempt_failed", **label, **on, "attempt": number, "error": error,
+                  **({"retry_in_s": wait} if wait else {})})
             number += 1
+            if wait:
+                await asyncio.sleep(wait)
     raise _Failed(error, number - 1)
 
 
@@ -310,7 +315,11 @@ def _limit_stop(error: str, number: int, reason: str) -> _Failed:
 
 
 class _AttemptFailed(Exception):
-    """One attempt failed; another may follow."""
+    """One attempt failed; another may follow, `wait` seconds later."""
+
+    def __init__(self, message: str, wait: float = 0):
+        super().__init__(message)
+        self.wait = wait
 
 
 class _LimitWhileWaiting(Exception):
@@ -433,7 +442,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                 if end.status == "unavailable":
                     raise _Unavailable(end.message)
                 if end.status == "failed":
-                    raise _AttemptFailed(end.message)
+                    raise _AttemptFailed(end.message, end.retry_after_s)
             raise _AttemptFailed("the agent never made a valid submit_result call")
         finally:
             cut_off = session.pending_usage()  # zero unless a timeout stopped a turn midway
