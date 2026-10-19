@@ -175,6 +175,84 @@ def test_every_loop_needs_a_route_with_max(tmp_path):
     assert_problems(report, [("error", "nodes.b.routes", "a → b → a has no route with `max`")])
 
 
+# ---------- settings from start inputs ----------
+
+
+ROUNDS = "rounds: {type: integer}\nwait: {type: string, default: 30m}"
+
+
+def test_settings_can_be_templates_that_read_start(tmp_path):
+    report = check(tmp_path, flow("""
+        a:
+          needs: [start]
+          command: x
+          timeout: "{{ start.wait }}"
+          retry: "{{ start.rounds - 1 }}"
+          max_parallel: "{{ start.rounds }}"
+          for_each: "[1, 2]"
+          routes: [{to: a, max: "{{ start.rounds }}"}, {to: end}]
+    """, inputs=ROUNDS, top="""
+        limits: {cost_usd: "{{ start.rounds * 5 }}", tokens: "{{ start.rounds }}000000", duration: "{{ start.wait }}"}
+    """))
+    assert found(report) == []  # and the loop's only `max` is a template: it counts
+
+
+def test_the_last_route_cannot_have_a_templated_max_either(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, routes: [{to: end, max: "{{ start.rounds }}"}]}
+    """, inputs=ROUNDS))
+    assert_problems(report, [("error", "nodes.a.routes[0]", "can't have `max`")])
+
+
+def test_a_setting_reads_only_start(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, routes: [{to: a, max: "{{ a.exit_code }}"}, {to: end}]}
+        b: {needs: [start], command: x, for_each: "[1]", retry: "{{ item }}", timeout: "{{ run.id }}"}
+    """, inputs=ROUNDS, top="""
+        limits: {tokens: "{{ start.nope }}"}
+    """))
+    only_start = "set once when the run starts, before any node runs, so it can read only `start`, not"
+    assert_problems(report, [
+        ("error", "limits.tokens", "`start.nope`: no field `nope`"),
+        ("error", "nodes.a.routes[0].max", f"{only_start} `a`"),
+        ("error", "nodes.b.timeout", f"{only_start} `run`"),
+        ("error", "nodes.b.retry", f"{only_start} `item`"),
+    ])
+
+
+def test_a_settings_template_must_parse(tmp_path):
+    report = check(tmp_path, flow('a: {needs: [start], command: x, retry: "{{ start.rounds +}}"}', inputs=ROUNDS))
+    assert_problems(report, [("error", "nodes.a.retry", "line 1")])
+
+
+def test_an_inputs_default_must_give_a_value_the_setting_accepts(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, timeout: "{{ start.wait }}", retry: "{{ start.rounds }}"}
+        b: {needs: [start], command: x, routes: [{to: b, max: "{{ start.low - start.high }}"}, {to: end}]}
+        c: {needs: [start], command: x, max_parallel: "{{ start.rounds or start.low }}"}
+    """, inputs="""
+        rounds: {type: integer}
+        wait: {type: string, default: soon}
+        low: {type: integer, default: 1}
+        high: {type: integer, default: 2}
+    """, top="""
+        limits: {duration: "{{ 2 }} hours"}
+    """))
+    assert_problems(report, [  # c reads `rounds`, which has no default: only the run knows it
+        ("error", "limits.duration", '`{{ 2 }} hours` gives "2 hours": expected a duration'),
+        ("error", "nodes.a.timeout", 'the default of input `wait` gives "soon": expected a duration like 90s, 30m or 2h'),
+        ("error", "nodes.b.routes[0].max",
+         "the defaults of inputs `low` and `high` give -1: Input should be greater than or equal to 1"),
+    ])
+
+
+def test_a_templated_max_parallel_could_let_edit_items_overlap(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], for_each: "[1, 2]", max_parallel: "{{ start.rounds }}", access: edit, instruction: x}
+    """, inputs=ROUNDS))
+    assert_problems(report, [("warning", "nodes.a", "items run in parallel in the same workspace")])
+
+
 # ---------- 3. schemas ----------
 
 

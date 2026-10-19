@@ -41,7 +41,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, runs, schemas, settings, spec, validate, workspaces
+from . import ask, capacity, dryrun, graph, limits, operate, runs, schemas, settings, spec, tunables, validate, workspaces
 from .context import RunContext
 
 RECURSION_LIMIT = 10_000  # LangGraph's cap on steps; each pass of a node takes two
@@ -88,14 +88,19 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
     asking = interactive() and not no_input and not detach
     try:
         inputs = collect_inputs(workflow, pairs, input_file, asking, base=script.inputs if script else None)
+        workflow, values = tunables.resolve(workflow, inputs)
     except InputError as error:
         print(f"wf run: {error}", file=sys.stderr)
+        return 1
+    except tunables.TunableError as error:
+        for problem in error.problems:
+            print(f"wf run: {problem}", file=sys.stderr)
         return 1
     repo = Path.cwd()
     home = _home(repo)  # once: run.json and the run itself use the same branch and commit
     try:
         run = runs.create(repo, workflow.name, report.files, path, inputs, home=home, dry_run=script is not None,
-                          limits=overrides, runs_dir=runs_dir)
+                          limits=overrides, runs_dir=runs_dir, tunables=values)
     except OSError as error:  # e.g. --runs-dir names a file
         print(f"wf run: can't make the run folder in {runs.runs_folder(repo, runs_dir)}: {error.strerror or error}",
               file=sys.stderr)
@@ -135,11 +140,11 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
     name = "wf answer" if answers_file else "wf resume"
     try:
         run = runs.find(Path.cwd(), run_id, runs_dir)
-        workflow = spec.load(run.workflow_file)  # the copy, as it was when the run started
+        workflow = tunables.apply(spec.load(run.workflow_file), run.tunables())  # as it was when the run started
         answers = json.loads(Path(answers_file).read_text(encoding="utf-8")) if answers_file else None
         overrides = limits.parse(limit_pairs or [])
         max_agents = capacity.configured()
-    except (OSError, spec.SpecError, ValueError, limits.LimitError, capacity.CapError,
+    except (OSError, spec.SpecError, tunables.TunableError, ValueError, limits.LimitError, capacity.CapError,
             settings.SettingsError) as error:  # ValueError: not JSON, or not UTF-8
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1

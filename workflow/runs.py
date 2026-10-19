@@ -5,7 +5,8 @@ Every `wf run` gets a folder, and `wf resume` finds it again by id:
     .wf/runs/<run-id>/              <run-id> is like 20261018-1432-implement-k3f9
       workflow/                     copies of the workflow files as they were run
       input.json
-      run.json                      the workflow's name and `repo` workspace, for starting it later
+      run.json                      the workflow's name and `repo` workspace, for starting it later,
+                                    and the values its tunables' templates gave (tunables.py)
       branches.json                 the branches `branch` named, by node path, and where the run left them
       output.json                   the end output, once the run succeeds
       status.json                   running | waiting | succeeded | failed | limit, with a sequence
@@ -118,6 +119,10 @@ class Run:
     def limits(self) -> dict:
         """The limits given with --limit for this run (limits.py), by name; None removes one."""
         return self.info().get("limits") or {}
+
+    def tunables(self) -> dict:
+        """The values the workflow's tunables got from their templates when the run started (tunables.py)."""
+        return self.info().get("tunables") or {}
 
     def set_limits(self, overrides: dict) -> None:
         """Keep new --limit values for the rest of the run (call it holding the run's lock)."""
@@ -287,7 +292,8 @@ def repo_key(repo: Path) -> str:
 
 
 def create(repo: Path, name: str, files: list[Path], main: Path, inputs: dict, home: dict | None = None,
-           dry_run: bool = False, limits: dict | None = None, runs_dir: Path | None = None) -> Run:
+           dry_run: bool = False, limits: dict | None = None, runs_dir: Path | None = None,
+           tunables: dict | None = None) -> Run:
     """A new run folder, with copies of the workflow files and the input."""
     repo = repo.resolve()
     run_id = new_id(name)
@@ -302,7 +308,8 @@ def create(repo: Path, name: str, files: list[Path], main: Path, inputs: dict, h
         shutil.copy2(file, target)
     write_json(copies / "manifest.json", {"main": str(main.resolve().relative_to(base))})
     write_json(folder / "input.json", inputs)
-    write_json(folder / "run.json", {"workflow": name, "home": home, "dry_run": dry_run, **({"limits": limits} if limits else {})})
+    write_json(folder / "run.json", {"workflow": name, "home": home, "dry_run": dry_run, **({"limits": limits} if limits else {}),
+                                     **({"tunables": tunables} if tunables else {})})
     exclude_from_git(repo, None if parent == repo / ROOT else parent)  # a runs folder outside the repo needs none
     run = Run(run_id, folder, repo)
     run.set_status("running")

@@ -303,6 +303,9 @@ Fields every kind accepts:
 | `retry` | 1 for agent nodes, 0 for others | Extra attempts after a failure. |
 | `description` | none | Shown in progress output and by `wf graph`. |
 
+`max_parallel`, `timeout` and `retry` can also take their value from an input.
+See [Settings from inputs](#settings-from-inputs).
+
 #### Agent nodes
 
 | Field | Default | Meaning |
@@ -448,6 +451,44 @@ different limit.
 - **Cost** only counts harnesses that report it in dollars: Claude Code always does, Cursor
   only if it's enabled for your account, and Codex never does. A harness that doesn't report
   cost adds nothing, and `wf validate` warns about it.
+- Each limit can also take its value from an input.
+  See [Settings from inputs](#settings-from-inputs).
+
+### Settings from inputs
+
+A workflow can take its tunables as inputs.
+These fields accept a template that reads `start` in place of a literal.
+They are a route's `max`, a node's `timeout`, `retry` and `max_parallel` (in `defaults` too), and each of `limits`.
+
+```yaml
+start:
+  input:
+    max_rounds: {type: integer, default: 3}
+    review_timeout: {type: string, default: 30m}
+nodes:
+  review:
+    needs: [implement]
+    instruction: Review the change.
+    timeout: "{{ start.review_timeout }}"
+    routes:
+      - when: not review.blocking_issues
+        to: end
+      - to: implement
+        max: "{{ start.max_rounds }}"
+      - to: end
+```
+
+- The runner renders each template once, when the run starts.
+  It checks the value with the rules for a literal: `max` and `max_parallel` are whole numbers of 1 or more, and `retry` is 0 or more.
+  `timeout` and `limits.duration` are durations like `30m`, and `limits.cost_usd` and `limits.tokens` are more than 0.
+- A value that breaks a rule, or a template that gives `none`, stops `wf run` before the run begins.
+  The error names the field and the input.
+- The template can read only `start`, because these values are fixed before any node runs.
+- A sub-workflow renders its own from its node's `with`, when that node starts it.
+  A bad value fails that node.
+- `wf resume` keeps the values the run started with.
+- `wf validate` checks each template.
+  When every input a template reads has a `default`, it also checks the value the defaults give.
 
 ## Templates and expressions
 
@@ -457,6 +498,9 @@ Text is evaluated with sandboxed Jinja, in two ways:
   `with`, `base`, `harness`, `model`, `effort`, and end `value`s.
 - **Expressions** are written without braces. Fields: `when` and `for_each`.
   Example: `review.approved and tests.exit_code == 0`.
+- **Settings** (a route's `max`, `timeout`, `retry`, `max_parallel` and `limits`) can be templates too.
+  They render once, when the run starts, and can read only `start`.
+  See [Settings from inputs](#settings-from-inputs).
 
 Variables:
 
@@ -525,8 +569,10 @@ routes:
 - Routes are checked in order after the node succeeds. The first one whose `when` is true
   (or that has no `when`) and whose `max` isn't used up is taken.
 - `to` is a node id, `end`, or a list of node ids that all become pending.
-- `max` is how many times the route can be taken in one run of this workflow. Once used
-  up, the route is skipped. In the example, `implement` runs at most 4 times.
+- `max` is how many times the route can be taken in one run of this workflow.
+  Once used up, the route is skipped.
+  In the example, `implement` runs at most 4 times.
+  `max` can come from an input, as in `max: "{{ start.max_rounds }}"` (see [Settings from inputs](#settings-from-inputs)).
 - The last route must have no `when` and no `max`, so there's always a way out.
 - In `when`, the node's own name is the output it just produced.
 - A node with `routes` can't appear in another node's `needs`. Reach the next nodes through
@@ -608,22 +654,22 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | Runs of the user that use the same `~/.wf` | They share one set of slots, in `~/.wf/agent-slots/`. Runs with another `WF_HOME` have slots of their own. | `workflow/capacity.py:54` | `test_two_runs_in_separate_processes_share_the_cap`, `test_each_wf_home_has_its_own_slots`, `test_a_slot_file_names_its_holder` |
-| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:441` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
+| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:443` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
 | `WF_MAX_AGENTS` is set | It sets the same cap, and wins over `max_agents` in the file, which is still checked. | `workflow/capacity.py:64`, `workflow/capacity.py:66` | `test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home`, `test_a_bad_cap_stops_wf_run_before_the_run_exists` |
-| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:141` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
+| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:146` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
 | `config.yaml` names a setting wf doesn't know, or doesn't hold settings by name | The same. So a misspelt `max_agents` can't quietly mean no cap. | `workflow/settings.py:50` | `test_a_wrong_file_fails_every_read` in `tests/test_settings.py`, `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
-| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:446`, `workflow/nodes.py:464` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
+| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:448`, `workflow/nodes.py:466` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
 | An attempt holds a slot | The slot is the file `~/.wf/agent-slots/<n>`, which the attempt's process locks with `flock`. The file names its holder: pid, run, node and attempt. | `workflow/capacity.py:96`, `workflow/capacity.py:98`, `workflow/capacity.py:107` | `test_a_slot_has_one_holder_at_a_time`, `test_a_slot_file_names_its_holder` |
-| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:255` | `test_a_retry_and_a_fallback_take_a_slot_again` |
-| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:230`, `workflow/nodes.py:441` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
+| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:257` | `test_a_retry_and_a_fallback_take_a_slot_again` |
+| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:232`, `workflow/nodes.py:443` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
 | Several attempts wait for one slot | Each tries again every `POLL_SECONDS` (0.2 seconds), and the first try after the slot comes free gets it. So they get it one at a time, in an order that is not defined. | `workflow/capacity.py:46`, `workflow/capacity.py:117`, `workflow/capacity.py:120` | `test_a_wait_tries_again_every_0_2_seconds`, `test_attempts_that_wait_for_one_slot_take_it_one_at_a_time` |
-| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:454`, `workflow/nodes.py:257`, `workflow/nodes.py:258` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
-| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:450`, `workflow/nodes.py:460`, `workflow/context.py:153`, `workflow/cli.py:298` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
-| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:458` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
+| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:456`, `workflow/nodes.py:259`, `workflow/nodes.py:260` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
+| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:452`, `workflow/nodes.py:462`, `workflow/context.py:153`, `workflow/cli.py:298` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
+| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:460` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
 | A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:98` | `test_a_killed_process_frees_its_slot` |
 | A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:58` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
 | Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. | `workflow/capacity.py:95` | `test_a_smaller_cap_uses_only_the_first_slots` |
-| A `wf run` or `wf resume` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:69`, `workflow/runner.py:141` | `test_wf_run_and_wf_resume_read_the_cap_once_when_they_start` |
+| A `wf run` or `wf resume` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:69`, `workflow/runner.py:146` | `test_wf_run_and_wf_resume_read_the_cap_once_when_they_start` |
 
 ## The output tool
 
@@ -713,6 +759,8 @@ the context to fix them.
 .wf/runs/<run-id>/              <run-id> is like 20261018-1432-implement-k3f9
   workflow/                     copies of the workflow files as they were run
   input.json
+  run.json                      the `repo` workspace, `--limit` values, and the values
+                                the settings' templates gave (see Settings from inputs)
   branches.json                 the branches `branch` named, and where the run left them
   output.json                   the end output, once the run succeeds
   status.json                   running | waiting | succeeded | failed | limit
@@ -754,8 +802,8 @@ Errors:
 4. Every `needs` entry and route target exists, and `start` isn't a route target. `needs`
    has no cycles. No node needs a node that has `routes`.
 5. Every node has `needs` or is a route target, and can be reached from `start`.
-6. The last route of each node has no `when` and no `max`. Every loop includes a route
-   with `max`.
+6. The last route of each node has no `when` and no `max`.
+   Every loop includes a route with `max`, and a `max` written as a template counts.
 7. Templates and expressions parse. Every name exists. Field paths exist in the schemas
    they read from, including `item.<field>` checked against the list's item schema when
    that can be worked out.
@@ -777,6 +825,8 @@ Errors:
     `{{ start.<input> }}` as the value that `with` gives. So `fix/{{ start.task }}` and
     `review/{{ start.task }}` are apart, and so are `fm/{{ start.task }}/author` and
     `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.
+13. A setting written as a template reads only `start`.
+    When every input it reads has a `default`, the value the defaults give keeps the field's rule.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`

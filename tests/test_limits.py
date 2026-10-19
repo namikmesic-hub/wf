@@ -164,11 +164,26 @@ def test_a_run_can_start_with_a_different_limit(repo):
     assert output()["said"] == "done"
 
 
+@pytest.mark.parametrize("limit, given", [("tokens", "1000"), ("cost_usd", "0.5")])
+def test_limits_can_come_from_inputs_and_resume_raises_them_as_usual(repo, capsys, limit, given):
+    write("two.yaml", TWO.replace("limits: {tokens: 1000}", f'limits: {{{limit}: "{{{{ start.budget }}}}"}}')
+          .replace("start: {input: {}}", "start: {input: {budget: {type: number}}}"))
+    steps = {"agents": {"a": [{"summary": "big", "_tokens": 5000, "_cost_usd": 1.0}], "b": [{"summary": "done"}]}}
+    assert cli.main(["run", "two.yaml", f"budget={given}", "--dry-run", script(steps)]) == 1
+    assert (status()["status"], status()["limit"]) == ("limit", limit)
+    capsys.readouterr()
+    assert cli.main(["resume", only_run().name]) == 1  # the run keeps the budget it started with
+    assert f"limit {'$0.5' if limit == 'cost_usd' else '1,000'}" in capsys.readouterr().err
+    assert cli.main(["resume", only_run().name, "--limit", f"{limit}=none"]) == 0
+    assert output()["said"] == "done"
+
+
 @pytest.mark.parametrize("pair, message", [
     ("money=5", "NAME one of cost_usd, tokens, duration"),
     ("tokens=lots", "tokens is a whole number"),
     ("cost_usd=-1", "cost_usd:"),
     ("duration=soon", "duration:"),
+    ("duration={{ start.hours }}h", "duration: expected a duration"),  # only a workflow file can hold a template
 ])
 def test_bad_limits_are_refused(repo, capsys, pair, message):
     write("two.yaml", TWO)

@@ -77,6 +77,17 @@ def test_a_loop_that_runs_out_is_called_out(repo, capsys):
     assert any("check → bump reached its max (3) in 1 of 1 run" in note for note in found["notes"])
 
 
+def test_a_max_from_an_input_is_used_up_against_the_value_each_run_had(repo, capsys):
+    write("loop.yaml", LOOP.replace("max: 3", 'max: "{{ start.rounds }}"')
+          .replace("start: {input: {need: {type: integer, default: 3}}}",
+                   "start: {input: {need: {type: integer, default: 3}, rounds: {type: integer}}}"))
+    assert cli.main(["run", "loop.yaml", "rounds=1"]) == 0  # needs 3 passes, gets 2: used up
+    Path("count").unlink()
+    assert cli.main(["run", "loop.yaml", "rounds=5"]) == 0  # 3 passes are enough
+    loop = next(r for r in report(capsys, "--workflow", "loop")["routes"] if r["to"] == ["bump"])
+    assert (loop["max"], loop["taken"], loop["max_reached"]) == ("{{ start.rounds }}", 3, 1)
+
+
 def test_attempts_failures_and_spending_per_node(repo, monkeypatch, capsys):
     fake = Fake("claude-code", talk(tokens=50, cost=0.01), talk(), talk(), submit({"summary": "ok"}, tokens=200, cost=0.04))
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)

@@ -33,8 +33,9 @@ copies two complete workflows into ./wf-examples/ to read or start from;
 1. **Pin the job.** Name the inputs (start.input), the result (end.output), and
    for each step who should do it: a command for anything deterministic (tests,
    build, lint), an agent for judgement, a person for decisions the person
-   running the workflow should own. Done when every start.input and end.output
-   field has a name and type.
+   running the workflow should own.
+   Make each tunable an input with a default: loop caps, timeouts, retries and budgets ([reference.md](reference.md#settings-from-inputs)).
+   Done when every start.input and end.output field has a name and type.
 2. **Pick a shape** from [patterns.md](patterns.md). Done when every step is a
    node with a kind, and every loop has its exit route and `max`.
 3. **Write the file.** Start from `wf init <name>` or an example. For each node

@@ -8,6 +8,7 @@ Read the modules in this order. The first group knows nothing about LangGraph:
     spec.py        the file format, as Pydantic models
     schemas.py     field maps -> JSON Schema, and checking values against them
     templates.py   sandboxed Jinja, plus reading templates without running them
+    tunables.py    route `max`, timeouts, retries and limits taken from the inputs
     scheduler.py   the graph, and the rules for which node runs next
     validate.py    every check in the spec's Validation section
     diagram.py     `wf graph`: the workflow as a Mermaid flowchart

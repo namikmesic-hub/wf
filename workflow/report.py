@@ -49,6 +49,7 @@ def build(runs: list[Run]) -> dict:
         seen, started, counted = set(), {}, {}  # counted: what each (node, pass) has reported spending
         failed_pass: dict = {}  # node -> its pass that failed: a resume reruns it, timed from its next event
         taken_here: Counter = Counter()  # by the route's key and the exact place (build[2]/review)
+        max_here: dict = {}  # ...and the `max` the run gave it there, which a template can set per run
         for event in events:
             kind, name = event.get("event"), _name(event.get("node") or "")
             if not name:  # run-level events (limit, warnings) belong to no node
@@ -106,7 +107,8 @@ def build(runs: list[Run]) -> dict:
                     routes[key]["taken"] += 1
                     place = (key, event["node"])  # the run's own count: a sub-workflow attempt that starts over restarts it
                     taken_here[place] = max(taken_here[place], event.get("taken", taken_here[place] + 1))
-        used_up = {key for (key, _), count in taken_here.items() if routes[key]["max"] and count >= routes[key]["max"]}
+                    max_here[place] = event.get("max")
+        used_up = {place[0] for place, count in taken_here.items() if max_here[place] and count >= max_here[place]}
         for key in used_up:
             routes[key]["max_reached"] += 1
         summary["cost_usd"] = round(summary["cost_usd"], 6)

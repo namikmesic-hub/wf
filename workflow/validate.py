@@ -9,8 +9,10 @@ The checks run in this order, because later ones lean on earlier ones:
 2. schemas: `types`, start.input, node outputs, end output schemas
 3. sub-workflows: each is checked too (its problems are reported with its
    own file name), and its end output becomes the parent node's output schema
-4. per node: templates and expressions, for_each, harness, workspace, `with`
-5. `branch` names, end outputs, then the warnings that need the whole graph
+4. tunables written as templates (tunables.py): they read only `start`, and
+   an input's default must give a value the field accepts
+5. per node: templates and expressions, for_each, harness, workspace, `with`
+6. `branch` names, end outputs, then the warnings that need the whole graph
 
 Templates are checked without running them. templates.references() lists every
 name a template reads and its field path; _roots() says what each name holds,
@@ -29,10 +31,10 @@ import itertools
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import schemas, spec, templates
+from . import schemas, spec, templates, tunables
 from .scheduler import END, START, Topology
 from .schemas import ANY, EACH, NoField
-from .spec import HARNESSES, NODE_ID, RESERVED, Problem, SpecError, Workflow
+from .spec import HARNESSES, NODE_ID, RESERVED, Problem, SpecError, Workflow, is_template
 from .templates import Ref, TemplateError
 
 _WORKSPACE = schemas.object_schema(
@@ -129,6 +131,7 @@ class _Checker:
         self._sub_workflows()
         self.roots = self._roots()
         self.order = _Order(self.topo)
+        self._tunables()
         for node_id in self.nodes:
             self._node(node_id)
         self._branches()
@@ -306,7 +309,22 @@ class _Checker:
                     pass
         return frozenset(found)
 
-    # ---------- 4. one node ----------
+    # ---------- 4. tunables ----------
+
+    def _tunables(self) -> None:
+        defaults = {k: f["default"] for k, f in self.wf.start.input.items() if "default" in f}
+        for where, source in tunables.templated(self.wf):
+            found = len(self.problems)
+            refs = self._template(where, source, None, "tunable")
+            if refs is None or len(self.problems) > found:
+                continue
+            if all(ref.name in _JINJA_GLOBALS or (ref.path and ref.path[0] in defaults) for ref in refs):
+                try:  # every input it reads has a default: a run that keeps them gets this value
+                    tunables.value(where, source, defaults, defaults=True)
+                except tunables.TunableError as error:
+                    self.add(error.problems)
+
+    # ---------- 5. one node ----------
 
     def _node(self, node_id: str) -> None:
         node = self.nodes[node_id]
@@ -342,7 +360,7 @@ class _Checker:
         self._workspace(node_id)
 
     def _template(self, where: str, source: str, node_id: str | None, context: str, *, expression: bool = False):
-        """Check one template or expression. context: node, for_each, when or end."""
+        """Check one template or expression. context: node, for_each, when, end or tunable."""
         try:
             refs = templates.references(source, expression=expression)
         except TemplateError as error:
@@ -354,6 +372,10 @@ class _Checker:
 
     def _ref(self, where: str, ref: Ref, node_id: str | None, context: str) -> None:
         name = ref.name
+        if context == "tunable" and name not in ("start", *_JINJA_GLOBALS):
+            self.error(where, "this is set once when the run starts, before any node runs, "
+                              f"so it can read only `start`, not `{name}`")
+            return
         if name in ("item", "index"):
             if node_id is None or self.nodes[node_id].for_each is None or context != "node":
                 self.error(where, f"`{name}` is only defined inside a for_each node's templates (not in `when` or `for_each`)")
@@ -627,7 +649,7 @@ class _Checker:
             return schemas.types_of(schema) if schema else None
         return None if templates.single_expression(value) is not None else {"string"}
 
-    # ---------- 5. branch names, end outputs and whole-graph warnings ----------
+    # ---------- 6. branch names, end outputs and whole-graph warnings ----------
 
     def _branches(self) -> None:
         """`branch` names a `workspace: new` worktree's branch: one per item, never `wf` or under
@@ -757,8 +779,9 @@ class _Checker:
                 if key(a) == shared and not self._ordered(a, b):
                     label = "repo" if shared == "repo" else f"`{shared}`"
                     self.warn(f"nodes.{b}", f"`{a}` and `{b}` both edit the {label} workspace and could run at the same time")
+            parallel = self.wf.setting(b, "max_parallel")  # a template could give more than 1
             if (self.nodes[b].for_each is not None and self.wf.setting(b, "workspace") not in ("new", "temp")
-                    and self.wf.setting(b, "max_parallel") > 1):  # new and temp give each item its own folder
+                    and (is_template(parallel) or parallel > 1)):  # new and temp give each item its own folder
                 self.warn(f"nodes.{b}", "items run in parallel in the same workspace and each edits it; "
                                         "use `workspace: new` or `max_parallel: 1`")
 

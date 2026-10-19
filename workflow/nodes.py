@@ -49,6 +49,8 @@ name the branch its index already has.
 
 Workflow nodes (_workflow) run their sub-workflow with the same graph, as a
 separate LangGraph thread in the run's checkpoints: one thread per attempt.
+Its tunables' templates (tunables.py) render from `with` before the first
+attempt, and the values are kept in the pass folder for when the job runs again.
 So a sub-workflow that fails is just this job failing (retry, on_item_error
 and `wf resume` all work as for any node), and a retry starts a fresh thread.
 The sub-workflow runs in a fresh contextvars.Context, so LangGraph doesn't
@@ -75,7 +77,7 @@ from typing import Any
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
-from . import capacity, dryrun, output_tool, schemas, templates, workspaces
+from . import capacity, dryrun, output_tool, schemas, templates, tunables, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
 from .harnesses import SessionSpec, Unavailable, Usage
@@ -581,6 +583,7 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
     sub = ctx.load((Path(wf.path).parent / node.workflow).resolve())
     given = {k: templates.render_value(v, variables) if isinstance(v, str) else v for k, v in node.with_.items()}
     inputs = _sub_inputs(sub, given, job["attempt"])
+    sub = _sub_tunables(sub, inputs, folder, job["attempt"])
     (folder / "instruction.md").write_text(json.dumps({"workflow": node.workflow, "with": inputs}, indent=2) + "\n",
                                            encoding="utf-8")
     try:  # the sub-workflow's `repo` is this node's workspace; its base is that folder's commit now
@@ -634,6 +637,21 @@ def _sub_inputs(sub, given: dict, attempt: int) -> dict:
     if problems:
         raise _Failed(f"`with` doesn't fit {sub.name}'s inputs: " + "; ".join(problems), attempt)
     return values
+
+
+def _sub_tunables(sub, inputs: dict, folder: Path, attempt: int):
+    """The sub-workflow with the values its tunables' templates give with these inputs: the
+    ones kept in the pass folder if this job ran before (`wf resume`), else rendered now."""
+    kept = folder / "tunables.json"
+    try:
+        if kept.exists():
+            return tunables.apply(sub, json.loads(kept.read_text(encoding="utf-8")))
+        resolved, values = tunables.resolve(sub, inputs)
+    except tunables.TunableError as error:
+        raise _Failed(f"in {sub.name}, {error}", attempt) from None
+    if values:
+        write_json(kept, values)
+    return resolved
 
 
 async def _run_sub(graph, child: RunContext, thread: str, first_input: dict, relay, label: str):

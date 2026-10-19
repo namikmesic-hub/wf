@@ -17,6 +17,10 @@ Worth knowing:
   error.
 - A setting a node leaves out comes from `defaults`, then from the built-in
   default. Workflow.setting() does that lookup, so nothing else has to.
+- The fields in TUNABLES (a route's `max`, `timeout`, `retry`, `max_parallel`
+  and `limits`) can also be a template, kept as written: tunables.py renders
+  it when the run starts. Only parse() accepts one. A `--limit` value, and the
+  value a template gives, must be a literal.
 
 Errors come back as Problems (where + message) rather than Pydantic's own
 format, so `wf validate` prints one line per problem with its key path.
@@ -38,6 +42,9 @@ from pydantic import (
     PrivateAttr,
     Tag,
     ValidationError,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
 )
 from pydantic_core import PydanticCustomError
 
@@ -122,6 +129,35 @@ FieldMap = dict[str, dict[str, Any]]
 Access = Literal["read-only", "edit", "full"]
 
 
+# ---------- settings a run can take from its inputs ----------
+
+# These fields can be a template that reads `start`, rendered when the run starts (tunables.py).
+# Each maps to the literal it must be: a value a template gives is checked as one written down.
+TUNABLES = {
+    "max": Annotated[int, Field(ge=1)],
+    "max_parallel": Annotated[int, Field(ge=1)],
+    "retry": Annotated[int, Field(ge=0)],
+    "timeout": Duration,
+    "cost_usd": Annotated[float, Field(gt=0)],
+    "tokens": Annotated[int, Field(gt=0)],
+    "duration": Duration,
+}
+
+
+def is_template(value: Any) -> bool:
+    return isinstance(value, str) and ("{{" in value or "{%" in value)
+
+
+def _literal_or_template(value: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo) -> Any:
+    if is_template(value) and info.context and info.context.get("templates"):
+        return value
+    return handler(value)
+
+
+def _tunable(name: str):
+    return Annotated[TUNABLES[name], WrapValidator(_literal_or_template)]
+
+
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
@@ -132,7 +168,7 @@ class _Model(BaseModel):
 class Route(_Model):
     when: str | None = None
     to: NameOrList
-    max: int | None = Field(None, ge=1)
+    max: _tunable("max") | None = None
 
     @property
     def targets(self) -> tuple[str, ...]:
@@ -146,14 +182,14 @@ class _Node(_Model):
     needs: list[str] = []
     routes: list[Route] = []
     for_each: str | None = None
-    max_parallel: int | None = Field(None, ge=1)
+    max_parallel: _tunable("max_parallel") | None = None
     max_items: int | None = Field(None, ge=0)
     on_item_error: Literal["fail", "continue"] | None = None
     workspace: str | None = None
     base: str | None = None
     branch: str | None = None
-    timeout: Duration | None = None
-    retry: int | None = Field(None, ge=0)
+    timeout: _tunable("timeout") | None = None
+    retry: _tunable("retry") | None = None
     description: str | None = None
 
 
@@ -237,9 +273,9 @@ class Defaults(_Model):
     budget_usd: float | None = Field(None, gt=0)
     workspace: Literal["repo", "new", "temp"] | None = None
     base: str | None = None
-    timeout: Duration | None = None
-    retry: int | None = Field(None, ge=0)
-    max_parallel: int | None = Field(None, ge=1)
+    timeout: _tunable("timeout") | None = None
+    retry: _tunable("retry") | None = None
+    max_parallel: _tunable("max_parallel") | None = None
     max_items: int | None = Field(None, ge=0)
     on_item_error: Literal["fail", "continue"] | None = None
     check: bool | None = None
@@ -247,9 +283,9 @@ class Defaults(_Model):
 
 
 class Limits(_Model):
-    cost_usd: float | None = Field(None, gt=0)
-    tokens: int | None = Field(None, gt=0)
-    duration: Duration | None = None
+    cost_usd: _tunable("cost_usd") | None = None
+    tokens: _tunable("tokens") | None = None
+    duration: _tunable("duration") | None = None
 
 
 class Start(_Model):
@@ -375,7 +411,7 @@ def parse(text: str, path: Path | None = None) -> Workflow:
     if not isinstance(data, dict):
         raise SpecError([Problem("", "a workflow file must be a YAML map with version, name, start, nodes and end", file=path)])
     try:
-        workflow = Workflow.model_validate(data)
+        workflow = Workflow.model_validate(data, context={"templates": True})
     except ValidationError as error:
         raise SpecError(_problems(error, path)) from error
     workflow._path = path
