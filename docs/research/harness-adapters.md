@@ -319,7 +319,7 @@ All seven were applied to `docs/workflow-spec.md` on 2026-10-18.
 
 ## 5. To check before or while building
 
-- **Cursor** (needs an API key; for the ACP adapter, see [section 6](#6-cursor-through-acp)):
+- **Cursor**, which needs an API key ([section 6](#6-cursor-through-acp) covers the ACP adapter):
   - Does `setting_sources=["project"]` load `AGENTS.md`, `.cursor/rules` and `CLAUDE.md`?
   - Can a sandboxed `edit` agent run git in a worktree?
   - How does a usage limit actually show up?

@@ -328,7 +328,8 @@ Each harness adapter maps these levels to its own permission settings (see
 outside the level is refused.
 
 With `edit`, agents can't write to `.git` under Codex's sandbox.
-So the runner makes the commits (see [Workspaces](#workspaces)), and a node that runs git commands that write, such as `git merge` or `git rebase`, needs `access: full`.
+So the runner makes the commits (see [Workspaces](#workspaces)).
+A node that runs git commands that write, such as `git merge` or `git rebase`, needs `access: full`.
 
 Agents run with the harness's normal coding setup: its own system prompt, plus the repo's
 instruction files (`CLAUDE.md`, `AGENTS.md`). Where the harness allows it, user-level
@@ -424,7 +425,8 @@ The runner always passes the model and effort to the harness explicitly, so your
 harness config never decides them. When nothing is set, it uses the harness's own default:
 for Codex, the default model in the app server's model list. Cursor has no default, so any
 node that can run on Cursor needs a `model`.
-A Cursor model id carries its own effort, as in `gpt-5.6-sol-max-fast`, `gemini-4-argon-high` or `claude-fable-5-1-thinking-max`, so `effort` doesn't apply to Cursor and `wf validate` warns when it's set.
+A Cursor model id carries its own effort, as in `gpt-5.6-sol-max-fast`, `gemini-4-argon-high` or `claude-fable-5-1-thinking-max`.
+So `effort` doesn't apply to Cursor, and `wf validate` warns when it's set.
 The id must be one that `cursor-agent --list-models` lists.
 Any other makes Cursor unavailable for that attempt, so the next harness in the node's list runs.
 
@@ -662,7 +664,8 @@ Each agent attempt gets one tool, `submit_result`. Its input schema is the node'
   Each session gets its own URL, with an unguessable token in it.
   A request from a web page (an Origin header that isn't 127.0.0.1 or localhost) gets no answer.
 
-Each call arrives tied to its session (a process, a thread id or a session's URL), so a result can only reach the attempt it belongs to.
+Each call arrives tied to its session: a process, a thread id or a session's URL.
+So a result can only reach the attempt it belongs to.
 
 The runner uses this tool instead of each harness's own structured-output feature because
 it works the same everywhere, and the agent gets validation errors back while it still has
@@ -882,8 +885,11 @@ Notes:
   timeout of its own. So the runner always replies, even on errors.
 - Codex's app-server login is for local use on your own account. Don't run `wf` as a hosted
   service on someone else's ChatGPT login.
-- Cursor asks before what it may not do by itself, and the runner answers from the node's access level with "allow once" or "reject", never "allow always", which Cursor would save.
-- Cursor saves the model it was started with, and the parameters it last used for that model, into its settings folder, and reads its permissions from there.
+- Cursor asks before what it may not do by itself.
+  The runner answers from the node's access level with "allow once" or "reject".
+  It never answers "allow always", which Cursor would save.
+- Cursor saves the model it was started with, and the parameters it last used for that model, into its settings folder.
+  It also reads its permissions from there.
   So each cursor-agent process gets a new folder in `~/.wf/temp/<run-id>/cursor-agent/`.
   It's outside the repo because Cursor also writes your account's details there.
   A session that a later pass may continue is kept there until the run succeeds.
@@ -891,12 +897,14 @@ Notes:
   For `edit`, deny rules block those writes.
   For `read-only`, a deny rule blocks every write.
 - Cursor's sandbox is off at every level.
-  With it on, a command still asks first, and one the runner allows runs outside the sandbox: in a live check it wrote outside the workspace and reached the network.
+  With it on, a command still asks first, and one the runner allows runs outside the sandbox.
+  In a live check, such a command wrote outside the workspace and reached the network.
   So the sandbox would confine nothing the runner doesn't already decide.
 - The effort in a Cursor model id applies only when the client says it takes parameterized models, which the adapter does.
   Each attempt's transcript records the model and parameters Cursor reports for the session.
 - `--disable-project-configs` keeps the repo's `.cursor/cli.json` from changing Cursor's permissions.
-- Cursor reports a failed request as a paragraph at the end of the turn's last message, not as an error, so the adapter reads that message to tell a usage limit or a login problem from other failures.
+- Cursor reports a failed request as a paragraph at the end of the turn's last message, not as an error.
+  So the adapter reads that message to tell a usage limit or a login problem from other failures.
 - What Cursor can't switch off: a web fetch that Cursor's server marks as needing no approval runs even with `web: false`.
 
 How it maps onto LangGraph:

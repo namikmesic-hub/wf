@@ -4,8 +4,10 @@
 
 Run YAML workflows of coding-agent steps.
 
-A workflow is a graph of steps: tasks for coding agents (Claude Code, Codex or Cursor), shell commands, questions for a person, and other workflows.
-Every step declares what it outputs, and routes decide what runs next, so loops like "implement, test, review, and go round until clean" are a few lines of YAML.
+A workflow is a graph of steps.
+Its steps are tasks for coding agents (Claude Code, Codex or Cursor), shell commands, questions for a person, and other workflows.
+Every step declares what it outputs, and routes decide what runs next.
+So loops like "implement, test, review, and go round until clean" are a few lines of YAML.
 wf runs the graph on LangGraph:
 - parallel steps work in their own git worktrees;
 - a failed attempt is retried, or falls back to another agent;
