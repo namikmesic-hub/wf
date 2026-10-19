@@ -10,7 +10,7 @@ from textwrap import dedent
 import pytest
 
 from fakes import Fake, submit
-from workflow import cli, diagram, harnesses, report, runner, spec, ui
+from workflow import cli, diagram, harnesses, report, runner, runs, spec, ui
 from workflow.runs import Run
 
 EXAMPLES = Path(__file__).parent.parent / "workflow" / "examples"
@@ -81,6 +81,50 @@ def test_a_run_has_its_graph_progress_metrics_and_attempts(finished):
     assert (check["node"], check["log"], check["output"]) == ("check", "nodes/check/1/attempt-1.log", "nodes/check/1/output.json")
 
 
+def test_a_run_that_moves_shows_its_progress_in_the_run_list(repo):
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    run = runs.create(Path.cwd(), "flow", [Path("flow.yaml")], Path("flow.yaml"), {})  # running: just started
+    run.add_event({"event": "node_started", "node": "think", "pass": 1})
+    (only,) = ui.run_list(ui.Source(Path.cwd()))["runs"]
+    assert (only["status"], only["progress"]) == ("running", {"step": 1, "steps": 2, "percent": 0, "left_s": None})
+
+
+def test_attempts_are_found_in_items_and_in_sub_workflows(repo, monkeypatch):
+    fake = Fake("claude-code", *[submit({"summary": f"item {n}"}) for n in range(2)], submit({"summary": "inner"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    Path("inner.yaml").write_text(dedent("""
+        version: 1
+        name: inner
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {}}
+        nodes:
+          think: {needs: [start], instruction: Think.}
+          note: {needs: [think], command: "echo inner"}
+        end: {output: {}}
+    """).lstrip())
+    Path("outer.yaml").write_text(dedent("""
+        version: 1
+        name: outer
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {}}
+        nodes:
+          each: {needs: [start], for_each: "[1, 2]", instruction: "Think about {{ item }}."}
+          list: {needs: [each], for_each: "[1, 2]", command: "echo {{ item }}"}
+          sub: {needs: [list], workflow: inner.yaml}
+        end: {output: {}}
+    """).lstrip())
+    assert cli.main(["run", "outer.yaml"]) == 0
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    found = {(a["node"], a["pass"], a["attempt"]): a for a in ui.attempts(Run.at(folder))}
+    assert set(found) == {("each[0]", 1, 1), ("each[1]", 1, 1), ("list[0]", 1, 1), ("list[1]", 1, 1),
+                          ("sub/think", 1, 1), ("sub/note", 1, 1)}
+    assert found[("list[1]", 1, 1)]["log"] == "nodes/list/1/1/attempt-1.log"
+    assert found[("list[1]", 1, 1)]["instruction"] == "nodes/list/1/1/instruction.md"
+    assert found[("sub/note", 1, 1)]["log"] == "nodes/sub/1/attempt-1/nodes/note/1/attempt-1.log"
+    assert found[("sub/think", 1, 1)]["harness"] == "claude-code" and found[("each[0]", 1, 1)]["model"] == "opus"
+    assert ui.run_file(Run.at(folder), found[("sub/note", 1, 1)]["log"])["text"] == "inner\n"
+
+
 def test_events_come_as_lines_and_then_only_the_new_ones(finished):
     first = ui.events_after(finished, None)
     texts = [e["text"] for e in first["events"]]
@@ -149,8 +193,18 @@ def test_with_all_repos_the_page_lists_the_runs_of_each_repo_in_the_runs_folder(
     assert {source.get(key).repo for key in keys} == {(tmp_path / "one").resolve(), (tmp_path / "two").resolve()}
     assert source.get("nope") is None
 
+    assert source.get("../" + keys[0]) is None and source.get(keys[0].replace("/", "/../")) is None
+
     monkeypatch.delenv("WF_RUNS_DIR", raising=False)
     assert cli.main(["ui", "--all-repos"]) == 1  # no runs folder to read
+
+
+@pytest.mark.parametrize("port", ["-1", "65536", "70000", "http"])
+def test_a_port_that_is_not_a_port_is_refused_with_a_message(port, capsys):
+    with pytest.raises(SystemExit) as stop:  # bad arguments exit with 1, before any server starts
+        cli.main(["ui", "--port", port])
+    assert stop.value.code == 1
+    assert f"`{port}` isn't a port: use a number from 0 to 65535" in capsys.readouterr().err
 
 
 # ---------- the server ----------
@@ -166,9 +220,11 @@ def server(finished):
     running.server_close()
 
 
-def get(server: ui.Server, path: str, host: str | None = None) -> tuple[int, dict, bytes]:
+def get(server: ui.Server, path: str, host: str | None = None, token: str | None = None) -> tuple[int, dict, bytes]:
+    """A request as the page makes it: with the page's key, unless `token` says otherwise."""
     connection = http.client.HTTPConnection(ui.HOST, server.port, timeout=10)
-    connection.request("GET", path, headers={"Host": host or f"{ui.HOST}:{server.port}"})
+    connection.request("GET", path, headers={"Host": host or f"{ui.HOST}:{server.port}",
+                                             "X-WF-Token": server.token if token is None else token})
     response = connection.getresponse()
     body = response.read()
     connection.close()
@@ -193,11 +249,22 @@ def test_the_server_serves_the_page_and_its_json_on_this_machine_only(server, fi
     assert status == 200 and json.loads(body)["text"] == "checked\n"
 
 
+def test_the_server_gives_data_only_to_the_page_that_has_its_key(server, finished):
+    assert server.url == f"http://127.0.0.1:{server.port}/#token={server.token}" and len(server.token) >= 32
+    assert get(server, "/", token="")[0] == 200  # the page holds nothing of the runs
+    for path in ("/api/runs", f"/api/run?id={finished.id}", f"/api/file?id={finished.id}&path=nodes/check/1/attempt-1.log"):
+        status, _, body = get(server, path, token="")
+        assert status == 401 and "key" in json.loads(body)["error"]
+        assert get(server, path, token=server.token[:-1] + "x")[0] == 401
+    assert ui.Server(ui.Source(Path.cwd()), 0).token != server.token  # a new key for each server
+
+
 def test_the_server_refuses_other_hosts_unknown_runs_and_files_outside_the_passes(server, finished):
     assert get(server, "/api/runs", host=f"attacker.example:{server.port}")[0] == 403
     assert get(server, "/api/runs", host="127.0.0.1")[0] == 403
     assert get(server, "/api/runs", host=f"localhost:{server.port}")[0] == 200
     assert get(server, "/api/run?id=nope")[0] == 404
+    assert get(server, "/api/run?id=../" + finished.id)[0] == 404
     assert get(server, f"/api/file?id={finished.id}&path=../run.json")[0] == 404
     assert get(server, "/nothing")[0] == 404
 
@@ -211,5 +278,5 @@ def test_a_port_in_use_gives_way_to_a_free_one(server, finished):
 
     assert ui.serve(ui.Source(Path.cwd()), server.port, say=said.append, opened=stop) == 0
     assert said[0].startswith(f"Port {server.port} is in use, so wf ui uses port ")
-    assert opened[0].startswith("http://127.0.0.1:") and opened[0] != server.url
+    assert opened[0].startswith("http://127.0.0.1:") and "#token=" in opened[0] and opened[0] != server.url
     assert said[1] == f"wf ui: {opened[0]} shows the runs in {finished.dir.parent}. Ctrl-C stops it."

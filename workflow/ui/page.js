@@ -35,8 +35,12 @@ function svg(tag, attrs = {}, ...children) {
 
 function text(id, value) { document.getElementById(id).textContent = value; }
 
+// The key comes in the address that wf ui prints (#token=...). The tab keeps it when the address shows a run.
+const token = new URLSearchParams(location.hash.slice(1)).get("token") || sessionStorage.getItem("wf-token") || "";
+sessionStorage.setItem("wf-token", token);
+
 async function getJSON(url) {
-  const response = await fetch(url, { cache: "no-store" });
+  const response = await fetch(url, { cache: "no-store", headers: { "X-WF-Token": token } });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || response.statusText);
   return body;
@@ -94,8 +98,7 @@ async function refreshRuns() {
 }
 
 function fromHash() {
-  const match = location.hash.match(/^#run=(.+)$/);
-  return match ? decodeURIComponent(match[1]) : null;
+  return new URLSearchParams(location.hash.slice(1)).get("run");
 }
 
 function select(id) {

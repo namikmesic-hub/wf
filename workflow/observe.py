@@ -5,41 +5,49 @@
 
 An agent session starts and ends with an event in events.jsonl (nodes.py).
 The session_started event names its node, pass, item, attempt, harness and
-model. It also names the process that runs it, and its transcript
-(attempt-<n>.log, relative to the run folder). session_ended follows when the
-attempt closes the session. A session runs now while it has no session_ended
-event. Also, the process that its session_started event names must still drive
-the run: it holds the run's lock (runs.py). So a session that a killed process
-left open is not listed.
+model. It also names the process that runs it, and its transcript,
+attempt-<n>.log in the run folder. session_ended follows when the attempt
+closes the session.
+
+A session runs now until its session_ended comes, or an event that ends its
+attempt, pass or item. Those events are attempt_failed, harness_unavailable,
+node_finished, node_failed and item_failed. The same events for
+a workflow node end each session inside it, because a sub-workflow that its
+attempt stops can't pass up its own session_ended. Also, the process that its
+session_started event names must still drive the run: it holds the run's lock
+(runs.py). So a session that a killed process left open is not listed.
 
 A session's last tool call is its last agent_tool event. It has been quiet
 since its last event or the last change to its transcript, the later of the two.
 
-`wf watch` prints the last WATCH_BACK events, then each new one, until the run
-needs attention (operate.ATTENTION). Then it prints the run's state and stops.
+`wf watch` prints the last WATCH_BACK events, then each new one. Each time the
+run comes to need attention (operate.ATTENTION), it prints the run's state,
+and goes on: `wf answer` or `wf retry` can continue the run. It stops once
+the run succeeded, or its folder is gone.
 """
 
-import json
 import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
 from . import operate, progress, report, runner
-from .runs import Run
+from .runs import Run, read_events
 
 WATCH_BACK = 20
 POLL_SECONDS = 0.5
+_ENDS = ("attempt_failed", "harness_unavailable", "node_finished", "node_failed", "item_failed")
 
 
-def sessions(run: Run, now: float | None = None) -> list[dict]:
-    """The agent sessions of a run that run now, oldest first."""
+def sessions(run: Run, now: float | None = None, events: list[dict] | None = None) -> list[dict]:
+    """The agent sessions of a run that run now, oldest first. With `events`, it doesn't read
+    events.jsonl again."""
     if not run.driven():
         return []
     driver = _driver(run)
     now = time.time() if now is None else now
     found: dict[tuple, dict] = {}
-    for event in report.events(run):
+    for event in report.events(run) if events is None else events:
         kind = event.get("event")
         key = (event.get("node"), event.get("pass"), event.get("index"), event.get("attempt"))
         if kind == "session_started":
@@ -54,6 +62,9 @@ def sessions(run: Run, now: float | None = None) -> list[dict]:
         elif kind == "agent_tool" and key in found:
             found[key]["last_tool"] = {"tool": event.get("tool"), "detail": event.get("detail", ""), "time": event.get("time")}
             found[key]["_seen"] = event.get("time")
+        elif kind in _ENDS:
+            for ended in [k for k in found if _ends(event, k)]:
+                del found[ended]
     live = []
     for session in found.values():
         if driver is not None and session["_pid"] is not None and session["_pid"] != driver:
@@ -70,6 +81,25 @@ def sessions(run: Run, now: float | None = None) -> list[dict]:
         session["quiet_s"] = max(round(now - seen), 0)
         live.append(session)
     return live
+
+
+def _ends(event: dict, key: tuple) -> bool:
+    """Does this event end the attempt, pass or item of the session with this key, or the
+    workflow node that the session is inside?"""
+    node, pass_no, index, attempt = key
+    name, kind = event.get("node"), event.get("event")
+    if not isinstance(name, str) or not isinstance(node, str):
+        return False
+    inside = (f"{name}[{event['index']}]/",) if event.get("index") is not None else (f"{name}/", f"{name}[")
+    if node.startswith(inside):
+        return True
+    if node != name:
+        return False
+    if kind in ("attempt_failed", "harness_unavailable"):
+        return (pass_no, index, attempt) == (event.get("pass"), event.get("index"), event.get("attempt"))
+    if kind == "item_failed":
+        return index == event.get("index")
+    return pass_no == event.get("pass")
 
 
 def _driver(run: Run) -> int | None:
@@ -109,27 +139,6 @@ def table(found: list[dict]) -> str:
 # ---------- the event stream ----------
 
 
-def read_events(path: Path, offset: int = 0) -> tuple[list[dict], int]:
-    """The events after byte `offset` of events.jsonl, and the offset after the last whole line.
-    A line still being written stays for the next read."""
-    try:
-        with path.open("rb") as file:
-            file.seek(offset)
-            data = file.read()
-    except FileNotFoundError:
-        return [], offset
-    whole = data[: data.rfind(b"\n") + 1]
-    found = []
-    for line in whole.splitlines():
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(event, dict):
-            found.append(event)
-    return found, offset + len(whole)
-
-
 def line(event: dict) -> str | None:
     """One line for an event, as `wf run` prints it, plus a line for each agent session that starts."""
     if event.get("event") == "session_started":
@@ -142,22 +151,31 @@ def line(event: dict) -> str | None:
 
 
 def watch(run: Run, say: Callable[[str], None] = lambda text: print(text, flush=True), back: int | None = WATCH_BACK,
-          poll: float = POLL_SECONDS) -> dict:
+          poll: float = POLL_SECONDS, tell: Callable[[dict], str] | None = None) -> dict:
     """Print the last `back` events of the run as lines, or all of them for None. Then print each
-    new one as it comes, until the run needs attention. Returns its state then."""
+    new one as it comes. Each time the run comes to need attention, print `tell(state)` and go on.
+    Returns the run's last state, once it succeeded or its folder is gone ("discarded")."""
+    tell = tell or (lambda state: f"{state.get('run')}: {state.get('status')}")
     path = run.dir / "events.jsonl"
+    workflow = run.info().get("workflow")
     events, offset = read_events(path)
     shown = [text for text in map(_stamped, events) if text is not None]
     for text in shown[0 if back is None else max(len(shown) - back, 0):]:
         say(text)
+    told = None
     while True:
+        if not run.dir.exists():
+            return {"run": run.id, "status": "discarded", "workflow": workflow}
         current = operate.state(run)
         events, offset = read_events(path, offset)  # after the state: no event before it is missed
         for text in map(_stamped, events):
             if text is not None:
                 say(text)
-        if current["status"] in operate.ATTENTION:
+        if current["status"] == "succeeded":
             return current
+        if current["status"] in operate.ATTENTION and (current["status"], current.get("seq")) != told:
+            told = (current["status"], current.get("seq"))
+            say(tell(current))
         time.sleep(poll)
 
 
@@ -172,4 +190,3 @@ def _clock(when) -> str:
         return datetime.fromisoformat(when).astimezone().strftime("%H:%M:%S")
     except (TypeError, ValueError):
         return "--:--:--"
-

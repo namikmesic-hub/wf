@@ -257,6 +257,27 @@ class Run:
             return None
 
 
+def read_events(path: Path, offset: int = 0) -> tuple[list[dict], int]:
+    """The events after byte `offset` of an events.jsonl, and the offset after its last whole line.
+    A line still being written stays for the next read, and a damaged line is left out."""
+    try:
+        with path.open("rb") as file:
+            file.seek(offset)
+            data = file.read()
+    except OSError:  # not there yet, or the run is being discarded
+        return [], offset
+    whole = data[: data.rfind(b"\n") + 1]
+    found = []
+    for line in whole.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            found.append(event)
+    return found, offset + len(whole)
+
+
 LOCK_FD = "WF_LOCK_FD"
 BUSY_WAIT_SECONDS = 1.0
 

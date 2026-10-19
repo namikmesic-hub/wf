@@ -155,14 +155,14 @@ def main(argv: list[str] | None = None) -> int:
     sessions.add_argument("--runs-dir", **runs_dir)
     sessions.set_defaults(handler=_sessions)
 
-    watching = commands.add_parser("watch", help="print a run's steps and tool calls as they come, until it needs attention")
+    watching = commands.add_parser("watch", help="print a run's steps and tool calls as they come, until it succeeds")
     watching.add_argument("run_id", metavar="run-id")
     watching.add_argument("--from-start", action="store_true", help=f"print every event so far first, not the last {observe.WATCH_BACK}")
     watching.add_argument("--runs-dir", **runs_dir)
     watching.set_defaults(handler=_watch)
 
     page = commands.add_parser("ui", help="a web page on this machine that shows runs: graph, progress, metrics, transcripts")
-    page.add_argument("--port", type=int, default=ui.PORT, help=f"the port on 127.0.0.1 (default {ui.PORT}, or 0 for any free one)")
+    page.add_argument("--port", type=_port, default=ui.PORT, help=f"the port on 127.0.0.1 (default {ui.PORT}, or 0 for any free one)")
     page.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
     page.add_argument("--open", action="store_true", help="open the page in the browser")
     page.add_argument("--runs-dir", **runs_dir)
@@ -243,6 +243,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:  # anywhere the runner doesn't handle it itself
         print("\nStopped.", file=sys.stderr)
         return runner.STOPPED
+
+
+def _port(text: str) -> int:
+    """A port number for wf ui: 0 (any free port) to 65535."""
+    if not text.isdigit() or int(text) > 65535:
+        raise argparse.ArgumentTypeError(f"`{text}` isn't a port: use a number from 0 to 65535")
+    return int(text)
 
 
 def _folder(text: str) -> Path | None:
@@ -363,7 +370,7 @@ def _watch(args) -> int:
     if run is None:
         return 1
     try:
-        current = observe.watch(run, back=None if args.from_start else observe.WATCH_BACK)
+        current = observe.watch(run, back=None if args.from_start else observe.WATCH_BACK, tell=_describe)
     except KeyboardInterrupt:  # the usual way to stop watching
         return 0
     print(_describe(current))

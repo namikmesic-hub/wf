@@ -10,7 +10,8 @@ each node in the color of its state and each loop's count. It also shows the
 progress estimate (progress.py), and each node's numbers as `wf report` counts
 them. Then it shows the agent sessions that run now (observe.py), the event
 stream, and the transcript and instruction of each attempt. It asks for new
-data every 2 seconds.
+data on its own: the run every 2 seconds, its events every second, and the
+list of runs every 5 seconds.
 
     GET /                          the page
     GET /api/runs                  the runs, newest first, with their state and progress
@@ -20,13 +21,19 @@ data every 2 seconds.
 
 The server only reads. It answers a request only when its Host header names
 the address of the server. So a web page cannot read it through a DNS name
-that points to 127.0.0.1. Its Content-Security-Policy lets the page
-run only its own script, and the page shows what runs wrote as text, never as HTML.
+that points to 127.0.0.1. Each server makes a new random key, and the address
+that it prints holds the key after `#`. The page sends the key with each
+request for data (X-WF-Token), and the server refuses a request without it. So
+another program or user on the machine cannot read the transcripts through
+it. Its Content-Security-Policy lets the page run only its own script, and the
+page shows what runs wrote as text, never as HTML.
 """
 
 import errno
+import hmac
 import json
 import re
+import secrets
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -73,7 +80,22 @@ class Source:
         return {key: run for _, key, run in sorted(found, key=lambda f: (f[0], f[1]), reverse=True)}
 
     def get(self, key: str) -> Run | None:
-        return self.runs().get(key)
+        """The run with this id, found by its folder, not by listing them all."""
+        if not self.every_repo:
+            try:
+                return runs.find(self.repo, key, self.runs_dir)
+            except FileNotFoundError:
+                return None
+        repo, _, run_id = key.partition("/")
+        if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part) and ".." not in part for part in (repo, run_id)):
+            return None
+        folder = self.folder / repo / run_id
+        if not (folder / "workflow" / "manifest.json").is_file():
+            return None
+        try:
+            return Run.at(folder)
+        except (ValueError, OSError):
+            return None
 
 
 def _folders(folder: Path) -> list[Path]:
@@ -104,10 +126,11 @@ def run_detail(run: Run) -> dict:
         graph = diagram.layout(spec.load(run.workflow_file))
     except (spec.SpecError, OSError, KeyError, ValueError):
         graph = None
+    events = report.events(run)  # read once, for each part below
     found = report.build([run])
-    return {"state": state, "progress": progress.of(run, state.get("status")), "graph": graph,
+    return {"state": state, "progress": progress.of(run, state.get("status"), events), "graph": graph,
             "metrics": {"run": found["runs"][0], "nodes": found["nodes"], "notes": found["notes"]},
-            "sessions": observe.sessions(run), "attempts": attempts(run)}
+            "sessions": observe.sessions(run, events=events), "attempts": attempts(run, events)}
 
 
 def events_after(run: Run, after: int | None) -> dict:
@@ -118,11 +141,12 @@ def events_after(run: Run, after: int | None) -> dict:
     return {"next": offset, "events": lines if after is not None else lines[-EVENTS_BACK:]}
 
 
-def attempts(run: Run) -> list[dict]:
+def attempts(run: Run, events: list[dict] | None = None) -> list[dict]:
     """Each attempt's log in the run folder, sub-workflows' too, oldest first, with the harness and
     model of its agent session when its events name them. An agent session that has written no
     transcript yet is there too, with no log."""
-    sessions = {e["log"]: e for e in report.events(run) if e.get("event") == "session_started" and e.get("log")}
+    events = report.events(run) if events is None else events
+    sessions = {e["log"]: e for e in events if e.get("event") == "session_started" and e.get("log")}
     found: list[dict] = []
 
     def nodes(folder: Path, prefix: str) -> None:
@@ -195,6 +219,7 @@ class Server(ThreadingHTTPServer):
         super().__init__((HOST, port), _Handler)
         self.source = source
         self.hosts = {f"{HOST}:{self.port}", f"localhost:{self.port}"}
+        self.token = secrets.token_urlsafe(24)
 
     @property
     def port(self) -> int:
@@ -202,7 +227,8 @@ class Server(ThreadingHTTPServer):
 
     @property
     def url(self) -> str:
-        return f"http://{HOST}:{self.port}/"
+        """The page's address, with its key after `#`, which the browser never sends."""
+        return f"http://{HOST}:{self.port}/#token={self.token}"
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -214,9 +240,11 @@ class _Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         query = {key: values[0] for key, values in parse_qs(url.query).items()}
         try:
-            if url.path in STATIC:
+            if url.path in STATIC:  # the page itself holds nothing of the runs
                 name, kind = STATIC[url.path]
                 return self._send(200, (PAGE / name).read_bytes(), kind)
+            if not hmac.compare_digest(self.headers.get("X-WF-Token", "").encode(), self.server.token.encode()):
+                return self._json({"error": "this page needs the key in the address that wf ui printed"}, 401)
             if url.path == "/api/runs":
                 return self._json(run_list(self.server.source))
             run = self.server.source.get(query.get("id", "")) if url.path.startswith("/api/") else None

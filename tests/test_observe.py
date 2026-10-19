@@ -11,7 +11,7 @@ from textwrap import dedent
 
 import pytest
 
-from fakes import Fake, submit
+from fakes import Fake, hang, submit
 from workflow import cli, harnesses, observe, runner, runs
 from workflow.runs import Run
 
@@ -138,6 +138,41 @@ def test_a_session_left_open_by_a_process_that_no_longer_drives_the_run_is_not_l
     assert session["attempt"] == 2 and session["last_tool"] is None
 
 
+def test_a_session_ends_with_its_attempt_its_item_or_the_workflow_node_around_it(repo):
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    run = runs.create(Path.cwd(), "work", [Path("flow.yaml")], Path("flow.yaml"), {})
+    opened = [("build[0]/work", None), ("build[1]/work", None), ("review", 1), ("review", 2), ("think", None), ("solo", None)]
+    lines = [{"event": "session_started", "node": node, "pass": 1, "attempt": 1, "harness": "claude-code", "pid": os.getpid(),
+              **({"index": index} if index is not None else {})} for node, index in opened]
+    lines += [{"event": "attempt_failed", "node": "build", "index": 0, "pass": 1, "attempt": 1, "error": "timed out after 1s"},
+              {"event": "item_failed", "node": "review", "index": 1, "error": "no result"},
+              {"event": "attempt_failed", "node": "think", "pass": 1, "attempt": 1, "error": "crashed"},
+              {"event": "node_finished", "node": "solo", "pass": 1}]
+    (run.dir / "events.jsonl").write_text("".join(json.dumps({"time": "2026-10-19T10:00:00+00:00", **line}) + "\n" for line in lines))
+    with run.driving():
+        assert [s["node"] for s in observe.sessions(run)] == ["build[1]/work", "review[2]"]
+
+
+def test_a_session_inside_a_workflow_node_that_timed_out_is_not_listed(repo, monkeypatch):
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", hang()).factory)
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    Path("outer.yaml").write_text(dedent("""
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          sub: {needs: [start], workflow: flow.yaml, timeout: 1s}
+        end: {output: {}}
+    """).lstrip())
+    assert cli.main(["run", "outer.yaml"]) == 1  # the agent inside never answers
+    run = only_run()
+    kinds = [(e["event"], e.get("node")) for e in map(json.loads, (run.dir / "events.jsonl").read_text().splitlines())]
+    assert ("session_started", "sub/work") in kinds and ("attempt_failed", "sub") in kinds
+    assert ("session_ended", "sub/work") not in kinds  # the stopped sub-workflow couldn't pass it up
+    with run.driving():  # as if its process went on with other work
+        assert observe.sessions(run) == []
+
+
 def test_wf_watch_prints_the_steps_and_tool_calls_as_they_come_until_the_run_ends(repo, tmp_path_factory):
     marks, release = tmp_path_factory.mktemp("marks"), tmp_path_factory.mktemp("release") / "go"
     Path("flow.yaml").write_text(FLOW.lstrip())
@@ -179,6 +214,46 @@ def test_wf_watch_on_a_run_that_ended_prints_the_last_events_and_how_it_ended(re
     assert cli.main(["watch", only_run().id, "--from-start"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0].endswith("▶ work") and len(out) == 4 + 30 + 1  # every event line, then the state
+
+
+ASK = """
+version: 1
+name: ask
+start: {input: {}}
+nodes:
+  approve: {needs: [start], human: "Ship it?", output: {ok: {type: boolean}}}
+  after: {needs: [approve], command: "echo shipped"}
+end: {output: {}}
+"""
+
+
+def test_wf_watch_goes_on_through_a_question_until_the_run_succeeds(repo):
+    Path("ask.yaml").write_text(ASK.lstrip())
+    assert cli.main(["run", "ask.yaml"]) == 2  # it waits for a person
+    run = only_run()
+    lines, ended = [], {}
+    tell = lambda state: f"now {state['status']}"  # noqa: E731
+    watcher = threading.Thread(target=lambda: ended.update(observe.watch(run, say=lines.append, poll=0.05, tell=tell)))
+    watcher.start()
+    until(lambda: "now waiting" in lines)
+    key = run.status()["questions"][0]["key"]
+    Path("answers.json").write_text(json.dumps({key: {"ok": True}}))
+    assert cli.main(["answer", run.id, "answers.json"]) == 0
+    watcher.join(30)
+    assert ended["status"] == "succeeded"
+    assert lines.count("now waiting") == 1 and lines[-1].endswith("✓ after")
+
+
+def test_wf_watch_stops_when_the_run_is_discarded(repo):
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    run = runs.create(Path.cwd(), "work", [Path("flow.yaml")], Path("flow.yaml"), {})
+    ended = {}
+    watcher = threading.Thread(target=lambda: ended.update(observe.watch(run, say=lambda _: None, poll=0.05)))
+    watcher.start()
+    time.sleep(0.2)
+    runs.discard(run, branches=False)
+    watcher.join(10)
+    assert ended == {"run": run.id, "status": "discarded", "workflow": "work"}
 
 
 def test_reading_events_leaves_a_line_that_is_still_being_written(tmp_path):

@@ -21,14 +21,14 @@ wf-workflows skill (skills/wf-workflows/improving.md).
 """
 
 import hashlib
-import json
 import re
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
 from . import spec
-from .runs import Run
+from .runs import Run, read_events
 
 
 def build(runs: list[Run]) -> dict:
@@ -246,18 +246,31 @@ def text(found: dict) -> str:
     return "\n".join(lines)
 
 
+_READ: dict[Path, tuple[int, int, list[dict]]] = {}  # events.jsonl -> (its inode, the bytes read, their events)
+_READ_MOST = 64
+_READING = threading.Lock()  # wf ui asks from several threads
+
+
 def events(run: Run) -> list[dict]:
-    """The run's events.jsonl, one dict per line (a damaged line is left out)."""
+    """The run's events.jsonl, one dict per line (a damaged line is left out). The file only grows,
+    so a later call reads only the lines added since the last one: wf ui asks every few seconds."""
     path = run.dir / "events.jsonl"
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except OSError:  # no events yet, or the run is being discarded
         return []
-    found = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            found.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return found
+    with _READING:
+        inode, offset, found = _READ.get(path, (None, 0, []))
+    if inode != stat.st_ino or stat.st_size < offset:
+        offset, found = 0, []
+    new, offset = read_events(path, offset)
+    found = found + new
+    with _READING:
+        _READ.pop(path, None)
+        _READ[path] = (stat.st_ino, offset, found)
+        while len(_READ) > _READ_MOST:
+            del _READ[next(iter(_READ))]
+    return list(found)
 
 
 def _name(node: str) -> str:
