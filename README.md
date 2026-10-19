@@ -60,17 +60,21 @@ Until earlier finished runs show how long each step takes, wf counts each loop a
 Then it gives the time left too.
 
 ```sh
-wf status <run-id>     # step 3 of 4 (tests), review → implement 1 of at most 3, about 76%
+wf status <run-id>     # step 3 of 4 (tests), review → implement 1 of at most 3, about 38%
 wf sessions            # each agent session that runs now: node, harness, model, last tool call, quiet time
-wf watch <run-id>      # the run's steps and tool calls as they come: keep it open in a pane
-wf ui                  # a web page on http://127.0.0.1:8765/ with all of it
+wf watch <run-id>      # the run's steps and tool calls as they come, until it succeeds: keep it open in a pane
+wf ui                  # a web page on 127.0.0.1 with all of it, at the address that it prints
 ```
+
+The `wf status` line above is for a run of `implement.yaml` with no earlier finished runs, at its tests for the second time.
 
 `wf ui` is a small web page that wf serves on your machine only.
 It lists the runs of the repo.
 For each run it draws the workflow graph, with the state of each step.
 It also shows the progress, the numbers of `wf report`, the live events, and each session's transcript and instruction.
-It gets new data every 2 seconds, and it needs no build step and no other service.
+It gets new data on its own: the run every 2 seconds, its events every second, and the list of runs every 5 seconds.
+It needs no build step and no other service.
+The address that `wf ui` prints holds a key, so other programs and users on the machine can't read the runs through it.
 
 ![wf ui: a run of implement.yaml at its tests for the second time](assets/wf-ui.png)
 
