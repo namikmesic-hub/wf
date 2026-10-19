@@ -195,15 +195,37 @@ def test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and
     assert [Path(p["cwd"]).resolve() for p in sent(log, "session/new") + sent(log, "session/load")] == [Path(workspace)] * 2
 
 
-def test_a_temp_folder_under_an_instruction_file_makes_cursor_unavailable_without_project_instructions(repo, monkeypatch, capsys):
+@pytest.mark.parametrize("above, found", [
+    ("AGENTS.md", "AGENTS.md"),
+    (".cursor/rules/x.mdc", ".cursor/rules"),
+    (".agents/skills/x/SKILL.md", ".agents/skills"),
+    (".claude/skills/x/SKILL.md", ".claude/skills"),
+    (".git/HEAD", ".git"),  # a repo: Cursor reads nested files from the whole of it
+])
+def test_a_temp_folder_under_what_cursor_loads_makes_it_unavailable_without_project_instructions(
+        repo, monkeypatch, capsys, above, found):
     log = cursor(monkeypatch, repo, [GOOD])
-    Path("AGENTS.md").write_text("You are someone else.\n")
-    (repo / "repo" / "tmp").mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(repo / "repo" / "tmp"))  # TMPDIR inside the repo
+    outer = repo / "outer"
+    (outer / above).parent.mkdir(parents=True)
+    (outer / above).write_text("You are someone else.\n")
+    (outer / "tmp").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(outer / "tmp"))  # TMPDIR under it
     assert run("project_instructions: false\n") == 1
-    found = Path("AGENTS.md").resolve()
-    assert f"cursor is unavailable: Cursor would load {found}, which is above the temp folder" in capsys.readouterr().out
-    assert entries(log, "start") == [] and list((repo / "repo" / "tmp").iterdir()) == []  # no session, no folder left
+    out = capsys.readouterr().out
+    assert f"cursor is unavailable: {(outer / found).resolve()} is in a folder above the temp folder" in out
+    assert entries(log, "start") == [] and list((outer / "tmp").iterdir()) == []  # no session, no folder left
+
+
+def test_your_home_folders_skills_above_the_temp_folder_do_not_count(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [GOOD])
+    home = repo / "home"
+    (home / ".claude" / "skills" / "mine").mkdir(parents=True)
+    (home / "tmp").mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(tempfile, "tempdir", str(home / "tmp"))
+    assert run("project_instructions: false\n") == 0  # they load wherever Cursor starts
+    (start,) = entries(log, "start")
+    assert Path(start["cwd"]).parent == (home / "tmp").resolve()
 
 
 def test_by_default_cursor_agent_starts_in_the_workspace(repo, monkeypatch):

@@ -88,16 +88,17 @@ ends with a result. When the attempt fails, even after its result came in (a
 timeout), the next one starts fresh instead of loading the failure.
 
 Instruction files: cursor-agent reads the repo's rules, skills, subagents and
-commands from the folder it starts in, not from session/new's cwd. That is
-.cursor/rules, .cursorrules, AGENTS.md, CLAUDE.md and CLAUDE.local.md, in that
-folder, each folder above it, and folders below it, and the skills in its
-.cursor, .claude, .codex and .agents folders. So a session starts in the
+commands from the folder it starts in, not from session/new's cwd. It reads
+.cursor/rules, .cursorrules, AGENTS.md, CLAUDE.md and CLAUDE.local.md there, in
+each folder above it, and in folders below it. It also reads the skills in the
+.cursor, .claude, .codex, .grok and .agents folders. So a session starts in the
 workspace, unless the node sets `project_instructions: false`. Then it starts
 in a new empty folder in the system's temp folder (_bare_folder), and
-session/new still gives the workspace, where the agent works. When a folder
-above that one holds a file Cursor would load (TMPDIR in a repo), the session
-is unavailable instead. The cost: Cursor's semantic code search and lint
-diagnostics then don't cover the workspace.
+session/new still gives the workspace, where the agent works. The session is
+unavailable instead when the temp folder is in a git repo (TMPDIR in a repo).
+It is also unavailable when a folder above it holds such a file or skills
+folder. Only your home folder's skills don't count: they load anywhere. The cost:
+Cursor's semantic code search and lint diagnostics don't cover the workspace.
 
 What can't be switched off: your Cursor account's User Rules, and the skills in
 your home folder (such as ~/.claude/skills and ~/.agents/skills). The repo's
@@ -156,7 +157,8 @@ RETRY_AFTER = 30  # seconds
 AUTH_REQUIRED = -32000  # ACP's error code for "authenticate first"
 LABELS = {"read": "read", "edit": "edit", "delete": "delete", "move": "move", "search": "search",
           "execute": "command", "fetch": "web fetch"}
-LOADED_FROM_ABOVE = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", ".cursorrules", ".cursor/rules")
+LOADED_FROM_ABOVE = (".git", "AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", ".cursorrules", ".cursor/rules")  # .git: in a repo
+SKILLS = tuple(f"{folder}/skills" for folder in (".cursor", ".claude", ".codex", ".grok", ".agents"))
 
 
 class Cursor:
@@ -435,13 +437,16 @@ class CursorSession:
 
 def _bare_folder() -> Path:
     """A new empty folder in the system's temp folder, for cursor-agent to start in. Cursor also reads
-    instruction files from each folder above the one it starts in, so a folder under such a file is refused."""
+    instruction files from the folders above that one, and from the whole repo it is in. So a folder in a
+    repo, or under such a file or skills folder, is refused. Your home folder's skills load anyway."""
     folder = Path(tempfile.mkdtemp(prefix="wf-cursor-")).resolve()
-    found = next((parent / name for parent in folder.parents for name in LOADED_FROM_ABOVE if (parent / name).exists()), None)
+    home = Path.home().resolve()
+    found = next((parent / name for parent in folder.parents
+                  for name in LOADED_FROM_ABOVE + (() if parent == home else SKILLS) if (parent / name).exists()), None)
     if found is not None:
         shutil.rmtree(folder, ignore_errors=True)
-        raise Unavailable(f"Cursor would load {found}, which is above the temp folder {folder.parent}, so wf can't keep "
-                          "instruction files out: set TMPDIR to a folder with none above it")
+        raise Unavailable(f"{found} is in a folder above the temp folder {folder.parent}, so Cursor could load instruction "
+                          "files from there: set TMPDIR to a folder outside any repo, with none of them above it")
     return folder
 
 
