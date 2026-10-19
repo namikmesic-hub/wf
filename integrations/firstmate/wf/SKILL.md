@@ -46,6 +46,11 @@ must not write into. The commands wf prints for the run include `--runs-dir`.
    Keep the owner token `register-extension` prints.
 
 `wf status <run-id> --json` and `wf list --json` show where runs stand at any time.
+In `wf status`, `progress` says which step the run is at, how many times each loop went back, and a percentage.
+The percentage is an estimate: report it as "about".
+`wf sessions <run-id> --json` lists the agent sessions that run now, with each one's last tool call and how long it has been quiet.
+A session that has been quiet for a long time is worth a look at its transcript before you call the run stuck.
+To give the captain a live view, offer `wf watch <run-id>` for a terminal pane, or `wf ui` for a web page on their machine.
 A `running` run whose `agents_waiting` is not empty waits for a free agent slot.
 The cap on agent sessions across all runs that use the same `~/.wf` comes from
 `max_agents` in `~/.wf/config.yaml` or from `WF_MAX_AGENTS`.

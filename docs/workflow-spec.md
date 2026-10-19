@@ -135,6 +135,10 @@ end:
 | `wf run <file> [name=value ...]` | Validates, then runs the workflow. Inputs come from `name=value` pairs (a value that parses as JSON is used as JSON), from `--input file.json`, or from prompts for anything missing. Prints progress, then the end output. |
 | `wf retry <run-id> [--limit NAME=VALUE]` | Continues a failed or paused run from its last checkpoint, or one a limit stopped (with a bigger limit). Finished nodes and items aren't rerun. |
 | `wf trace <run-id> [--node N] [--pass P] [--field F] [--var PATH] [--json]` | Shows what one run read, decided and did, from its trace: how each template rendered, why each route was taken, each attempt, turn and tool call. See [The trace](#the-trace). |
+| `wf status <run-id>` | Says where a run stands, and how far it is on its way from `start` to `end`, as an estimate (see [Watching runs](#watching-runs)). `--json` gives the same as JSON. |
+| `wf sessions [run-id]` | Lists the agent sessions that run now, in one run or in each run of the repo, with the last tool call of each. |
+| `wf watch <run-id>` | Prints the run's steps and tool calls as they come, until the run needs attention. |
+| `wf ui` | Serves a web page on `127.0.0.1` that shows the runs: the graph, the progress, the metrics of `wf report`, the events and the transcripts. |
 | `wf tools list` | Lists the tools agent nodes can use (see [docs/tools.md](tools.md)), how each signs in, and whether it's set up. |
 | `wf tools <name> setup [--write]` | Signs in to a tool once, in the browser or with a pasted token, and keeps the secret in the macOS Keychain. It asks Slack and Linear for read scopes only, unless `--write` is given. |
 | `wf tools <name> doctor`, `wf tools doctor` | Checks that a tool's sign-in is there and still good, and makes one harmless read call. Prints pass or fail with the next step. |
@@ -143,7 +147,7 @@ end:
 (only with `--no-input` or when there's no terminal).
 
 Every command that makes or finds runs (`run`, `retry`, `answer`, `wait`, `status`, `list`,
-`report`, `discard`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
+`report`, `discard`, `sessions`, `watch`, `ui`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
 [Run folder](#run-folder)). The commands that wf prints for a run in a runs folder, like
 `wf retry <run-id>`, include the option, so they find the run whether or not
 `WF_RUNS_DIR` is set where you type them.
@@ -813,7 +817,7 @@ The tests named below are in `tests/test_workspaces.py`.
   branches.json                 the branches `branch` named, and where the run left them
   output.json                   the end output, once the run succeeds
   status.json                   running | waiting | succeeded | failed | limit
-  events.jsonl                  one line per event: node started, finished, route taken, ...
+  events.jsonl                  one line per event: node started, finished, route taken, agent session started, ...
   trace.jsonl                   one record per line of what the run read, decided and did (see The trace)
   blobs/                        values too long for a line of the trace, by their sha256
   checkpoints.sqlite            LangGraph checkpoints, used by wf retry
@@ -948,6 +952,94 @@ The tests named below are in `tests/test_trace.py`, unless another file is named
 | `wf trace --json` | Each value from `blobs/` comes back in full. | `workflow/trace_view.py:62` | `test_wf_trace_reads_blobs_back_in_json_and_shows_a_missing_one_as_its_reference` |
 | A reference names a file outside `blobs/`, or a blob that is gone | `wf trace` shows the reference, and reads no other file. | `workflow/trace_view.py:47`, `workflow/trace_view.py:188` | `test_wf_trace_reads_only_blobs_of_the_run`, `test_wf_trace_reads_blobs_back_in_json_and_shows_a_missing_one_as_its_reference` |
 
+## Watching runs
+
+A person or a supervisor can see a run while it works.
+The commands below only read the run folder, so they never change the run.
+The tests named in the table are in `tests/test_progress.py`, `tests/test_observe.py` and `tests/test_ui.py`.
+
+### Progress
+
+`wf status <run-id>` adds a line that says how far the run is:
+
+```
+20261019-1432-implement-k3f9 [implement]: running
+  step 2 of 4 (implement), review → implement 1 of at most 3, about 31%
+```
+
+`wf status <run-id> --json` gives the same under `progress`, with the state of each node.
+A node is `waiting`, `running`, `paused` (the run waits for a person, a limit or `wf retry`), `done`, `failed` or `skipped`.
+
+The percentage is an estimate.
+wf can't know before the end which routes a run takes, or how many times a loop goes back.
+It counts like this:
+
+- A walk from `start` finds the routes that go back.
+  Each of them closes a loop.
+- Without the loops, a node's step is the number of nodes on the longest path from `start` to it.
+  The longest path from `start` to `end` gives the number of steps.
+- Each step weighs 1, and each loop counts as if the run goes back up to its `max`.
+  So the percentage is low rather than high, and it doesn't go down.
+- When the runs folder holds earlier runs of the same workflow that succeeded, wf uses the newest 10 of them.
+  A dry run uses only dry runs, and a real run only real runs.
+  Each step then weighs its mean time per pass in them, times the share of them that got to it.
+  Each loop counts as many times as they took it on average.
+  `wf status` then also gives the time left, and `left_s` in the JSON.
+- A step in progress counts in part.
+  For a `for_each` step, that part is the share of its items that finished.
+  For a workflow node, it is the share of its sub-workflow that is done.
+  With earlier runs, it can also be its time so far against its mean time.
+
+### Agent sessions and events
+
+Each agent session adds `session_started` to `events.jsonl` when it opens, and `session_ended` when it closes.
+`session_started` names the node, pass, item, attempt, harness, model and effort, the process that runs the session, and its transcript in the run folder.
+
+`wf sessions [run-id]` lists the agent sessions that run now, in one run or in each run of the repo.
+For each session it gives the run, node, pass, item, harness and model.
+It also gives when the session started, its last tool call, and how long it has been quiet.
+`--json` gives the same for a supervisor, with the paths of the transcript and the instruction.
+
+`wf watch <run-id>` prints the run's last 20 events as `wf run` prints them, each with its time, and then each new event as it comes.
+`--from-start` prints all the events first.
+It stops when the run needs attention, as `wf wait` would report it, and prints the run's state.
+Keep it open in a terminal pane to follow a run.
+
+### The web page
+
+`wf ui` starts a web server on this machine and prints its address, `http://127.0.0.1:8765/` unless the port is in use.
+`--port` sets another port, and `--open` opens the page in the browser.
+The page lists the runs of the repo, newest first.
+With `--all-repos` it lists the runs of each repo in the runs folder.
+For the run that you choose, the page shows these:
+
+- the workflow graph, with each node in the color of its state, a word and a sign for the state, and each loop's count
+- the progress estimate
+- the numbers of each node as `wf report` counts them: passes, attempts, failed attempts, items, tokens, cost and time
+- the agent sessions that run now
+- the events, as `wf watch` prints them
+- the transcript, instruction and output of each attempt
+
+The page gets new data every 2 seconds.
+It is three plain files in `workflow/ui/`, with no build step and nothing from another server.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| A run of a workflow with a loop, and no earlier runs that succeeded | Each step weighs 1, and the loop counts up to its `max`. Step by step, the percentage goes up and never down. | `workflow/progress.py:285`, `workflow/progress.py:325` | `test_without_earlier_runs_each_step_weighs_one_and_each_loop_counts_to_its_max` |
+| The runs folder holds earlier runs of the workflow that succeeded | Steps weigh their mean time and loops their mean count, from `wf report`. `left_s` gives the time left. A dry run of the workflow counts only for a dry run. | `workflow/progress.py:228`, `workflow/progress.py:243` | `test_with_earlier_runs_steps_weigh_their_time_and_loops_their_mean_count`, `test_wf_status_says_how_far_a_run_is_and_learns_from_earlier_real_runs` |
+| The run has gone past a loop | The loop counts no more. | `workflow/progress.py:324` | `test_a_loop_the_run_has_left_counts_no_more` |
+| A route leaves out a branch | The nodes on it are `skipped`. | `workflow/progress.py:353` | `test_a_branch_a_route_left_out_is_skipped_and_a_failed_step_is_failed` |
+| A run waits for a person, is at a limit, or stopped | Its steps in progress are `paused`. | `workflow/progress.py:346` | `test_a_step_in_progress_of_a_run_that_does_not_move_is_paused` |
+| A `for_each` step, or a sub-workflow, is in progress | Its items that finished, or its sub-workflow's own estimate, count for it in part. | `workflow/progress.py:304` | `test_items_that_finished_count_for_their_step`, `test_a_sub_workflow_in_progress_counts_its_own_steps` |
+| An agent session opens, and closes | `events.jsonl` gets `session_started`, and then `session_ended`. | `workflow/nodes.py:479`, `workflow/nodes.py:516` | `test_each_session_starts_and_ends_with_an_event`, `test_a_session_inside_a_sub_workflow_names_its_transcript_from_the_run_folder` |
+| A session has no `session_ended`, and its process drives the run | `wf sessions` lists it. | `workflow/observe.py:59` | `test_wf_sessions_lists_the_agent_sessions_that_run_now` |
+| A process that no longer drives the run left a session open | `wf sessions` doesn't list it. | `workflow/observe.py:59` | `test_a_session_left_open_by_a_process_that_no_longer_drives_the_run_is_not_listed` |
+| `wf watch` follows a run | It prints each new event, and stops with the run's state once the run needs attention. | `workflow/observe.py:159` | `test_wf_watch_prints_the_steps_and_tool_calls_as_they_come_until_the_run_ends`, `test_wf_watch_on_a_run_that_ended_prints_the_last_events_and_how_it_ended` |
+| A request to `wf ui` names another host in its `Host` header | The server refuses it with 403. So a web page can't read it through a DNS name that points to `127.0.0.1`. | `workflow/ui.py:212` | `test_the_server_refuses_other_hosts_unknown_runs_and_files_outside_the_passes` |
+| The page asks for a file of a run | Only `instruction.md`, `output.json`, `session.json` and `attempt-<n>.log` under `nodes/` come back, and no link out of `nodes/` is followed. | `workflow/ui.py:172` | `test_the_page_shows_files_of_the_passes_and_nothing_else` |
+| The page shows what a run wrote | It puts it in the page as text, never as HTML, and the server lets the page run only its own script. | `workflow/ui.py:243` | `test_the_server_serves_the_page_and_its_json_on_this_machine_only` |
+| The port is in use | `wf ui` uses a free port, and says which. | `workflow/ui.py:260` | `test_a_port_in_use_gives_way_to_a_free_one` |
+
 ## Validation
 
 `wf validate`, and `wf run` before it starts, check the following.
@@ -1037,6 +1129,9 @@ workflow/
   runs.py           run folder, events, finding a run by id
   trace.py          the run's trace: trace.jsonl, blobs/, and keeping secrets out
   trace_view.py     wf trace
+  progress.py       how far a run is, as an estimate, for wf status
+  observe.py        wf sessions and wf watch: the sessions that run now, and the event stream
+  ui.py, ui/        wf ui: the server and the page
   cli.py            init, validate, graph, run, retry, tools
 ```
 

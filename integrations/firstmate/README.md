@@ -54,7 +54,10 @@ command that the new wf doesn't have.
 | `wf run <file> ... --detach --json` | start a run in the background |
 | `wf answer <run-id> <answers.json> [--detach]` | answer the questions a run waits on |
 | `wf retry <run-id> --detach` | continue a failed or stopped run |
-| `wf status <run-id> --json`, `wf list --json` | where runs stand |
+| `wf status <run-id> --json`, `wf list --json` | where runs stand, and in `progress` of status, how far, as an estimate |
+| `wf sessions [run-id] --json` | the agent sessions that run now, with each one's last tool call and quiet time |
+| `wf watch <run-id>` | the run's steps and tool calls as they come, for a terminal pane |
+| `wf ui [--all-repos]` | a web page on this machine with the graph, progress, metrics, events and transcripts |
 | `wf wait <run-id> [--consumer NAME]` | block until a run needs attention (what the adapter polls) |
 
 Only one process drives a run at a time (a lock in the run folder), so the

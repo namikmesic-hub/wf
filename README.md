@@ -52,6 +52,28 @@ wf tools slack setup                     # sign in; the secret goes to the macOS
 wf tools doctor                          # check that every tool you set up works
 ```
 
+## Watch a run
+
+`wf status` says how far a run is: its step on the way from start to end, the times each loop went back, and a percentage.
+The percentage is an estimate.
+Until earlier finished runs show how long each step takes, wf counts each loop as if it goes back up to its `max`.
+Then it gives the time left too.
+
+```sh
+wf status <run-id>     # step 3 of 4 (tests), review → implement 1 of at most 3, about 76%
+wf sessions            # each agent session that runs now: node, harness, model, last tool call, quiet time
+wf watch <run-id>      # the run's steps and tool calls as they come: keep it open in a pane
+wf ui                  # a web page on http://127.0.0.1:8765/ with all of it
+```
+
+`wf ui` is a small web page that wf serves on your machine only.
+It lists the runs of the repo.
+For each run it draws the workflow graph, with the state of each step.
+It also shows the progress, the numbers of `wf report`, the live events, and each session's transcript and instruction.
+It gets new data every 2 seconds, and it needs no build step and no other service.
+
+![wf ui: a run of implement.yaml at its tests for the second time](assets/wf-ui.png)
+
 ## Docs
 
 - [docs/workflow-spec.md](docs/workflow-spec.md): the file format, and how runs behave.
