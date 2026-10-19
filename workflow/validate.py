@@ -623,6 +623,9 @@ class _Checker:
             if any(r.name == "workspace" and r.path and r.path[0] == node_id for r in refs):
                 self.error(where, "`branch` renders before this node's worktree exists, so it can't read its workspace")
             fixed = fixed.strip() if isinstance(fixed, str) else (fixed[0].lstrip(), fixed[1].rstrip())  # names are stripped
+            if fixed == "":
+                self.error(where, "`branch` is empty: name a branch, or leave `branch` out for wf/<run-id>/...")
+                continue
             if (fixed if isinstance(fixed, str) else fixed[0]).startswith("wf/"):
                 self.error(where, "wf/ is where wf names branches itself (wf/<run-id>/...); pick another name")
             for other, other_fixed in named:

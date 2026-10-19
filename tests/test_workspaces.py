@@ -284,12 +284,15 @@ def test_a_branch_that_already_exists_is_refused(repo, monkeypatch, capsys):
 @pytest.mark.parametrize("name, problem", [
     ("bad name", "git doesn't allow it as a branch name"),
     ("wf/mine", "wf/ is where wf names branches itself"),
+    ("", "the name is empty"),
+    ("   ", "the name is empty"),  # names are stripped
 ])
 def test_a_branch_name_git_or_wf_would_refuse_fails_the_node(repo, monkeypatch, capsys, name, problem):
     use(monkeypatch)
     write(NAMED, inputs=BRANCH_INPUT)
     assert cli.main(["run", "flow.yaml", f"branch={name}"]) == 1
     assert problem in capsys.readouterr().err
+    assert git("branch", "--list") == "* " + git("branch", "--show-current")  # no wf/ branch in its place
 
 
 def test_a_resumed_run_keeps_the_branch_it_made(repo, monkeypatch, tmp_path):

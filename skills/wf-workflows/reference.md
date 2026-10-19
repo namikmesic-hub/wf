@@ -152,8 +152,8 @@ sub-workflow, its node's workspace), `new` (a git worktree on branch
 
 `branch` names a `new` worktree's branch instead, as a template:
 `branch: "{{ start.branch }}"` lets the caller pick the branch that carries the
-result. It's named on the node's first pass and kept after that. A branch that
-exists already and that the run didn't make is refused. On a `for_each` node it
+result. It's named on the node's first pass and kept after that. An empty name,
+and a branch that exists already and that the run didn't make, are refused. On a `for_each` node it
 must use `item` or `index`, and no two nodes may be able to render the same name:
 give it to the one node that makes the deliverable, and run the others in its
 workspace (`workspace: <that node>`).

@@ -154,9 +154,10 @@ async def _workspace(job: Job, ctx: RunContext, variables: dict) -> dict:
             raise _Failed("`workspace: new` needs a git repo with at least one commit", job["attempt"])
         parts = [*ctx.prefix, node_id] + ([str(job["index"])] if job["index"] is not None else [])  # e.g. build/2/implement
         template = ctx.workflow.setting(node_id, "branch")
-        if not template:
+        if template is None:  # "" is a name too, and an empty one is refused
             return await _git(ctx, workspaces.worktree, ctx.home["path"], ctx.run.id, parts, base)
-        branch = ctx.root.run.branches().get("/".join(parts)) or templates.render(template, variables).strip()  # named once
+        branch = ctx.root.run.branches().get("/".join(parts))  # named once
+        branch = branch if branch is not None else templates.render(template, variables).strip()
         return await _git(ctx, _named_worktree, ctx.root.run, ctx.home["path"], parts, base, branch)
     shared = job["vars"]["workspace"].get(kind)
     if shared is None:
@@ -168,11 +169,11 @@ def _named_worktree(run: Run, repo: str, parts: list[str], base: str, branch: st
     """The worktree on the branch a node's `branch` named: one this run made for it, or a new one.
     A branch that exists and that this run didn't make is never taken over."""
     path = "/".join(parts)
+    if problem := workspaces.branch_problem(repo, branch):
+        raise workspaces.WorkspaceError(f"can't name the branch `{branch}`: {problem}")
     made = run.branches()
     if made.get(path) == branch:  # a later pass, or the run resumed
         return workspaces.worktree(repo, run.id, parts, base, branch)
-    if problem := workspaces.branch_problem(repo, branch):
-        raise workspaces.WorkspaceError(f"can't name the branch `{branch}`: {problem}")
     if owner := next((p for p, b in made.items() if b == branch), None):
         raise workspaces.WorkspaceError(f"`{owner}` already works on branch `{branch}` in this run")
     if workspaces.branch_exists(repo, branch):

@@ -93,6 +93,8 @@ def branch_exists(repo: str | Path, branch: str) -> bool:
 
 def branch_problem(repo: str | Path, branch: str) -> str | None:
     """Why `branch` can't be a node's branch name, or None if it can."""
+    if not branch:  # before git: check-ref-format's empty output would look like a match
+        return "the name is empty"
     if branch.startswith("wf/"):
         return "wf/ is where wf names branches itself (wf/<run-id>/...)"
     if _git(repo, "check-ref-format", "--branch", branch, check=False) != branch:  # @{-1} would print another name

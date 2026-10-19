@@ -675,8 +675,9 @@ the context to fix them.
 - `branch` names a node's branch instead, as a template: `branch: "{{ start.branch }}"`
   lets whoever starts the run choose the branch that carries the result. The name is
   rendered on the node's first pass; later passes and `wf resume` keep that branch. It
-  can't start with `wf/`. A branch that already exists is refused, unless this run made it
-  for the same node: `branches.json` in the run folder records the branches a run made.
+  can't be empty or start with `wf/`. A branch that already exists is refused, unless this
+  run made it for the same node: `branches.json` in the run folder records the branches a
+  run made.
   `wf discard --branches`, and a dry run that succeeds, delete them as they do `wf/` ones.
 - A node keeps the same worktree across passes, so a loop keeps working on one branch.
   Each item gets its own.
@@ -749,8 +750,8 @@ Errors:
 11. Each sub-workflow exists and is valid, no workflow includes itself (directly or
     indirectly), and `with` sets every required input with a matching type.
 12. `branch` is only on nodes with `workspace: new`. On a `for_each` node it uses `item` or
-    `index`. It doesn't read the node's own workspace or start with `wf/`. No two nodes'
-    `branch` can render the same name: the text before their first `{{ }}` or `{% %}`, or
+    `index`. It isn't empty, and doesn't read the node's own workspace or start with `wf/`.
+    No two nodes' `branch` can render the same name: the text before their first `{{ }}` or `{% %}`, or
     after their last, must tell them apart, like `fix/{{ start.task }}` and
     `review/{{ start.task }}`.
 

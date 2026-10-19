@@ -433,6 +433,8 @@ def test_branch_names_a_new_worktree_once_per_item(tmp_path):
         d: {needs: [start], command: x, workspace: new, branch: "d/{{ workspace.d.path }}"}
         e: {needs: [start], command: x, workspace: new, branch: "wf/{{ start.task }}"}
         f: {needs: [start], command: x, workspace: new, branch: "f/{{ nope }}"}
+        g: {needs: [start], command: x, workspace: new, branch: ""}
+        h: {needs: [start], command: x, workspace: new, branch: "  "}
     """))
     assert_problems(report, [
         ("error", "nodes.f.branch", "unknown name `nope`"),
@@ -440,6 +442,8 @@ def test_branch_names_a_new_worktree_once_per_item(tmp_path):
         ("error", "nodes.b.branch", "must use `item` or `index`"),
         ("error", "nodes.d.branch", "can't read its workspace"),
         ("error", "nodes.e.branch", "wf/ is where wf names branches itself"),
+        ("error", "nodes.g.branch", "`branch` is empty"),
+        ("error", "nodes.h.branch", "`branch` is empty"),
     ])
 
 
