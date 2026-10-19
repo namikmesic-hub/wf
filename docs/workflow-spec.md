@@ -346,13 +346,14 @@ Agents run with the harness's normal coding setup: its own system prompt, plus t
 instruction files (`CLAUDE.md`, `AGENTS.md`). Where the harness allows it, user-level
 settings and memory aren't loaded, so a workflow behaves the same on every machine.
 Codex and Cursor are the exceptions.
-Codex always loads your global `~/.codex/AGENTS.md`.
+Codex always loads your global `~/.codex/AGENTS.md` and the skills in your home folder, such as `~/.agents/skills`.
 Cursor loads your Cursor account's User Rules and the skills in your home folder, such as `~/.claude/skills` and `~/.agents/skills`.
 
 A repo's instruction files can give an agent a role that isn't the workflow's.
 For example, firstmate's `AGENTS.md` tells each agent that loads it that it is the first mate.
 `project_instructions: false` keeps the repo's files out of a node's sessions, and the node's instruction still reaches the agent.
 The default, `true`, loads them as before.
+A sub-workflow uses its own `defaults`, so a workflow that sets `false` in its `defaults` sets it in each sub-workflow too.
 The tests named below are in `tests/test_claude_code.py`, `tests/test_codex.py` and `tests/test_cursor.py` for the rows of those harnesses.
 The tests of the other rows are in `tests/test_validate.py`, unless another file is named.
 
@@ -360,17 +361,20 @@ The tests of the other rows are in `tests/test_validate.py`, unless another file
 |---|---|---|---|
 | A node sets `project_instructions`, or `defaults` does | The node's own value wins, then `defaults`, then `true`. Only `true` or `false` is accepted. | `workflow/spec.py:194`, `workflow/spec.py:296`, `workflow/nodes.py:411` | `tests/test_agents.py::test_project_instructions_reach_the_session_from_the_node_or_defaults`, `test_project_instructions_takes_a_boolean_on_a_node_or_in_defaults` |
 | `false` on Claude Code | No setting source loads: no `CLAUDE.md` or `AGENTS.md` at any level, no `.claude/rules`, no `.claude/settings.json`, and no skills in `.claude/skills`. Claude Code's own system prompt stays. | `workflow/harnesses/claude_code.py:137` | `test_without_project_instructions_no_setting_source_loads`, `test_a_real_node_without_project_instructions_does_not_get_the_repos_claude_md` (`-m harness`) |
-| `false` on Codex | The thread gets `project_doc_max_bytes: 0`, so no `AGENTS.md` and no fallback file such as `CLAUDE.md`. Each skill that `skills/list` finds in the repo is switched off in the thread's config. | `workflow/harnesses/codex.py:169`, `workflow/harnesses/codex.py:204` | `test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill` |
-| `false` on Codex, and `skills/list` doesn't answer | Codex is unavailable for the attempt, so the next harness in the node's list runs. | `workflow/harnesses/codex.py:210` | `test_a_codex_that_does_not_list_its_skills_is_unavailable_to_a_node_without_project_instructions` |
-| `false` on Cursor | cursor-agent starts in a new empty folder in the system's temp folder, outside the repo and your home folder, because it reads rules, `AGENTS.md`, `CLAUDE.md` and skills from the folder it starts in. `session/new` still gives the workspace, where the agent reads, edits and runs commands. The folder goes with the session. | `workflow/harnesses/cursor.py:287`, `workflow/harnesses/cursor.py:420` | `test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace`, `test_by_default_cursor_agent_starts_in_the_workspace` |
-| `false` where a harness still loads a file | `wf validate` warns once for each harness, where the setting is. On Codex, your global `~/.codex/AGENTS.md` stays. On Cursor, your account's User Rules stay, and so do the repo's hooks in `.cursor/hooks.json` and `.claude/settings.json`. | `workflow/validate.py:622`, `workflow/harnesses/__init__.py:51` | `test_project_instructions_off_warns_once_per_harness_that_keeps_a_file` |
+| `false` on Codex | The thread gets `project_doc_max_bytes: 0`, so no `AGENTS.md` and no fallback file such as `CLAUDE.md`. Each skill that `skills/list` finds in the repo is switched off in the thread's config. | `workflow/harnesses/codex.py:170`, `workflow/harnesses/codex.py:205` | `test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill` |
+| `false` on Codex, and `skills/list` doesn't answer | Codex is unavailable for the attempt, so the next harness in the node's list runs. | `workflow/harnesses/codex.py:211` | `test_a_codex_that_does_not_list_its_skills_is_unavailable_to_a_node_without_project_instructions` |
+| `false` on Cursor | cursor-agent starts in a new empty folder in the system's temp folder, because it reads rules, `AGENTS.md`, `CLAUDE.md` and skills from the folder it starts in and from each folder above it. `session/new` still gives the workspace, where the agent reads, edits and runs commands. The folder goes with the session. | `workflow/harnesses/cursor.py:289`, `workflow/harnesses/cursor.py:422` | `test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace`, `test_by_default_cursor_agent_starts_in_the_workspace` |
+| `false` on Cursor, and a folder above the temp folder holds `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `.cursorrules` or `.cursor/rules`, as when `TMPDIR` is in a repo | Cursor is unavailable for the attempt, and the message names the file, so the next harness in the node's list runs. | `workflow/harnesses/cursor.py:436` | `test_a_temp_folder_under_an_instruction_file_makes_cursor_unavailable_without_project_instructions` |
+| `false` where a harness still loads a file | `wf validate` warns once for each harness, where the setting is. On Codex, your global `~/.codex/AGENTS.md` and the skills in your home folder stay. On Cursor, your account's User Rules and the skills in your home folder stay, and so do the repo's hooks in `.cursor/hooks.json` and `.claude/settings.json`. | `workflow/validate.py:622`, `workflow/harnesses/__init__.py:51` | `test_project_instructions_off_warns_once_per_harness_that_keeps_a_file` |
 | `false`, and a template picks the harness | `wf validate` can't tell which harness runs, so it warns about each harness that keeps a file. | `workflow/validate.py:628` | `test_project_instructions_off_warns_about_every_harness_a_template_could_pick` |
 
 On Cursor, `false` has a cost: Cursor's semantic code search and lint diagnostics don't cover the workspace.
-The skills in your home folder load as before on every harness that loads them.
-Each harness row was checked live on 2026-10-19, with Claude Code 2.1.301, Codex 0.163.0 and cursor-agent 2026.10.18-ea085cb.
+Claude Code loads no skill from your home folder.
+Codex and Cursor load those skills as before.
+Each harness row was checked live, with Claude Code 2.1.301 (the one the Agent SDK bundles), Codex 0.163.0 and cursor-agent 2026.10.18-ea085cb.
 In each check, a repo's `AGENTS.md` or `CLAUDE.md`, its rules and its skills held code words.
 A node with the default told them, and a node with `false` told none, and still did its task.
+These checks are tests marked `-m harness`: `test_a_real_node_without_project_instructions_does_not_get_the_repos_claude_md`, `test_a_real_codex_node_without_project_instructions_gets_no_repo_agents_md_or_skill` and `test_a_real_cursor_node_without_project_instructions_gets_no_repo_rules_and_still_edits`.
 
 ##### Tools and a shell
 
@@ -888,7 +892,8 @@ Warnings:
 - A node has `write: true` for a tool that is set up for reads only (`wf tools <name> setup --write`).
 - A node sets `tools_with_shell: true`: its agent could read every stored sign-in.
 - A node with `project_instructions: false` can run on a harness that still loads an instruction file.
-  Codex loads your global `~/.codex/AGENTS.md`, and Cursor loads your account's User Rules and the repo's hooks.
+  Codex loads your global `~/.codex/AGENTS.md` and the skills in your home folder.
+  Cursor loads your account's User Rules, the skills in your home folder, and the repo's hooks.
 - An agent with `access: full` reads output from an agent with `tools`.
   Messages, notes and mail that other people write can carry instructions aimed at agents.
 

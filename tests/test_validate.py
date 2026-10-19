@@ -678,7 +678,8 @@ def test_project_instructions_takes_a_boolean_on_a_node_or_in_defaults(tmp_path)
 
 
 def test_project_instructions_off_warns_once_per_harness_that_keeps_a_file(tmp_path):
-    codex = "on codex, `project_instructions: false` doesn't keep out your global ~/.codex/AGENTS.md"
+    codex = ("on codex, `project_instructions: false` doesn't keep out your global ~/.codex/AGENTS.md, "
+             "or the skills in your home folder (~/.agents/skills, ~/.codex/skills)")
     report = check(tmp_path, flow("""
         a: {needs: [start], instruction: x, harness: codex, project_instructions: false}
         b: {needs: [start], instruction: x, harness: codex}
@@ -700,6 +701,7 @@ def test_project_instructions_off_warns_about_every_harness_a_template_could_pic
     assert [(p.level, p.where) for p in report.problems] == [("warning", "nodes.a.project_instructions")] * len(
         harnesses.KEPT_INSTRUCTIONS)
     assert all(f"on {name}," in p.message for p, name in zip(report.problems, sorted(harnesses.KEPT_INSTRUCTIONS)))
+    assert "your Cursor account's User Rules, the skills in your home folder" in report.problems[1].message
 
 
 # ---------- malformed files are reported, never crash ----------

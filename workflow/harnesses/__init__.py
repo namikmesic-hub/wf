@@ -49,8 +49,9 @@ FACTORIES: dict[str, Callable[[], Harness]] = {"claude-code": _claude_code, "cod
 KEYCHAIN_SHELL = {"claude-code": ("edit", "full"), "cursor": ("edit", "full"), "codex": ("full",)}
 
 KEPT_INSTRUCTIONS = {  # what a harness still loads with `project_instructions: false`
-    "codex": "your global ~/.codex/AGENTS.md",
-    "cursor": "your Cursor account's User Rules, or the repo's hooks in .cursor/hooks.json and .claude/settings.json",
+    "codex": "your global ~/.codex/AGENTS.md, or the skills in your home folder (~/.agents/skills, ~/.codex/skills)",
+    "cursor": "your Cursor account's User Rules, the skills in your home folder (~/.claude/skills, ~/.agents/skills "
+              "and others), or the repo's hooks in .cursor/hooks.json and .claude/settings.json",
 }
 
 

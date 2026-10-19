@@ -69,7 +69,10 @@ Agent nodes also take `project_instructions` (true).
 These are `CLAUDE.md`, `AGENTS.md`, Cursor's rules, the repo's skills, and Claude Code's project settings.
 The instruction still reaches the agent.
 Use it when a repo's files give agents a role that isn't the workflow's, as firstmate's `AGENTS.md` does.
-Some files stay, and `wf validate` warns about them: on Codex your global `~/.codex/AGENTS.md`, and on Cursor your account's User Rules and the repo's hooks.
+A sub-workflow uses its own `defaults`, so set it in each sub-workflow too.
+Some files stay, and `wf validate` warns about them.
+On Codex, your global `~/.codex/AGENTS.md` and the skills in your home folder stay.
+On Cursor, your account's User Rules, the skills in your home folder, and the repo's hooks stay.
 On Cursor, semantic code search and lint diagnostics then don't cover the workspace.
 The spec's "Instruction files" section has the rules for each harness.
 

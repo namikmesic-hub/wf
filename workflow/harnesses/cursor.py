@@ -93,10 +93,11 @@ commands from the folder it starts in, not from session/new's cwd. That is
 folder, each folder above it, and folders below it, and the skills in its
 .cursor, .claude, .codex and .agents folders. So a session starts in the
 workspace, unless the node sets `project_instructions: false`. Then it starts
-in a new empty folder in the system's temp folder, outside the repo and your
-home folder, and session/new still gives the workspace, where the agent works.
-The cost: Cursor's semantic code search and lint diagnostics then don't cover
-the workspace.
+in a new empty folder in the system's temp folder (_bare_folder), and
+session/new still gives the workspace, where the agent works. When a folder
+above that one holds a file Cursor would load (TMPDIR in a repo), the session
+is unavailable instead. The cost: Cursor's semantic code search and lint
+diagnostics then don't cover the workspace.
 
 What can't be switched off: your Cursor account's User Rules, and the skills in
 your home folder (such as ~/.claude/skills and ~/.agents/skills). The repo's
@@ -125,7 +126,7 @@ from ..runs import write_json
 from . import git_tool, mcp_http
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
-TESTED = "2026.10.16-e3cb207"
+TESTED = "2026.10.18-ea085cb"
 COMMAND = ["cursor-agent"]
 FLAGS = ["--sandbox", "disabled", "--disable-project-configs"]
 SERVER = "wf"  # the MCP server name the agent sees
@@ -155,6 +156,7 @@ RETRY_AFTER = 30  # seconds
 AUTH_REQUIRED = -32000  # ACP's error code for "authenticate first"
 LABELS = {"read": "read", "edit": "edit", "delete": "delete", "move": "move", "search": "search",
           "execute": "command", "fetch": "web fetch"}
+LOADED_FROM_ABOVE = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", ".cursorrules", ".cursor/rules")
 
 
 class Cursor:
@@ -285,7 +287,7 @@ class CursorSession:
                 (self.folder / "acp-sessions").mkdir()
                 saved.rename(self.folder / "acp-sessions" / self.id)
             if not spec.project_instructions:
-                self.bare = Path(tempfile.mkdtemp(prefix="wf-cursor-"))
+                self.bare = _bare_folder()
             self.rpc = await _Connection.start(command, self.bare or spec.cwd, harness.env(self.folder),
                                                harness.home / "cursor-agent.log", harness.request_timeout, self)
             await self.rpc.request("initialize", {
@@ -429,6 +431,18 @@ class CursorSession:
             shutil.rmtree(target, ignore_errors=True)
             target.parent.mkdir(exist_ok=True)
             store.rename(target)
+
+
+def _bare_folder() -> Path:
+    """A new empty folder in the system's temp folder, for cursor-agent to start in. Cursor also reads
+    instruction files from each folder above the one it starts in, so a folder under such a file is refused."""
+    folder = Path(tempfile.mkdtemp(prefix="wf-cursor-")).resolve()
+    found = next((parent / name for parent in folder.parents for name in LOADED_FROM_ABOVE if (parent / name).exists()), None)
+    if found is not None:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise Unavailable(f"Cursor would load {found}, which is above the temp folder {folder.parent}, so wf can't keep "
+                          "instruction files out: set TMPDIR to a folder with none above it")
+    return folder
 
 
 def notice(message: str) -> str:

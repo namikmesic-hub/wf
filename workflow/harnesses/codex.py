@@ -59,7 +59,8 @@ With `project_instructions: false`, project_doc_max_bytes 0 keeps out the
 AGENTS.md files, and each repo skill that skills/list names is switched off in
 the thread's config.
 
-What can't be switched off: your global ~/.codex/AGENTS.md always loads.
+What can't be switched off: your global ~/.codex/AGENTS.md always loads. The
+skills in your home folder load too, with `project_instructions: false` as well.
 
 The app server is experimental, so wf is tested against one Codex version
 (TESTED) and warns when the installed one differs.

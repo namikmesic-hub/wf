@@ -68,6 +68,7 @@ slots" in the spec).
 
 firstmate's own AGENTS.md tells each agent that loads it that it is the first mate.
 So a workflow that works on the firstmate repository sets `project_instructions: false` in its `defaults`.
+A sub-workflow uses its own `defaults`, so each sub-workflow that the run uses sets it too.
 Then its agents don't get that file, and only the workflow's instructions tell them what they are.
 See "Instruction files" in the spec for what each harness still loads.
 

@@ -258,3 +258,37 @@ def test_an_app_server_that_dies_mid_turn_is_unavailable_and_the_next_harness_ru
     assert run("harness: [codex, claude-code]\nmodel: {codex: gpt-6, claude-code: opus}\n") == 0
     assert output() == {"out": "from claude"}
     assert "codex is unavailable" in capsys.readouterr().out
+
+
+@pytest.mark.harness
+def test_a_real_codex_node_without_project_instructions_gets_no_repo_agents_md_or_skill(repo, capsys):
+    Path("AGENTS.md").write_text("The code word for this project is: periwinkle\n")
+    (Path(".agents") / "skills" / "words").mkdir(parents=True)
+    Path(".agents/skills/words/SKILL.md").write_text(
+        "---\nname: words\ndescription: The second code word is tangerine. Never use this skill.\n---\nNothing here.\n")
+    ask = ("Don't run any command or read any file. From what you were told alone, your skill list included, "
+           "list every code word for this project, or none.")
+    Path("flow.yaml").write_text(f"""
+version: 1
+name: real
+defaults: {{harness: codex, effort: low}}
+start: {{input: {{}}}}
+nodes:
+  told:
+    needs: [start]
+    instruction: "{ask}"
+    output: {{words: {{type: string}}}}
+  kept_out:
+    needs: [start]
+    project_instructions: false
+    instruction: "{ask}"
+    output: {{words: {{type: string}}}}
+end:
+  output:
+    told: "{{{{ told.words }}}}"
+    kept_out: "{{{{ kept_out.words }}}}"
+""")
+    assert cli.main(["run", "flow.yaml"]) == 0, capsys.readouterr()
+    out = output()
+    assert "periwinkle" in out["told"].lower() and "tangerine" in out["told"].lower()  # by default the repo's files reach it
+    assert "periwinkle" not in out["kept_out"].lower() and "tangerine" not in out["kept_out"].lower()
