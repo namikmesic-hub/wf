@@ -142,12 +142,13 @@ end:
 | `wf tools list` | Lists the tools agent nodes can use (see [docs/tools.md](tools.md)), how each signs in, and whether it's set up. |
 | `wf tools <name> setup [--write]` | Signs in to a tool once, in the browser or with a pasted token, and keeps the secret in the macOS Keychain. It asks Slack and Linear for read scopes only, unless `--write` is given. |
 | `wf tools <name> doctor`, `wf tools doctor` | Checks that a tool's sign-in is there and still good, and makes one harmless read call. Prints pass or fail with the next step. |
+| `wf steer <run-id> <node> [--item N] <message>` | Sends a message into the live agent session of a node, while the run works (see [Steering a live session](#steering-a-live-session)). `--file <file>` reads a long message from a file, and `--file -` from stdin. |
 
 `wf run` exit codes: 0 succeeded, 1 failed or stopped by a limit, 2 paused waiting for a person
 (only with `--no-input` or when there's no terminal).
 
 Every command that makes or finds runs (`run`, `retry`, `answer`, `wait`, `status`, `list`,
-`report`, `discard`, `sessions`, `watch`, `ui`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
+`report`, `discard`, `sessions`, `watch`, `ui`, `steer`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
 [Run folder](#run-folder)). The commands that wf prints for a run in a runs folder, like
 `wf retry <run-id>`, include the option, so they find the run whether or not
 `WF_RUNS_DIR` is set where you type them.
@@ -765,6 +766,45 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. | `workflow/capacity.py:95` | `test_a_smaller_cap_uses_only_the_first_slots` |
 | A `wf run` or `wf retry` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:82`, `workflow/runner.py:162` | `test_wf_run_and_wf_retry_read_the_cap_once_when_they_start` |
 
+### Steering a live session
+
+`wf steer` sends a message into the live agent session of a node.
+With it, a person who supervises a run can redirect an agent while it works.
+A session is live from when its harness opens it until its attempt ends.
+`--item <index>` names the item of a `for_each` node.
+A node in a sub-workflow has the path that events give it, such as `build/implement` or `build[1]/implement`.
+
+The message goes to the agent as its next user message.
+How soon depends on the harness:
+- **Codex** adds it to the running turn with `turn/steer`, and the agent reads it at its next step.
+  `wf steer` says `delivered`.
+- **Claude Code** keeps it, and the agent reads it at its next step, beside that step's tool results.
+  `wf steer` says `queued`, and the run records `delivered` when Claude Code reads it.
+  Claude Code tells the agent that the user sent the message while it worked.
+  All the same, in one of two live checks with Haiku 5.5, the agent took the message for tool output and ignored it.
+- **Cursor** can't add a message to a running turn.
+  `wf steer` says `queued`, and the runner sends the message as the next turn when this turn ends.
+
+A turn of the instruction often runs until the agent submits its result.
+So a message that waits for the end of the turn usually comes too late, and is dropped.
+
+The tests named below are in `tests/test_steer.py`, unless another file is named.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| The node has a live session | `wf steer` hands the message to the wf process that drives the run, through files in the run folder's `steer/`, and waits for the answer. It prints `delivered` or `queued`, with the attempt and the harness, and exits 0. `--json` prints the answer as JSON. | `workflow/steer.py:119`, `workflow/steer.py:201` | `test_a_message_from_wf_steer_joins_the_running_turn` in `tests/test_codex.py`, `test_a_message_reaches_a_node_in_a_sub_workflow_from_stdin` |
+| Codex runs a turn | The message goes into that turn with `turn/steer`, which names the turn, so it can't go into a later one: `delivered`. | `workflow/harnesses/codex.py:234` | `test_a_message_from_wf_steer_joins_the_running_turn` in `tests/test_codex.py` |
+| Claude Code runs a turn, and has repeated a message in the session | The message goes to Claude Code with an id: `queued`. With `--replay-user-messages`, Claude Code repeats the id when it reads the message, and the run records `delivered`. | `workflow/harnesses/claude_code.py:252`, `workflow/harnesses/claude_code.py:294` | `test_claude_code_reads_a_message_from_wf_steer_at_its_next_step` in `tests/test_claude_code.py` |
+| Claude Code reads the message only after the turn's last step | Claude Code gives the message a turn of its own. The runner reads that turn to its result, and sends no reminder before it. | `workflow/harnesses/claude_code.py:337` | `test_a_message_after_the_last_step_gets_a_turn_of_its_own_and_no_reminder_goes` in `tests/test_claude_code.py` |
+| The harness can't take the message now: Cursor, a session between turns, a turn that ended as `turn/steer` came, or Claude Code before it repeated a message | `queued`. When the turn ends without a result, the message goes as the next turn, before any reminder, and the run records `delivered`. | `workflow/nodes.py:524`, `workflow/steer.py:243` | `test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn` in `tests/test_cursor.py`, `test_a_message_that_misses_the_turn_goes_as_the_next_turn_before_a_reminder` in `tests/test_codex.py`, `test_a_message_reaches_an_item_from_a_file_and_waits_for_the_turn_to_end` |
+| The attempt ends before the agent reads the message: the agent submitted its result, or the attempt failed or timed out | The message is dropped, and the run records why. | `workflow/steer.py:251`, `workflow/harnesses/base.py:172`, `workflow/harnesses/claude_code.py:353` | `test_a_message_for_cursor_is_dropped_when_the_agent_submits_first` in `tests/test_cursor.py`, `test_a_message_codex_never_took_is_dropped_when_the_agent_submits_first` in `tests/test_codex.py`, `test_a_message_claude_code_hasnt_read_when_the_agent_submits_is_dropped` in `tests/test_claude_code.py` |
+| A message reaches a live session | `events.jsonl` gets a `steer` event, and the attempt's log a `steer` line, each with the message's id: `delivered` or `queued` with the text, then `delivered`, or `dropped` with the reason. The terminal shows each one. | `workflow/harnesses/base.py:165`, `workflow/runner.py:614` | `test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn` in `tests/test_cursor.py` |
+| The node isn't an agent node of the run, a `for_each` node has no `--item`, or a node without `for_each` has one | `wf steer` says what is wrong, and exits 1. | `workflow/steer.py:75` | `test_a_message_for_what_isnt_an_agent_node_is_refused`, `test_wf_steer_says_what_is_wrong_with_the_node_or_the_message` |
+| The run isn't `running`, or no wf process drives it | `wf steer` says there is no live session, and why, and exits 1. It writes nothing. | `workflow/steer.py:125` | `test_a_run_that_isnt_running_has_no_live_session`, `test_a_running_run_that_no_process_drives_has_no_live_session` |
+| The run is running, but the node has no live session | The same, with the reason: no session of the node is open, or its attempt is still opening one. Nothing in the run changes. | `workflow/steer.py:209` | `test_a_message_for_a_node_without_a_live_session_fails_and_changes_nothing` |
+| The process that drives the run doesn't take the message within 15 seconds | `wf steer` deletes the request, so it can't arrive later, and says there is no live session. | `workflow/steer.py:137` | `test_a_message_nobody_takes_is_withdrawn_and_can_never_arrive` |
+| The process finds a request older than 15 seconds | It answers that there is no live session, and never delivers the message. | `workflow/steer.py:321` | `test_a_request_older_than_the_wait_is_answered_and_never_delivered` |
+
 ## The output tool
 
 Each agent attempt gets one tool, `submit_result`. Its input schema is the node's
@@ -891,6 +931,7 @@ The tests named below are in `tests/test_workspaces.py`.
   trace.jsonl                   one record per line of what the run read, decided and did (see The trace)
   blobs/                        values too long for a line of the trace, by their sha256
   checkpoints.sqlite            LangGraph checkpoints, used by wf retry
+  steer/                        wf steer's messages, on their way to the process that drives the run
   nodes/<node>/<pass>/          one folder per pass ...
     [<index>/]                  ... and per item
       instruction.md            the rendered instruction (or command, or message)
@@ -1265,6 +1306,7 @@ class Harness(Protocol):
 class Session(Protocol):
     id: str
     async def send(self, text: str) -> TurnEnd   # one turn: done, unavailable or failed
+    async def steer(self, text: str, ident: str) # a wf steer message: "delivered", "queued", or None for the next turn
     async def close(self) -> None                # also interrupts a running turn
 ```
 
@@ -1290,6 +1332,7 @@ A `failed` `TurnEnd` can also set `retry_after`, the seconds the runner waits be
 | Usage | tokens and dollars | tokens | none |
 | `session: continue` | fork with `fork_session` | fork with `thread/fork` | `session/load` (no fork) |
 | wf tools | an SDK MCP server per tool | a namespace of dynamic tools per tool | an MCP server over HTTP per tool, a URL per session |
+| `wf steer` | a user message, read at the agent's next step; `--replay-user-messages` says when | `turn/steer` into the running turn | the next `session/prompt`, when the turn ends |
 
 Notes:
 - Every setting is passed on every session. Codex fills any gap from your

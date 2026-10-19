@@ -58,6 +58,7 @@ command that the new wf doesn't have.
 | `wf sessions [run-id] --json` | the agent sessions that run now, with each one's last tool call and quiet time |
 | `wf watch <run-id>` | the run's steps and tool calls as they come, until it succeeds, for a terminal pane |
 | `wf ui [--all-repos]` | a web page on this machine with the graph, progress, metrics, events and transcripts |
+| `wf steer <run-id> <node> <message>` | tell an agent something while it works |
 | `wf wait <run-id> [--consumer NAME]` | block until a run needs attention (what the adapter polls) |
 
 Only one process drives a run at a time (a lock in the run folder), so the

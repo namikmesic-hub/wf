@@ -37,6 +37,8 @@ wf report --workflow implement           # what the runs did, per step
 wf trace <run-id> --var review.blocking_issues   # what one run's templates read, pass by pass
 ```
 
+`wf steer <run-id> <node> <message>` tells an agent something while it works, as you would in its own terminal.
+
 `wf run <file> --dry-run <script.yaml>` walks a workflow with scripted agent
 results, for free. `wf --help` lists every command.
 
