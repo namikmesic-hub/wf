@@ -157,17 +157,13 @@ def test_optional_fields_left_out_become_none_at_any_depth():
     assert value == {"tasks": [{"title": "a"}, {"title": "b", "notes": "n"}]}  # a copy: the value itself is kept
 
 
-def test_none_counts_as_left_out_only_in_fields_that_are_not_required():
+def test_none_counts_as_left_out_in_every_field_that_is_not_required():
     schema = schemas.object_schema({"tasks": {"type": "array", "items": {"$ref": "task"}}}, NOTED)
     filled = {"tasks": [{"title": "a", "notes": None}]}
     assert schemas.check(filled, schema) == ["tasks[0].notes: None is not of type 'string'"]
-    assert schemas.check(filled, schema, none_is_absent=True) == []
-    assert schemas.check({"tasks": [{"title": None}]}, schema, none_is_absent=True) == [
-        "tasks[0].title: None is not of type 'string'",
-    ]
-    assert schemas.check({"tasks": [{"title": "a", "other": None}]}, schema, none_is_absent=True) == [
-        "tasks[0]: Additional properties are not allowed ('other' was unexpected)",
-    ]
+    assert schemas.without_none(filled, schema) == {"tasks": [{"title": "a"}]}
+    # a required field keeps its none, and so fails; a field the schema doesn't declare loses it
+    assert schemas.without_none({"tasks": [{"title": None, "other": None}]}, schema) == {"tasks": [{"title": None}]}
 
 
 # ---------- looking up fields (for template checks) ----------

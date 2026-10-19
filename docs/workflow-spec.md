@@ -221,8 +221,9 @@ becomes
   at any depth, and a node's `output.json` records it as null. To let an agent or a
   person give null, use `type: [string, "null"]`.
 - A value a template makes for `with` or for an end output's schema can hold that `none`.
-  There, `none` in a field the schema doesn't require counts as left out, so an output
-  with a missing optional field passes through to a sub-workflow input of the same type.
+  There, `none` in any field the schema doesn't require counts as left out: a `with`
+  input that has a `default` gets the default, and an output with a missing optional
+  field passes through to a schema that declares the field or leaves it out.
 - In `start.input`, a field can have a `default`, used when that input isn't given. A field
   with a default is optional.
 - Write `description`s. For agent nodes they're part of the `submit_result` tool, so the

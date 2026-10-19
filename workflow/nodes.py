@@ -518,11 +518,12 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
 
 def _sub_inputs(sub, given: dict, attempt: int) -> dict:
     """`with`, plus the sub-workflow's input defaults, checked against its start.input."""
-    values = dict(given)
+    schema = schemas.object_schema(sub.start.input, sub.types)
+    values = schemas.without_none(given, schema)  # none counts as left out, so a default replaces it
     for name, field in sub.start.input.items():
         if name not in values and "default" in field:
             values[name] = field["default"]
-    problems = schemas.check(values, schemas.object_schema(sub.start.input, sub.types), none_is_absent=True)
+    problems = schemas.check(values, schema)
     if problems:
         raise _Failed(f"`with` doesn't fit {sub.name}'s inputs: " + "; ".join(problems), attempt)
     return values
