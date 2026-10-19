@@ -52,7 +52,8 @@ A message from `wf steer` (steer()) goes into the running turn with
 `turn/steer`. The request names the turn it expects, so the message can't land
 in a later one. The agent reads it at its next step. When no turn is running,
 or the turn ended before the request came, the runner sends the message as the
-next turn.
+next turn. When the app server doesn't answer the request, it may still have
+taken the message, so the message isn't sent again: it is `unconfirmed`.
 
 Limits: an `error` notification with codexErrorInfo "usageLimitExceeded" (or
 "unauthorized") that Codex won't retry makes the turn unavailable, which sends
@@ -81,7 +82,7 @@ import time
 from pathlib import Path
 
 from .. import output_tool
-from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
+from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, steered, transcript
 
 TESTED = "0.163.0"
 COMMAND = ["codex", "app-server", "--disable", "hooks", "--disable", "apps"]
@@ -161,6 +162,7 @@ class CodexSession:
         self._turn_start = 0
         self._counted = False  # has a token count come in yet?
         self._traced: dict[str, dict] = {}  # call id -> the arguments the trace has for it
+        self._unconfirmed: list[str] = []  # ids of wf steer messages whose turn/steer got no answer
 
     async def start(self) -> None:
         spec = self.spec
@@ -232,9 +234,12 @@ class CodexSession:
             return None
         try:
             await self.rpc.request("turn/steer", {"threadId": self.id, "expectedTurnId": self.turn, "input": _input(text)},
-                                   timeout=STEER_TIMEOUT)
-        except (_RpcError, TimeoutError):
+                                   timeout=min(self.rpc.timeout, STEER_TIMEOUT))
+        except _RpcError:  # refused, as the turn had ended, or the app server is gone
             return None
+        except TimeoutError:  # sent, but no answer: Codex may have taken it, so it isn't sent again
+            self._unconfirmed.append(ident)
+            return "queued"
         return "delivered"
 
     async def send(self, text: str) -> TurnEnd:
@@ -341,6 +346,10 @@ class CodexSession:
             self.spec.trace.tool_call(call, _tool_label(item), arguments)
 
     async def close(self) -> None:
+        for ident in self._unconfirmed:
+            steered(self.spec, ident, "unconfirmed",
+                    reason="the Codex app server didn't answer turn/steer, so wf can't tell whether the agent read it")
+        self._unconfirmed.clear()
         try:
             if self.turn and not self.rpc.dead:  # a turn still running (a timeout): stop it
                 with contextlib.suppress(Exception):
@@ -387,6 +396,8 @@ class _Connection:
         try:
             await self._write({"id": request_id, "method": method, "params": params})
             return await asyncio.wait_for(future, timeout or self.timeout)
+        except TimeoutError:  # an OSError too, but it means no answer, not a lost app server
+            raise
         except OSError as error:  # its stdin is gone: the app server died after the check above
             raise _RpcError(self.dead or f"lost the Codex app server: {error}") from error
         finally:

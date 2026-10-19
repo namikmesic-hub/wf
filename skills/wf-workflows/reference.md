@@ -212,8 +212,8 @@ fails when the code stops doing what the row says.
 | A `for_each` node's `branch` doesn't use `item` or `index` | `wf validate` error | `workflow/validate.py:737` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
 | A `for_each` workflow node doesn't give `item` or `index` to a `branch` in its sub-workflow | `wf validate` error | `workflow/validate.py:782` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
 | The run made the branch but stopped before it recorded it | The next pass records it and goes on | `workflow/nodes.py:221` | `tests/test_workspaces.py::test_a_run_that_stopped_before_recording_its_branch_takes_it_up_again` |
-| `wf discard --branches`, and a worktree of the run has the named branch checked out | Deletes the branch, also when `branches.json` has no record of it | `workflow/runs.py:407` | `tests/test_workspaces.py::test_discard_deletes_the_branch_a_run_made_without_recording_it` |
-| `wf discard --branches`, and the named branch isn't on the commit that the run left it on | The branch stays, and discard says why | `workflow/runs.py:408` | `tests/test_workspaces.py::test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work` |
+| `wf discard --branches`, and a worktree of the run has the named branch checked out | Deletes the branch, also when `branches.json` has no record of it | `workflow/runs.py:406` | `tests/test_workspaces.py::test_discard_deletes_the_branch_a_run_made_without_recording_it` |
+| `wf discard --branches`, and the named branch isn't on the commit that the run left it on | The branch stays, and discard says why | `workflow/runs.py:407` | `tests/test_workspaces.py::test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work` |
 | A dry run succeeds | Its named branches are deleted | `workflow/runner.py:563` | `tests/test_workspaces.py::test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them` |
 | A `command` writes `workspace.<node>.branch` unquoted, and that node's `branch` reads node output | `wf validate` warning | `workflow/validate.py:485` | `tests/test_validate.py::test_a_branch_named_from_agent_output_is_untrusted_in_a_command` |
 
@@ -244,7 +244,7 @@ the same `~/.wf` (spec: "Agent slots"):
 |---|---|---|---|
 | `max_agents: N` in `~/.wf/config.yaml`, or `WF_MAX_AGENTS=N`, which wins | At most N agent attempts hold a slot at once. | `workflow/capacity.py:60` | `test_two_runs_in_separate_processes_share_the_cap` |
 | An attempt finds every slot taken | It waits. It keeps its retries, and its `timeout` starts once it has a slot. | `workflow/nodes.py:297` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
-| A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:582` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
+| A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:583` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
 
 ## Sessions
 
@@ -302,7 +302,7 @@ dry runs out.
 NAME=VALUE]`, `retry [--limit NAME=VALUE] [--model NODE=MODEL]`, `answer`, `wait`, `status`, `list` (newest first), `report [--real |
 --dry-runs] [--version V]`, `trace <run-id> [--node N] [--pass P] [--field F] [--var PATH]`
 (what one run read, decided and did: improving.md), `discard [<run-id>... | --workflow NAME
-[--dry-runs]]`. Exit codes: 0 succeeded, 1 failed or limit, 2 waiting for a
+[--dry-runs]]`, `steer <run-id> <node> [--item N] <message | --file FILE>`. Exit codes: 0 succeeded, 1 failed or limit, 2 waiting for a
 person, 3 (`wf wait`) nothing new, 130 Ctrl-C. The commands that make or find
 runs take `--runs-dir DIR` (or `WF_RUNS_DIR`): run folders then go to
 `DIR/<repo key>/` instead of `.wf/runs/`. Then the repo's working tree and

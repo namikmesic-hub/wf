@@ -129,9 +129,9 @@ class Session(Protocol):
 
     async def steer(self, text: str, ident: str) -> Literal["delivered", "queued"] | None:
         """A message from `wf steer`, with its id. "delivered": the running turn has it now.
-        "queued": the harness holds it for the agent's next step, and records with steered() when
-        the agent reads it, or steer_dropped() when the session ends first. None: the harness
-        can't take it now, so the runner sends it as the next turn."""
+        "queued": the harness holds it for the agent's next step, and records with steered() what
+        became of it, or steer_dropped() when the session ends first. None: the harness can't take
+        it now, so the runner sends it in the next turn."""
 
     async def close(self) -> None:
         """End the session, interrupting a turn that's still running."""

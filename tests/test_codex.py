@@ -325,6 +325,17 @@ def test_a_message_that_misses_the_turn_goes_as_the_next_turn_before_a_reminder(
     assert [(e["status"], e.get("text")) for e in steer_events()] == [("queued", STEER), ("delivered", None)]
 
 
+def test_a_message_codex_never_answers_for_is_unconfirmed_and_never_sent_again(repo, monkeypatch):
+    log = codex(monkeypatch, repo, [{"pause": "p"}, GOOD], silent=["turn/steer"])
+    steering = at_pause(repo, "p")
+    assert run() == 0
+    assert steering.result().stdout.startswith("Queued for ask (attempt 1 on codex)")
+    assert len(sent(log, "turn/steer")) == 1 and len(sent(log, "turn/start")) == 1
+    queued, unconfirmed = steer_events()
+    assert (queued["status"], unconfirmed["status"]) == ("queued", "unconfirmed")
+    assert unconfirmed["reason"] == "the Codex app server didn't answer turn/steer, so wf can't tell whether the agent read it"
+
+
 def test_a_message_codex_never_took_is_dropped_when_the_agent_submits_first(repo, monkeypatch):
     log = codex(monkeypatch, repo, [{"pause": "p"}, GOOD], steer="reject")
     steering = at_pause(repo, "p")

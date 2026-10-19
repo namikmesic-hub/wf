@@ -13,7 +13,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from workflow import operate
+from workflow import operate, workspaces
 
 STEER = "Use the v2 API instead"
 
@@ -63,6 +63,6 @@ def steer_lines(node: str = "ask", attempt: int = 1) -> list[dict]:
 
 
 def left_in_mailbox() -> list[str]:
-    """Files left in the run's steer folder: none, once every message has its answer."""
-    folder = run_folder() / "steer"
+    """Files left in the run's mailbox (steer.mailbox): none, once every message has its answer."""
+    folder = workspaces.mailbox(run_folder().name)
     return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []

@@ -39,6 +39,7 @@ Then the runner, built on LangGraph:
 
 Then the tools around runs, none of which LangGraph knows about:
     operate.py     running wf without a terminal: detach, wait, answer
+    steer.py       `wf steer`: a message into the live agent session of a running node
     firstmate.py   the firstmate extension: wf runs as firstmate event sources
     dryrun.py      dry runs: scripts of agent results, answers and command results,
                    played by harnesses/scripted.py

@@ -252,8 +252,12 @@ class ClaudeSession:
     async def steer(self, text: str, ident: str) -> str | None:
         if not self._working or not self._repeats:
             return None
-        await self._say(text, ident)
-        self._held.append(ident)
+        self._held.append(ident)  # first: Claude Code can read it, and say so, before the write returns
+        try:
+            await self._say(text, ident)
+        except BaseException:
+            self._held.remove(ident)
+            raise
         return "queued"
 
     async def send(self, text: str) -> TurnEnd:

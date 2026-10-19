@@ -16,7 +16,6 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
       events.jsonl                  one line per progress event
       trace.jsonl, blobs/           what the run read, decided and did (trace.py)
       checkpoints.sqlite            LangGraph checkpoints, used by wf retry
-      steer/                        wf steer's messages, on their way to the process that drives the run
       nodes/<node>/<pass>/[<index>/]
         instruction.md              the rendered instruction (or command, or message)
         output.json
@@ -392,7 +391,7 @@ NOT_OURS = "wf can't tell it's still this run's work (no worktree of the run has
 
 
 def discard(run: Run, branches: bool) -> dict[str, str]:
-    """Delete a run: its worktrees, temp folders, folder, and (with `branches`) its branches.
+    """Delete a run: its worktrees, temp folders, wf steer mailbox, folder, and (with `branches`) its branches.
     Holds the run's lock while it does, so a run being driven can't be discarded (RunBusy).
     Returns the branches of its that it kept, with why (KEPT, NOT_OURS, or git's error), to say so.
 
@@ -408,6 +407,7 @@ def discard(run: Run, branches: bool) -> dict[str, str]:
             r["branch"] == b and r.get("left") and r["left"] == workspaces.tip(repo, b) for r in records)]
         workspaces.remove_run(repo, run.id)
         shutil.rmtree(workspaces.temp_root(run.id), ignore_errors=True)
+        shutil.rmtree(workspaces.mailbox(run.id), ignore_errors=True)
         kept = {b: NOT_OURS for b in named if b not in ours and workspaces.branch_exists(repo, b)}
         if branches:  # git keeps a branch that's checked out somewhere: say so
             kept |= {b: f"git couldn't delete it ({why})" for b, why in workspaces.delete_branches(repo, run.id, ours).items()}

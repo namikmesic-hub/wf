@@ -28,9 +28,9 @@ reports itself unavailable (usage limit, login, can't start) sends the loop
 straight to the next harness in the node's list; other failures count
 against `retry`. What an attempt spends is counted even when it fails; for a
 turn cut off by the timeout, that's what the harness reported before it.
-While a session is open, `wf steer` can send it messages (steer.py). A message
-that the harness couldn't add to the running turn goes as the next turn, before
-any reminder. It is dropped when the attempt ends first.
+While a session is open, `wf steer` can send it messages (steer.py). The
+messages that the harness couldn't add to the running turn go as the next turn,
+before any reminder. They are dropped when the attempt ends first.
 With `session: continue`, a pass forks the session the node's last pass ended
 in (Claude Code's fork_session, Codex's thread/fork), so that session is never
 changed and a retry forks from the same point again. Cursor can't fork: it
@@ -507,6 +507,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                         raise
                     except Exception as error:  # the SDK or the agent process broke
                         raise _AttemptFailed(f"{name}: {type(error).__name__}: {error}") from error
+                    live.sent()
                     usage.add(end.usage)
                     spent.add(end.usage)
                     ctx.add_usage(end.usage)  # live, so limits apply before the next attempt
@@ -521,7 +522,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                     if end.status == "failed":
                         raise _AttemptFailed(end.message, end.retry_after)
                     turn += 1
-                    if (steered := live.next_turn()) is not None:  # a wf steer message that waited for this turn to end
+                    if (steered := await live.next_turn()) is not None:  # wf steer messages that waited for this turn to end
                         sends, text = "steer", steered
                     elif reminders:
                         sends, text, reminders = "reminder", output_tool.REMINDER, reminders - 1

@@ -427,7 +427,7 @@ def _steer(args) -> int:
         print(f"wf steer: {error}", file=sys.stderr)
         return 1
     except OSError as error:
-        print(f"wf steer: can't write the message into {run.dir / steer.FOLDER}: {error.strerror or error}", file=sys.stderr)
+        print(f"wf steer: can't write the message into {steer.mailbox(run)}: {error.strerror or error}", file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps({"run": run.id, "node": path, **answer}))
@@ -458,6 +458,8 @@ def _message(args) -> str:
             raise ValueError(f"{args.file} isn't UTF-8 text") from error
     if not text.strip():
         raise ValueError("the message is empty")
+    if len(text) > steer.MAX_CHARACTERS:
+        raise ValueError(f"the message is longer than {steer.MAX_CHARACTERS:,} characters")
     return text
 
 

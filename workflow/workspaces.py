@@ -298,6 +298,12 @@ def temp_root(run_id: str) -> Path:
     return home() / "temp" / run_id
 
 
+def mailbox(run_id: str) -> Path:
+    """Where `wf steer` passes messages to the process that drives a run (steer.py): ~/.wf/steer/<run-id>,
+    outside every workspace. It stays as long as the run folder, and `wf discard` removes it."""
+    return home() / "steer" / run_id
+
+
 def uncommitted(repo: str | Path) -> list[Path]:
     """Files with changes that aren't committed (untracked ones too), as absolute paths: a new
     worktree won't have them."""

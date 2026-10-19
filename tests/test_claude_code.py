@@ -15,7 +15,7 @@ from fake_claude import FakeClaude
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, runner, schemas
 from workflow.harnesses.base import SessionSpec, Unavailable
-from workflow.harnesses.claude_code import GIT, REPLAY, TOOL, ClaudeCode, options
+from workflow.harnesses.claude_code import GIT, REPLAY, TOOL, ClaudeCode, ClaudeSession, options
 from workflow.output_tool import FINISH, ResultTool, REMINDER
 
 
@@ -119,7 +119,11 @@ defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
 start: {input: {}}
 nodes:
   ask: {needs: [start], instruction: Say hi}
-end: {output: {out: "{{ ask.summary }}"}}
+end:
+  output:
+    out: "{{ ask.summary }}"
+    tokens: {type: integer, value: "{{ run.tokens }}"}
+    cost: {type: number, value: "{{ run.cost_usd }}"}
 """)
     return cli.main(["run", "flow.yaml"])
 
@@ -167,6 +171,41 @@ def test_a_message_after_the_last_step_gets_a_turn_of_its_own_and_no_reminder_go
     results = [json.loads(line) for line in (folder / "nodes/ask/1/attempt-1.log").read_text().splitlines()
                if json.loads(line)["kind"] == "result"]
     assert len(results) == 2  # one send() read both turns' results
+    out = json.loads((folder / "output.json").read_text())
+    assert (out["tokens"], round(out["cost"], 6)) == (220, 0.02)  # and counted both
+
+
+class _Writer:
+    """A client that keeps what is written to Claude Code, and checks that the message is held first."""
+
+    def __init__(self, session):
+        self.session, self.written = session, []
+
+    async def query(self, prompt):
+        async for message in prompt:
+            assert message["uuid"] in self.session._held  # Claude Code can say it read it before the write returns
+            self.written.append(message)
+
+
+class _Broken:
+    async def query(self, prompt):
+        raise OSError("Claude Code is gone")
+
+
+def test_claude_code_takes_a_message_only_mid_turn_once_it_repeated_one(tmp_path):
+    session = ClaudeSession(spec(tmp_path))
+    session._client = _Writer(session)
+    steer = lambda ident: asyncio.run(session.steer("Stop", ident))
+    assert steer("id-1") is None  # between turns: the runner sends it as the next turn
+    session._working = True
+    assert steer("id-2") is None  # Claude Code hasn't shown yet that it repeats what it reads
+    session._repeats = True
+    assert steer("id-3") == "queued"
+    assert [m["uuid"] for m in session._client.written] == ["id-3"] and session._held == ["id-3"]
+    session._client = _Broken()
+    with pytest.raises(OSError):
+        steer("id-4")
+    assert session._held == ["id-3"]  # a message that wasn't written isn't waited for
 
 
 @pytest.mark.harness

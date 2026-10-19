@@ -140,10 +140,12 @@ wf steer <run-id> <node> --item <index> --file <message.md>
   Cursor gets it as its next turn, when its turn ends.
   A turn often ends only when the agent submits its result, and then the message is dropped.
   A `steer` event in `events.jsonl` says when the message was delivered, or why it was dropped.
+  For Codex, `queued` means that Codex didn't answer, and the event says `unconfirmed`.
 
 no live session
 : Exit code 1, and nothing was sent.
   The reason says why: the node has no agent session open now, or the run isn't running.
+  A message has at most 100,000 characters, and at most 10 can wait for one session.
 
 A Claude Code agent can take a message that comes mid-turn for tool output, and ignore it.
 Read the attempt's log (`attempt-<n>.log`) to see whether the agent acted on the message.
