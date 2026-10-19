@@ -41,6 +41,10 @@ folder's `.wf/runs/`, and every later `wf` command for the run must run there.
    Keep the owner token `register-extension` prints.
 
 `wf status <run-id> --json` and `wf list --json` show where runs stand at any time.
+A `running` run whose `agents_waiting` is not empty waits for a free agent slot
+(the cap on agent sessions across all runs, `max_agents` in `~/.wf/config.yaml`
+or `WF_MAX_AGENTS`). That is not a stall: the attempt starts when another
+session ends, with its timeout and retries intact.
 
 ## On a `procevent wf <source-id> <sequence>` wake
 

@@ -286,12 +286,12 @@ Fields every kind accepts:
 | `needs` | none | Nodes that must finish first. `start` is allowed. See [When a node runs](#when-a-node-runs). |
 | `routes` | none | Where to go next, by condition. See [Routes](#routes). |
 | `for_each` | none | Run once per item of a list. See [for_each](#for_each). |
-| `max_parallel` | 4 | How many items run at the same time. |
+| `max_parallel` | 4 | How many items run at the same time. One cap on agent sessions across all runs is separate: see [Agent slots](#agent-slots). |
 | `max_items` | 20 | A longer list fails the node. |
 | `on_item_error` | `fail` | `fail` or `continue`. |
 | `workspace` | `repo` | Where the node runs. See [Workspaces](#workspaces). |
 | `base` | the workflow's base commit | Git ref that a `new` workspace branches from. |
-| `timeout` | `60m` (none for human and workflow nodes) | Per attempt. Written like `90s`, `30m`, `2h`. A workflow node's steps have their own timeouts. |
+| `timeout` | `60m` (none for human and workflow nodes) | Per attempt. Written like `90s`, `30m`, `2h`. An agent attempt's timeout starts once it has an [agent slot](#agent-slots). A workflow node's steps have their own timeouts. |
 | `retry` | 1 for agent nodes, 0 for others | Extra attempts after a failure. |
 | `description` | none | Shown in progress output and by `wf graph`. |
 
@@ -554,6 +554,8 @@ sub-workflow fails.
 - `harness: [claude-code, codex]` tries harnesses in order, and each gets `1 + retry`
   attempts. If a harness reports a usage limit or can't start, the runner moves to the next
   harness straight away.
+- An agent attempt that waits for an [agent slot](#agent-slots) hasn't started yet: the
+  wait isn't a failure and uses no retry.
 - When a node, or an item with `on_item_error: fail`, runs out of attempts, the run stops:
   running attempts finish, nothing new starts, and the run's status becomes `failed`.
   `wf resume` continues from there.
@@ -580,6 +582,37 @@ gets depends on `session`:
   - The pass starts fresh instead, and an event says why, when: the harness or model differs
     from the previous pass, the session can't be found, it's a Cursor retry after a failed
     continued attempt, or the two passes before it both continued.
+
+### Agent slots
+
+`max_parallel` caps the items of one node in one run. Several runs on one machine can still
+open more agent sessions at once than the machine, or an account's quota, holds. One cap
+holds across every wf run of the user:
+
+```yaml
+# ~/.wf/config.yaml (WF_HOME moves ~/.wf)
+max_agents: 4
+```
+
+The `WF_MAX_AGENTS` environment variable sets the same cap, and wins over the file. With
+neither, there is no cap. The cap is a whole number of 1 or more; `wf run` and `wf resume`
+refuse to start with anything else.
+
+- Every agent attempt takes a slot before its session opens, and gives it back when the
+  attempt ends. A retry or a fallback takes a slot again. Command, human and workflow nodes
+  take no slot (the agent nodes inside a workflow node do), and neither does a dry run.
+- An attempt that finds every slot taken waits until one is free. Waiting isn't failing: it
+  uses no retry, and the node's `timeout` starts once the attempt has its slot. The run's
+  `duration` limit counts the wait, and a limit reached during it keeps the attempt from
+  starting, as it would a retry.
+- The wait shows in `events.jsonl` (`slot_waiting` when it starts, then `slot_taken` with
+  `waited_s`) and in `wf status`: the run is `running`, and `agents_waiting` lists the
+  attempts that wait, with their node, attempt number and start time.
+- A slot is a file in `~/.wf/agent-slots/`, locked by the process whose attempt holds it.
+  The operating system releases the lock when that process ends, so a crashed or killed
+  run never keeps a slot.
+- Each `wf run` or `wf resume` process reads the cap when it starts. Give every process the
+  same cap (the file does that). With different caps, the total stays within the biggest.
 
 ## The output tool
 
@@ -665,6 +698,8 @@ the context to fix them.
 ```
 
 - `.wf/` is added to the repo's `.git/info/exclude`, so it never shows up in `git status`.
+- While a run is `running`, `agents_waiting` in `status.json` lists the attempts waiting
+  for an [agent slot](#agent-slots).
 - `wf resume` uses the copies in `workflow/`, so editing the YAML doesn't change a run
   that's already in progress.
 
@@ -721,6 +756,7 @@ workflow/
     claude_code.py  Claude Agent SDK
     codex.py        codex app-server, JSON-RPC over stdio
     cursor.py       cursor-sdk
+  capacity.py       the agent slots: one cap on live agent sessions across all runs
   nodes.py          runs one attempt of each node kind, including the reminder loop
   scheduler.py      the rules in "When a node runs": pending, settled, routes, end
   graph.py          LangGraph wiring
@@ -823,6 +859,8 @@ How it maps onto LangGraph:
 - Command nodes that return JSON as structured output.
 - Sharing `types` between files.
 - Resuming a run with an edited version of its workflow.
+- A separate cap on agent sessions per harness (Claude Code, Codex and Cursor have separate
+  quotas). The [agent slots](#agent-slots) cap all harnesses together.
 
 ## Open questions
 

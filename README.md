@@ -12,6 +12,7 @@ graph on LangGraph:
 - parallel steps work in their own git worktrees;
 - a failed attempt is retried, or falls back to another agent;
 - limits cap a run's cost, tokens and time;
+- one cap on live agent sessions holds across every run on the machine;
 - any run can pause for a person and be answered and resumed later, from a
   terminal or by an autonomous operator.
 

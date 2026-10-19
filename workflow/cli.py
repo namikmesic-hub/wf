@@ -274,6 +274,8 @@ def _describe(current: dict) -> str:
         detail = f"stopped: {current.get('reason')} (wf resume {run_id})"
     elif status == "limit":
         detail = f"paused at a limit: {current.get('reason')} ({current.get('resume')})"
+    elif status == "running" and current.get("agents_waiting"):
+        detail = "running, waiting for an agent slot: " + ", ".join(w["node"] for w in current["agents_waiting"])
     else:
         detail = status
     return f"{run_id} [{current.get('workflow')}]: {detail}"

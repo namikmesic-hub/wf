@@ -8,7 +8,8 @@ Every `wf run` gets a folder, and `wf resume` finds it again by id:
       run.json                      the workflow's name and `repo` workspace, for starting it later
       output.json                   the end output, once the run succeeds
       status.json                   running | waiting | succeeded | failed | limit, with a sequence
-                                    number that goes up on every change
+                                    number that goes up on every change (while running, also the
+                                    attempts waiting for an agent slot: capacity.py)
       lock                          held by the one process driving the run (its pid inside)
       events.jsonl                  one line per progress event
       checkpoints.sqlite            LangGraph checkpoints, used by wf resume
@@ -117,7 +118,7 @@ class Run:
         """Record the run's state. `seq` goes up by one on every call, so a watcher can tell a
         new state from one it has already seen, even when the status word is the same."""
         seq = self.status().get("seq", 0) + 1
-        write_json(self.dir / "status.json", {"status": status, "seq": seq, "run": self.id, "updated": _now(), **details})
+        write_json(self.dir / "status.json", {"status": status, "seq": seq, "run": self.id, "updated": now(), **details})
 
     @contextmanager
     def driving(self) -> Iterator["Lock"]:
@@ -182,7 +183,7 @@ class Run:
 
     def add_event(self, event: dict) -> None:
         with (self.dir / "events.jsonl").open("a", encoding="utf-8") as file:
-            file.write(json.dumps({"time": _now(), **event}, ensure_ascii=False, default=str) + "\n")
+            file.write(json.dumps({"time": now(), **event}, ensure_ascii=False, default=str) + "\n")
 
     def set_output(self, output: dict) -> None:
         write_json(self.dir / "output.json", output)
@@ -337,5 +338,5 @@ def write_json(path: Path, value: Any) -> None:
     Path(temp.name).replace(path)
 
 
-def _now() -> str:
+def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")

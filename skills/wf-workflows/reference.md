@@ -169,6 +169,10 @@ its end output as usual. `wf run <file> --limit ...` starts with a different
 limit. Codex reports no dollar cost, so `cost_usd` counts Claude Code only: cap
 Codex with `tokens` (validate warns about this).
 
+Across runs, `max_agents` in `~/.wf/config.yaml` (or `WF_MAX_AGENTS`) caps the
+agent sessions live at once on the machine. An attempt that waits for a free
+slot keeps its retries, and its `timeout` starts once it has one.
+
 ## Sessions
 
 `fresh` (default): each pass starts a new agent session; feedback reaches it

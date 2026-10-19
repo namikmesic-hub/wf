@@ -56,6 +56,11 @@ new package version, bind it again.
 Only one process drives a run at a time (a lock in the run folder), so the
 first mate can't resume a run that is still going.
 
+To keep all runs within what the machine and the accounts hold, set
+`max_agents: <n>` in `~/.wf/config.yaml` (or `WF_MAX_AGENTS`). Agent attempts in
+every run then share that many sessions; an attempt waits for a free one, and
+`wf status` lists the waits (see "Agent slots" in the spec).
+
 firstmate gives its built-in answers channel only to its own adapters, so the
 first mate answers wf questions itself with `wf answer`, under its usual
 ask-user rules.
