@@ -23,7 +23,8 @@ its last one.
 
 An attempt that finds every slot taken waits, and tries again every
 POLL_SECONDS. Waiting isn't failing: it uses no retry, and the node's timeout
-starts once the attempt has its slot. nodes._agent_slot puts the wait in
+starts once the attempt has its slot. A run limit reached during the wait ends
+it, and the attempt doesn't start. nodes._agent_slot puts the wait in
 events.jsonl and in status.json, for `wf status`.
 
 Only agent attempts take slots. Command and human nodes don't, nor does a
@@ -34,6 +35,7 @@ import asyncio
 import fcntl
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from . import settings
@@ -100,8 +102,11 @@ def take(cap: int, holder: dict) -> Slot | None:
     return None
 
 
-async def wait(cap: int, holder: dict) -> Slot:
-    """The first slot that frees up. A cancelled wait holds none."""
-    while (slot := take(cap, holder)) is None:
+async def wait(cap: int, holder: dict, stop: Callable[[], bool]) -> Slot | None:
+    """The first slot that frees up, or None once stop() is true: it's asked before every try.
+    A cancelled wait holds none."""
+    while not stop():
+        if (slot := take(cap, holder)) is not None:
+            return slot
         await asyncio.sleep(POLL_SECONDS)
-    return slot
+    return None

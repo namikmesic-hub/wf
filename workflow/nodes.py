@@ -36,7 +36,7 @@ one of the machine's agent slots, and holds it until the attempt ends. An
 attempt that waits for one isn't failing: the wait uses no retry, the node's
 timeout starts once the attempt has its slot, and the wait shows in
 events.jsonl (slot_waiting, slot_taken) and in status.json (agents_waiting).
-A limit reached while it waited keeps it from starting, as for a retry.
+A limit reached while it waits ends the wait, and the attempt doesn't start.
 
 Workspaces: `new` is a git worktree (workspaces.py). For an `edit` or `full`
 agent in a worktree the runner made, a retry starts from the commit the job
@@ -217,6 +217,8 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
                     async with deadline:
                         result = await attempt(number, harness)
                 return result, number
+            except _LimitWhileWaiting as reached:
+                raise _limit_stop(error, number, str(reached)) from None
             except TimeoutError:  # the node's timeout, or a timeout inside the harness
                 ours = deadline is not None and deadline.expired()
                 error = f"timed out after {timeout}" if ours else "a call inside the harness timed out"
@@ -245,6 +247,10 @@ def _limit_stop(error: str, number: int, reason: str) -> _Failed:
 
 class _AttemptFailed(Exception):
     """One attempt failed; another may follow."""
+
+
+class _LimitWhileWaiting(Exception):
+    """A limit was reached while the attempt waited for its agent slot, so it doesn't start."""
 
 
 class _Unavailable(Exception):
@@ -387,7 +393,8 @@ def _rendered_setting(job: Job, ctx: RunContext, harness: str, name: str, variab
 @asynccontextmanager
 async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str) -> AsyncIterator[bool]:
     """Hold one of the machine's agent slots (capacity.py) for attempt `number`, waiting for one
-    if they're all taken. Yields whether it waited. No cap, or a dry run: there's nothing to hold."""
+    if they're all taken, until a limit is reached (_LimitWhileWaiting). Yields whether it waited.
+    No cap, or a dry run: there's nothing to hold."""
     root = ctx.root
     if root.max_agents is None or root.script is not None:
         yield False
@@ -403,9 +410,11 @@ async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str
             began, key = time.monotonic(), f"{where}#{number}"
             ctx.note_slot_wait(key, {"node": where, "attempt": number, "since": now()})
             try:
-                slot = await capacity.wait(root.max_agents, holder)
+                slot = await capacity.wait(root.max_agents, holder, stop=lambda: ctx.limit_reached() is not None)
             finally:
                 ctx.note_slot_wait(key, None)
+            if slot is None:
+                raise _LimitWhileWaiting(ctx.limit_reached())
             emit({"event": "slot_taken", **on, "waited_s": round(time.monotonic() - began, 1)})
         yield waited
     finally:

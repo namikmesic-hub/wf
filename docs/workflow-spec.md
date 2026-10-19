@@ -604,8 +604,8 @@ that wf doesn't know stops them too, so a misspelt `max_agents` can't quietly me
   take no slot (the agent nodes inside a workflow node do), and neither does a dry run.
 - An attempt that finds every slot taken waits until one is free. Waiting isn't failing: it
   uses no retry, and the node's `timeout` starts once the attempt has its slot. The run's
-  `duration` limit counts the wait, and a limit reached during it keeps the attempt from
-  starting, as it would a retry.
+  `duration` limit counts the wait. A limit reached during the wait ends it: the attempt
+  doesn't start, and the run pauses at the limit as usual.
 - The wait shows in `events.jsonl` (`slot_waiting` when it starts, then `slot_taken` with
   `waited_s`) and in `wf status`: the run is `running`, and `agents_waiting` lists the
   attempts that wait, with their node, attempt number and start time.

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from textwrap import dedent
 
@@ -83,25 +84,32 @@ def until(condition, seconds: float = 30) -> None:
         time.sleep(0.05)
 
 
-def hold_slot(seconds: float, waiter: str | None = None, seen: dict | None = None) -> threading.Thread:
-    """Take the one slot of a cap of 1 now, and let it go `seconds` later. With `waiter`, the
-    seconds count from when the run of that workflow waits for the slot, and `seen` gets its state then."""
+def hold_slot(seconds: float, waiter: str | None = None, seen: dict | None = None) -> Callable[[], None]:
+    """Take the one slot of a cap of 1 now, and let it go `seconds` later, or when the returned
+    let_go() is called, which waits for that. With `waiter`, the seconds count from when the run
+    of that workflow waits for the slot, and `seen` gets its state then."""
     slot = capacity.take(1, {"test": True})
     assert slot is not None
+    early = threading.Event()
 
     def later():
         try:
             if waiter:
-                until(lambda: waiting(waiter))
-                if seen is not None:
+                until(lambda: early.is_set() or waiting(waiter))
+                if seen is not None and not early.is_set():
                     seen.update(operate.state(Run.at(run_of(waiter))))
-            time.sleep(seconds)
+            early.wait(seconds)
         finally:
             slot.release()
 
     thread = threading.Thread(target=later)
     thread.start()
-    return thread
+
+    def let_go() -> None:
+        early.set()
+        thread.join()
+
+    return let_go
 
 
 def wf_process(marks: Path, release: Path, *args: str) -> subprocess.Popen:
@@ -189,9 +197,9 @@ def test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slo
     fake = Fake("claude-code", ends("failed", "boom"), submit({"summary": "done"}))
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
     seen = {}
-    held = hold_slot(1.5, waiter="work", seen=seen)
+    let_go = hold_slot(1.5, waiter="work", seen=seen)
     assert cli.main(["run", agent_flow(node="work: {needs: [start], instruction: Work., timeout: 1s, retry: 1}")]) == 0
-    held.join()
+    let_go()
     assert json.loads((run_of("work") / "output.json").read_text()) == {"summary": "done"}
     assert "work: attempt 1 waits for an agent slot (1 of 1 in use)" in capsys.readouterr().out
     said = [(e["event"], e["attempt"], e.get("error")) for e in events("work") if e["event"].startswith(("slot", "attempt"))]
@@ -214,35 +222,38 @@ def test_command_and_human_nodes_take_no_slot(repo, monkeypatch):
           approve: {needs: [build], human: "Ship it?", output: {ok: {type: boolean}}}
         end: {output: {ok: "{{ approve.ok }}"}}
     """))
-    held = hold_slot(5)  # a node that took a slot would wait this long, and say so in events.jsonl
+    let_go = hold_slot(5)  # a node that took a slot would wait this long, and say so in events.jsonl
     started = time.monotonic()
     assert cli.main(["run", "ask.yaml"]) == 2  # waiting for a person
     assert time.monotonic() - started < 4
-    held.join()
+    let_go()
     assert not {"slot_waiting", "slot_taken"} & set(kinds("ask"))
 
 
 def test_a_dry_run_takes_no_slot(repo, monkeypatch):
     monkeypatch.setenv("WF_MAX_AGENTS", "1")
     Path("script.yaml").write_text("agents:\n  work:\n    - {summary: scripted}\n")
-    held = hold_slot(5)
+    let_go = hold_slot(5)
     started = time.monotonic()
     assert cli.main(["run", agent_flow(), "--dry-run", "script.yaml"]) == 0
     assert time.monotonic() - started < 4
-    held.join()
+    let_go()
     assert not {"slot_waiting", "slot_taken"} & set(kinds("work"))
 
 
-def test_a_limit_reached_while_waiting_keeps_the_attempt_from_starting(repo, monkeypatch):
+def test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts(repo, monkeypatch):
     monkeypatch.setenv("WF_MAX_AGENTS", "1")
     fake = Fake("claude-code", submit({"summary": "done"}))
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
-    held = hold_slot(1.5, waiter="work")
+    let_go = hold_slot(60)  # only the limit can end the wait
+    started = time.monotonic()
     assert cli.main(["run", agent_flow(top="limits: {duration: 1s}")]) == 1
-    held.join()
+    assert time.monotonic() - started < 10
+    let_go()
     folder = run_of("work")
     assert json.loads((folder / "status.json").read_text())["status"] == "limit"
     assert fake.sent == []  # it never opened a session
+    assert "slot_taken" not in kinds("work")
     assert cli.main(["resume", folder.name, "--limit", "duration=1h"]) == 0
     assert json.loads((folder / "output.json").read_text()) == {"summary": "done"}
     assert [e["attempt"] for e in events("work") if e["event"] == "slot_waiting"] == [1]
