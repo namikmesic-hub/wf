@@ -186,8 +186,10 @@ def _checked_resume(run: runs.Run, workflows: list[spec.Workflow], name: str, an
             for problem in problems:
                 print(f"{name}: {problem}", file=sys.stderr)
             return 1
-    if problem := _signing_problem(workflows, _run_home(run, state)):
+    if not _ended(run, state) and (problem := _signing_problem(workflows, _run_home(run, state))):
         print(f"{name}: {problem}", file=sys.stderr)
+        if run.status().get("status") == "running":  # a background driver: tell `wf wait` why it stopped
+            run.set_status("failed", error=problem)
         return 1
     if detach:
         args = ["resume", run.id, "--no-input", *_runs_dir_args(runs_dir)]
@@ -251,6 +253,13 @@ def _runs_dir_args(runs_dir: Path | None) -> list[str]:
     """A background driver inherits WF_RUNS_DIR, but not --runs-dir: pass that on, resolved,
     so the driver finds the run where this process put it."""
     return ["--runs-dir", str(runs_dir.expanduser().resolve())] if runs_dir else []
+
+
+def _ended(run: runs.Run, state: StateSnapshot) -> bool:
+    """Has the run ended, so `wf resume` only says how, and no agent works?"""
+    if not state.values:
+        return (run.dir / "output.json").exists()
+    return not state.interrupts and not state.next
 
 
 def _run_home(run: runs.Run, state: StateSnapshot) -> dict:
