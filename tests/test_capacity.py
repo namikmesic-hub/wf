@@ -224,6 +224,39 @@ def test_a_smaller_cap_uses_only_the_first_slots(wf_home):
     big.release()
 
 
+def test_attempts_that_wait_for_one_slot_take_it_one_at_a_time(wf_home):
+    async def main():
+        taken = capacity.take(1, {"n": 0})
+        got, live, most = [], [0], [0]
+
+        async def waiter(n: int):
+            slot = await capacity.wait(1, {"n": n}, stop=lambda: False)
+            live[0] += 1
+            most[0] = max(most[0], live[0])
+            got.append(n)
+            await asyncio.sleep(3 * capacity.POLL_SECONDS)  # long enough for the other to try again
+            live[0] -= 1
+            slot.release()
+
+        waiters = [asyncio.create_task(waiter(n)) for n in (1, 2)]
+        await asyncio.sleep(3 * capacity.POLL_SECONDS)
+        assert got == []  # neither while the slot is taken
+        taken.release()
+        await asyncio.wait_for(asyncio.gather(*waiters), 10)
+        assert sorted(got) == [1, 2] and most[0] == 1  # each in the end, one at a time, in either order
+
+    asyncio.run(main())
+
+
+def test_each_wf_home_has_its_own_slots(monkeypatch, tmp_path):
+    held = capacity.take(1, {"home": "first"})
+    monkeypatch.setenv("WF_HOME", str(tmp_path / "other-home"))
+    other = capacity.take(1, {"home": "other"})
+    assert other is not None
+    other.release()
+    held.release()
+
+
 def test_a_slot_has_one_holder_at_a_time(wf_home):
     first = capacity.take(2, {"node": "a"})
     second = capacity.take(2, {"node": "b"})

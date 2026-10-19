@@ -12,9 +12,10 @@ graph on LangGraph:
 - parallel steps work in their own git worktrees;
 - a failed attempt is retried, or falls back to another agent;
 - limits cap a run's cost, tokens and time;
-- one cap on live agent sessions holds across all your runs that share a `~/.wf`;
 - any run can pause for a person and be answered and resumed later, from a
   terminal or by an autonomous operator.
+
+One cap on live agent sessions holds across all your runs that share a `~/.wf`.
 
 ## Install
 
