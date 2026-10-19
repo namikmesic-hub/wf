@@ -301,7 +301,7 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
             emit({"event": "attempt_failed", **label, **on, "attempt": number, "error": error})
             number += 1
             if wait and tries < retry:  # only before a retry on this harness, not before a fallback
-                await asyncio.sleep(wait)
+                await _pause(ctx, wait)
     raise _Failed(error, number - 1)
 
 
@@ -309,6 +309,13 @@ def _limit_stop(error: str, number: int, reason: str) -> _Failed:
     """Attempt `number` doesn't start because a limit was reached. `error`: the last attempt's failure, if any."""
     stop = f"no new attempt because a limit was reached ({reason})"
     return _Failed(f"{error}; {stop}" if error else stop, number - 1, stopped="limit")
+
+
+async def _pause(ctx: RunContext, wait: float) -> None:
+    """Wait `wait` seconds before a retry, but stop when a limit is reached: then the retry doesn't start."""
+    end = time.monotonic() + wait
+    while ctx.limit_reached() is None and (left := end - time.monotonic()) > 0:
+        await asyncio.sleep(min(left, capacity.POLL_SECONDS))
 
 
 class _AttemptFailed(Exception):

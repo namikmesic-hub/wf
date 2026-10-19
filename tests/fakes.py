@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 
+from workflow import nodes
 from workflow.harnesses.base import TurnEnd, Usage
 
 
@@ -93,15 +94,13 @@ def edits(files: dict, *results, check=None):
     return turn
 
 
-def skip_waits(monkeypatch, seconds: float) -> list[float]:
-    """Each asyncio.sleep(seconds), the runner's wait before a retry, is recorded and skipped."""
-    waits, real_sleep = [], asyncio.sleep
+def record_pauses(monkeypatch) -> list[float]:
+    """The waits the runner makes before a retry, in seconds. Each wait still runs."""
+    pauses, real_pause = [], nodes._pause
 
-    async def sleep(delay, *args, **kwargs):
-        if delay == seconds:
-            waits.append(delay)
-            delay = 0
-        return await real_sleep(delay, *args, **kwargs)
+    async def pause(ctx, wait):
+        pauses.append(wait)
+        await real_pause(ctx, wait)
 
-    monkeypatch.setattr(asyncio, "sleep", sleep)
-    return waits
+    monkeypatch.setattr(nodes, "_pause", pause)
+    return pauses

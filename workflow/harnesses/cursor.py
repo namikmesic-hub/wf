@@ -135,9 +135,9 @@ NOTICES = (  # Cursor's own messages when the account needs attention
     "Please sign in to continue", "Upgrade your plan to continue", "Add a payment method to continue",
     "Check your settings to continue",
 )
-ERROR = re.compile(r"\n\nError: (?:\[[a-z_]+\] |\w*Error: )")  # how Cursor reports a failed request
+ERROR = re.compile(r"\n\nError: (?:\[[a-z_]+\]|\w*Error:)(?: |$)")  # how Cursor reports a failed request (with a message or none)
 UNAVAILABLE = (*NOTICES, "[unauthenticated]", "[resource_exhausted]")  # in a notice: it can't run here now
-RETRIABLE = "Error: RetriableError: "  # Cursor says that a retry can clear this error
+RETRIABLE = "Error: RetriableError:"  # by its name, an error that a retry can clear
 RETRY_AFTER = 30  # seconds
 AUTH_REQUIRED = -32000  # ACP's error code for "authenticate first"
 LABELS = {"read": "read", "edit": "edit", "delete": "delete", "move": "move", "search": "search",
