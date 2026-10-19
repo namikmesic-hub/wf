@@ -69,9 +69,9 @@ The tests named below are in `tests/test_tools.py`.
 | The redirect has no `iss`, and the metadata says the server sends one | Setup stops. | `workflow/tools/signin.py:142` | `test_a_sign_in_without_the_iss_the_server_says_it_sends_is_ignored` |
 | The vendor says no (`error=access_denied`), or sends no code | Setup stops, and asks for no token. | `workflow/tools/signin.py:145`, `workflow/tools/signin.py:147` | `test_a_sign_in_that_comes_back_wrong_gets_no_token` |
 | No redirect comes back within 5 minutes | Setup stops. | `workflow/tools/signin.py:139` | `test_setup_gives_up_when_no_sign_in_comes_back` |
-| The redirect is good | Setup trades the code for tokens with the PKCE verifier, saves them in the Keychain item, and runs doctor. | `workflow/cli.py:478`, `workflow/cli.py:483` | `test_setup_signs_in_in_the_browser_and_keeps_the_secret_in_the_keychain` |
+| The redirect is good | Setup trades the code for tokens with the PKCE verifier, saves them in the Keychain item, and runs doctor. | `workflow/cli.py:480`, `workflow/cli.py:485` | `test_setup_signs_in_in_the_browser_and_keeps_the_secret_in_the_keychain` |
 | `--token` | Setup asks you to paste a token instead, saves it, and runs doctor. A pasted token has no refresh. Only the tools whose vendor gives tokens out take `--token`. | `workflow/tools/signin.py:110` | `test_setup_takes_a_pasted_token`, `test_only_tools_whose_vendor_gives_out_tokens_take_one` |
-| There's no terminal | Setup refuses, since it asks you to sign in. | `workflow/cli.py:473` | `test_setup_needs_a_terminal` |
+| There's no terminal | Setup refuses, since it asks you to sign in. | `workflow/cli.py:475` | `test_setup_needs_a_terminal` |
 
 ### Slack
 
@@ -152,7 +152,7 @@ The tests named below are in `tests/test_tools.py`.
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| The Keychain holds no sign-in for the tool, or one wf didn't write | `not set up`, with `run wf tools <name> setup`. `wf tools doctor` doesn't fail for it, and `wf tools <name> doctor` exits with 1. | `workflow/tools/doctor.py:50`, `workflow/cli.py:497` | `test_doctor_for_every_tool_reports_one_that_is_not_set_up_without_failing`, `test_a_stored_item_wf_didnt_write_counts_as_not_set_up` |
+| The Keychain holds no sign-in for the tool, or one wf didn't write | `not set up`, with `run wf tools <name> setup`. `wf tools doctor` doesn't fail for it, and `wf tools <name> doctor` exits with 1. | `workflow/tools/doctor.py:50`, `workflow/cli.py:499` | `test_doctor_for_every_tool_reports_one_that_is_not_set_up_without_failing`, `test_a_stored_item_wf_didnt_write_counts_as_not_set_up` |
 | The Keychain can't be read | `fail`, with "unlock your login Keychain". | `workflow/tools/doctor.py:48` | `test_doctor_says_when_the_keyring_cannot_be_read` |
 | The access token has expired | It's refreshed, and the checks go on. | `workflow/tools/signin.py:228` | `test_doctor_refreshes_a_sign_in_that_has_expired` |
 | The vendor refuses the sign-in, or the refresh | `fail`, with `run wf tools <name> setup`. | `workflow/tools/doctor.py:65` | `test_doctor_says_to_sign_in_again_when_the_vendor_refuses` |
@@ -163,7 +163,7 @@ The tests named below are in `tests/test_tools.py`.
 | The server marks an operation read-only (`readOnlyHint`), and wf keeps it back | The report adds a note that suggests adding it to the list. | `workflow/tools/doctor.py:88` | `test_doctor_notes_an_operation_the_server_marks_read_only_that_wf_keeps_back` |
 | wf counts an operation as a read, and the server marks it as changing things (`readOnlyHint: false` or `destructiveHint: true`) | `fail`, with "update wf". | `workflow/tools/doctor.py:93` | `test_doctor_fails_when_a_read_on_wfs_list_is_marked_as_changing_things` |
 | All four checks pass | `pass` | `workflow/tools/doctor.py:95` | `test_doctor_passes_when_the_sign_in_works_and_a_read_call_answers` |
-| Setup saved a sign-in that doctor fails | Setup exits with 1. | `workflow/cli.py:485` | `test_setup_that_saves_a_sign_in_doctor_rejects_exits_with_1` |
+| Setup saved a sign-in that doctor fails | Setup exits with 1. | `workflow/cli.py:487` | `test_setup_that_saves_a_sign_in_doctor_rejects_exits_with_1` |
 
 ## In a workflow
 
@@ -205,7 +205,7 @@ The tests named below are in `tests/test_tools.py` for validation, and in `tests
 | A template picks such a harness at run time, which `wf validate` can't see, and the node doesn't set `tools_with_shell: true` | The run refuses that harness, and the node fails without a session. | `workflow/nodes.py:426` | `test_a_run_refuses_a_harness_whose_shell_reaches_the_keychain_without_the_opt_in` |
 | Such a node sets `tools_with_shell: true` | `wf validate` warns, naming the node and its tools, and the run attaches the tools. | `workflow/validate.py:628` | `test_a_node_that_opts_in_gets_a_warning_naming_it_and_its_tools`, `test_a_run_lets_a_node_that_opted_in_have_tools_and_a_shell` |
 | `tools_with_shell` isn't `true` or `false`, or is in `defaults` | `wf validate` errors: each such node says so itself. | `workflow/spec.py:193` | `test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools`, `test_tools_with_shell_goes_on_the_node_not_in_defaults` |
-| A node lists `tools`, `tools: []` included | Its agent gets those wf tools and no other MCP server or connector, at every access level. Claude Code leaves out the repo's MCP servers, yours, and your claude.ai connectors. Codex switches off the MCP servers and plugins in your config, and never loads your ChatGPT connectors. Cursor refuses other servers' tools. | `workflow/nodes.py:458`, `workflow/harnesses/claude_code.py:140`, `workflow/harnesses/codex.py:169`, `workflow/harnesses/cursor.py:500` | `test_a_node_that_lists_tools_gets_no_other_mcp_server_and_one_without_keeps_them`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools`, `test_codex_switches_off_your_mcp_servers_and_plugins_for_a_node_with_tools`, `test_cursor_refuses_other_mcp_servers_tools_for_a_node_with_tools_even_at_full`, and with a real Claude Code, `test_a_real_claude_code_node_with_tools_at_full_access_sees_no_other_mcp_server` |
+| A node lists `tools`, `tools: []` included | Its agent gets those wf tools and no other MCP server or connector, at every access level. Claude Code leaves out the repo's MCP servers, yours, and your claude.ai connectors. Codex switches off the MCP servers and plugins in your config, and never loads your ChatGPT connectors. Cursor refuses other servers' tools. | `workflow/nodes.py:458`, `workflow/harnesses/claude_code.py:140`, `workflow/harnesses/codex.py:169`, `workflow/harnesses/cursor.py:503` | `test_a_node_that_lists_tools_gets_no_other_mcp_server_and_one_without_keeps_them`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools`, `test_codex_switches_off_your_mcp_servers_and_plugins_for_a_node_with_tools`, `test_cursor_refuses_other_mcp_servers_tools_for_a_node_with_tools_even_at_full`, and with a real Claude Code, `test_a_real_claude_code_node_with_tools_at_full_access_sees_no_other_mcp_server` |
 | A node doesn't list `tools` | Its agent gets the MCP servers and connectors it got before. | `workflow/nodes.py:407` | `test_codex_keeps_your_mcp_servers_for_a_node_without_tools`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools` |
 | A dry run | No tools are attached, so a dry run works without any set up. | `workflow/nodes.py:407` | `test_a_dry_run_attaches_no_tools` |
 
