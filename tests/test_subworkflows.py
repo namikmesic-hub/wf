@@ -448,3 +448,25 @@ def test_an_optional_field_a_sub_workflows_end_output_leaves_out_reads_as_none_i
     """)
     assert cli.main(["run", "main.yaml"]) == 0
     assert output() == {"said": "no note\n", "note": None}
+
+
+def test_a_sub_workflow_names_its_branch_once_per_parent_item(repo, capsys):
+    write("make.yaml", """
+        version: 1
+        name: make
+        start: {input: {branch: {type: string}}}
+        nodes:
+          impl: {needs: [start], command: "true", workspace: new, branch: "{{ start.branch }}"}
+        end: {output: {branch: "{{ workspace.impl.branch }}"}}
+    """)
+    write("main.yaml", """
+        version: 1
+        name: main
+        start: {input: {}}
+        nodes:
+          each: {needs: [start], for_each: '["a", "b"]', workflow: make.yaml, with: {branch: "fix/{{ item }}"}}
+        end: {output: {branches: {type: array, value: "{{ each | map(attribute='branch') | list }}"}}}
+    """)
+    assert cli.main(["run", "main.yaml"]) == 0
+    assert output() == {"branches": ["fix/a", "fix/b"]}
+    assert json.loads((only_run() / "branches.json").read_text()) == {"each/0/impl": "fix/a", "each/1/impl": "fix/b"}

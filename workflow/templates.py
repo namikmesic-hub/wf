@@ -211,6 +211,21 @@ def constant(expression: str) -> tuple[bool, Any]:
     return True, node.set_environment(ENV).as_const()
 
 
+def fixed_text(source: str) -> str | tuple[str, str]:
+    """What a template writes whatever its variables hold: all of its text if it has no {{ }} or
+    {% %}, else the text before the first of them and after the last, as a pair."""
+    parts = []  # each piece of text, or None where something is computed
+    for statement in _parse(source, expression=False).body:
+        if isinstance(statement, nodes.Output):
+            parts += [n.data if isinstance(n, nodes.TemplateData) else None for n in statement.nodes]
+        else:
+            parts.append(None)
+    if None not in parts:
+        return "".join(parts)
+    first, last = parts.index(None), len(parts) - parts[::-1].index(None)
+    return "".join(parts[:first]), "".join(parts[last:])
+
+
 def _parse(source: str, *, expression: bool):
     try:
         if not expression:

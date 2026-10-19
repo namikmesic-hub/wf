@@ -9,7 +9,9 @@ with a verb argument (`handshake` or `invoke`), one JSON request on stdin, and
 one JSON response on stdout.
 
 This module is that executable's logic. A source is one wf run, named by its
-run folder in the source's config reference: `wf-run:/abs/repo/.wf/runs/<id>`.
+run folder in the source's config reference: `wf-run:/abs/repo/.wf/runs/<id>`,
+or `wf-run:/abs/runs-dir/<repo key>/<id>` for a run kept in a runs folder
+(--runs-dir, WF_RUNS_DIR) outside the repo.
 
     source.poll      wait up to POLL_SECONDS for the run to need attention (operate.wait),
                      with the source as the consumer, so each state is reported once:
@@ -128,7 +130,7 @@ def _poll(data: dict) -> dict:
     if not isinstance(source, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source):
         raise _Refusal("invalid-request", "source_id must be a path-safe name")
     if not isinstance(reference, str) or not reference.startswith(REFERENCE):
-        raise _Refusal("invalid-request", f"config_ref must look like {REFERENCE}/absolute/path/to/.wf/runs/<run-id>")
+        raise _Refusal("invalid-request", f"config_ref must look like {REFERENCE}/absolute/path/to/<run folder>")
     folder = Path(reference[len(REFERENCE):])
     if not folder.is_absolute() or os.path.normpath(folder) != str(folder):
         raise _Refusal("invalid-request", "config_ref must name a normalized absolute path")

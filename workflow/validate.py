@@ -10,7 +10,7 @@ The checks run in this order, because later ones lean on earlier ones:
 3. sub-workflows: each is checked too (its problems are reported with its
    own file name), and its end output becomes the parent node's output schema
 4. per node: templates and expressions, for_each, harness, workspace, `with`
-5. end outputs, then the warnings that need the whole graph
+5. `branch` names, end outputs, then the warnings that need the whole graph
 
 Templates are checked without running them. templates.references() lists every
 name a template reads and its field path; _roots() says what each name holds,
@@ -126,6 +126,7 @@ class _Checker:
         self.order = _Order(self.topo)
         for node_id in self.nodes:
             self._node(node_id)
+        self._branches()
         self._end()
         self._concurrent_edits()
         self._cost()
@@ -318,6 +319,8 @@ class _Checker:
             fields += [(f"with.{k}", v) for k, v in node.with_.items() if isinstance(v, str)]
         if node.base is not None:
             fields.append(("base", node.base))
+        if node.branch is not None:
+            fields.append(("branch", node.branch))
         for name, source in fields:
             refs = self._template(f"{at}.{name}", source, node_id, "node")
             if refs and name == "command":
@@ -598,7 +601,36 @@ class _Checker:
             return schemas.types_of(schema) if schema else None
         return None if templates.single_expression(value) is not None else {"string"}
 
-    # ---------- 5. end outputs and whole-graph warnings ----------
+    # ---------- 5. branch names, end outputs and whole-graph warnings ----------
+
+    def _branches(self) -> None:
+        """`branch` names a `workspace: new` worktree's branch: one per item, and never one
+        that another node's `branch` could name too."""
+        named: list[tuple[str, str | tuple[str, str]]] = []  # (node id, the template's fixed text)
+        for node_id, node in self.nodes.items():
+            if node.branch is None:
+                continue
+            where, workspace = f"nodes.{node_id}.branch", self.wf.setting(node_id, "workspace")
+            if workspace != "new":
+                self.error(where, f"`branch` names a `workspace: new` worktree's branch, but this node's workspace is `{workspace}`")
+                continue
+            try:
+                refs, fixed = templates.references(node.branch), templates.fixed_text(node.branch)
+            except TemplateError:
+                continue  # reported with the node's other templates
+            if node.for_each is not None and not any(r.name in ("item", "index") for r in refs):
+                self.error(where, "a for_each node makes a worktree per item, so `branch` must use `item` or `index`")
+            if any(r.name == "workspace" and r.path and r.path[0] == node_id for r in refs):
+                self.error(where, "`branch` renders before this node's worktree exists, so it can't read its workspace")
+            fixed = fixed.strip() if isinstance(fixed, str) else (fixed[0].lstrip(), fixed[1].rstrip())  # names are stripped
+            if (fixed if isinstance(fixed, str) else fixed[0]).startswith("wf/"):
+                self.error(where, "wf/ is where wf names branches itself (wf/<run-id>/...); pick another name")
+            for other, other_fixed in named:
+                if _may_match(fixed, other_fixed):
+                    self.error(where, f"`{other}` and `{node_id}` could name the same branch: make their fixed text differ, "
+                                      "like fix/... and review/..., or name it on one node and run the other in its workspace")
+                    break
+            named.append((node_id, fixed))
 
     def _end(self) -> None:
         for name, value in self.wf.end.output.items():
@@ -769,6 +801,18 @@ def _cycles(graph: dict[str, tuple | list]) -> list[list[str]]:
         if node not in state:
             visit(node, [])
     return found
+
+
+def _may_match(a: str | tuple[str, str], b: str | tuple[str, str]) -> bool:
+    """Could two templates with this fixed text (templates.fixed_text) render the same name?"""
+    if isinstance(a, str) and isinstance(b, str):
+        return a == b
+    if isinstance(a, str):
+        a, b = b, a
+    if isinstance(b, str):  # a computes the text between its ends
+        return b.startswith(a[0]) and b[len(a[0]):].endswith(a[1])
+    return ((a[0].startswith(b[0]) or b[0].startswith(a[0]))
+            and (a[1].endswith(b[1]) or b[1].endswith(a[1])))
 
 
 def _hint(name: str, options) -> str:

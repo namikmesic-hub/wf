@@ -425,6 +425,42 @@ def test_workspace_values(tmp_path):
     ])
 
 
+def test_branch_names_a_new_worktree_once_per_item(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, branch: fm/a}
+        b: {needs: [start], command: x, workspace: new, for_each: '["x", "y"]', branch: fm/b}
+        c: {needs: [start], command: x, workspace: new, for_each: '["x", "y"]', branch: "c/{{ index }}"}
+        d: {needs: [start], command: x, workspace: new, branch: "d/{{ workspace.d.path }}"}
+        e: {needs: [start], command: x, workspace: new, branch: "wf/{{ start.task }}"}
+        f: {needs: [start], command: x, workspace: new, branch: "f/{{ nope }}"}
+    """))
+    assert_problems(report, [
+        ("error", "nodes.f.branch", "unknown name `nope`"),
+        ("error", "nodes.a.branch", "but this node's workspace is `repo`"),
+        ("error", "nodes.b.branch", "must use `item` or `index`"),
+        ("error", "nodes.d.branch", "can't read its workspace"),
+        ("error", "nodes.e.branch", "wf/ is where wf names branches itself"),
+    ])
+
+
+def test_two_nodes_that_could_name_the_same_branch_are_refused(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, branch: "fix/{{ start.task }}"}
+        b: {needs: [start], command: x, branch: "fix/{{ start.task }}"}
+        c: {needs: [start], command: x, branch: "review/{{ start.task }}"}
+        d: {needs: [start], command: x, branch: "review/{{ start.task }}/2"}
+        e: {needs: [start], command: x, branch: pick/one}
+        f: {needs: [start], command: x, for_each: '["one", "two"]', branch: "pick/{{ item }}"}
+        g: {needs: [start], command: x, branch: " pick/one "}
+    """).replace("defaults:\n", "defaults:\n  workspace: new\n"))
+    assert_problems(report, [
+        ("error", "nodes.b.branch", "`a` and `b` could name the same branch"),
+        ("error", "nodes.d.branch", "`c` and `d` could name the same branch"),
+        ("error", "nodes.f.branch", "`e` and `f` could name the same branch"),
+        ("error", "nodes.g.branch", "`e` and `g` could name the same branch"),  # names are stripped
+    ])
+
+
 # ---------- warnings ----------
 
 BRANCHES = """

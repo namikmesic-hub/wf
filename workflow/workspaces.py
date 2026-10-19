@@ -10,8 +10,9 @@ Where a node runs (see "Workspaces" in the spec):
 Worktrees live under ~/.wf/worktrees/<run-id>/ (set WF_HOME to move ~/.wf),
 outside the repo, so an agent searching the repo doesn't find copies of it.
 Their branches are wf/<run-id>/<node>, or wf/<run-id>/<node>/<item index>
-for the items of a for_each node. A node keeps its worktree across passes, so
-a loop keeps working on one branch.
+for the items of a for_each node, unless the node's `branch` names one
+(nodes.py checks that name, and records it in the run folder). A node keeps
+its worktree across passes, so a loop keeps working on one branch.
 
 The runner commits, not the agent: Codex's sandbox (and probably Cursor's)
 keeps .git read-only. After an `edit` or `full` agent finishes in a worktree
@@ -67,22 +68,36 @@ def made_by_runner(path: str | Path) -> bool:
     return True
 
 
-def worktree(repo: str | Path, run_id: str, parts: list[str], base: str) -> dict:
+def worktree(repo: str | Path, run_id: str, parts: list[str], base: str, branch: str | None = None) -> dict:
     """The worktree for one node (or item): created on first use, reused on later passes.
-    `parts` is the node path, e.g. ["implement"] or ["build", "2"]."""
+    `parts` is the node path, e.g. ["implement"] or ["build", "2"]. Its branch is `branch`,
+    or wf/<run-id>/<parts>; an existing one is used, so the caller decides if it may be."""
     path = root() / run_id / Path(*parts)
-    branch = "/".join(["wf", run_id, *parts])
+    branch = branch or "/".join(["wf", run_id, *parts])
     commit = _git(repo, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=False)
     if not commit:
         raise WorkspaceError(f"`{base}` isn't a commit in {repo}")
     if not (path / ".git").exists():  # first pass (later passes and resumed runs reuse it)
         path.parent.mkdir(parents=True, exist_ok=True)
         _git(repo, "worktree", "prune", check=False)  # its folder may be gone but still registered
-        if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False):
+        if branch_exists(repo, branch):
             _git(repo, "worktree", "add", "--quiet", str(path), branch)  # the branch outlived its folder
         else:
             _git(repo, "worktree", "add", "--quiet", "-b", branch, str(path), commit)
     return {"path": str(path), "branch": branch, "base": commit}
+
+
+def branch_exists(repo: str | Path, branch: str) -> bool:
+    return bool(_git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False))
+
+
+def branch_problem(repo: str | Path, branch: str) -> str | None:
+    """Why `branch` can't be a node's branch name, or None if it can."""
+    if branch.startswith("wf/"):
+        return "wf/ is where wf names branches itself (wf/<run-id>/...)"
+    if _git(repo, "check-ref-format", "--branch", branch, check=False) != branch:  # @{-1} would print another name
+        return "git doesn't allow it as a branch name"
+    return None
 
 
 def head(path: str | Path) -> str:
@@ -146,14 +161,15 @@ def uncommitted(repo: str | Path) -> list[Path]:
     return [Path(top) / entry[3:] for entry in out.split("\0") if len(entry) > 3] if top else []
 
 
-def branches(repo: str | Path, run_id: str) -> list[str]:
-    """A run's wf/<run-id>/... branches."""
-    return _git(repo, "for-each-ref", "--format=%(refname:short)", f"refs/heads/wf/{run_id}/", check=False).splitlines()
+def branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> list[str]:
+    """A run's wf/<run-id>/... branches, and those of `named` (the ones `branch` named) that exist."""
+    found = _git(repo, "for-each-ref", "--format=%(refname:short)", f"refs/heads/wf/{run_id}/", check=False).splitlines()
+    return found + [name for name in named or [] if branch_exists(repo, name)]
 
 
-def delete_branches(repo: str | Path, run_id: str) -> None:
-    """Delete a run's wf/<run-id>/... branches (after a dry run: they hold scripted work)."""
-    for name in branches(repo, run_id):
+def delete_branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> None:
+    """Delete a run's branches (after a dry run: they hold scripted work)."""
+    for name in branches(repo, run_id, named):
         _git(repo, "branch", "--quiet", "-D", name, check=False)
 
 

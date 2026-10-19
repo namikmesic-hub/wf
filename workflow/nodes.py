@@ -41,7 +41,10 @@ A limit reached while it waits ends the wait, and the attempt doesn't start.
 Workspaces: `new` is a git worktree (workspaces.py). For an `edit` or `full`
 agent in a worktree the runner made, a retry starts from the commit the job
 started from, and when the agent succeeds the runner commits what it left
-(`edit` agents are told not to commit themselves).
+(`edit` agents are told not to commit themselves). A node's `branch` names
+its worktree's branch on its first pass; the run folder's branches.json
+records it, so later passes and `wf resume` keep using it, and no other node
+or run can take it over.
 
 Workflow nodes (_workflow) run their sub-workflow with the same graph, as a
 separate LangGraph thread in the run's checkpoints: one thread per attempt.
@@ -73,7 +76,7 @@ from langgraph.types import interrupt
 
 from . import capacity, dryrun, output_tool, schemas, templates, workspaces
 from .context import RunContext
-from .runs import now, write_json
+from .runs import Run, now, write_json
 from .harnesses import SessionSpec, Unavailable, Usage
 from .spec import seconds
 from .state import Finished, Job
@@ -150,11 +153,34 @@ async def _workspace(job: Job, ctx: RunContext, variables: dict) -> dict:
         if not base:
             raise _Failed("`workspace: new` needs a git repo with at least one commit", job["attempt"])
         parts = [*ctx.prefix, node_id] + ([str(job["index"])] if job["index"] is not None else [])  # e.g. build/2/implement
-        return await _git(ctx, workspaces.worktree, ctx.home["path"], ctx.run.id, parts, base)
+        template = ctx.workflow.setting(node_id, "branch")
+        if not template:
+            return await _git(ctx, workspaces.worktree, ctx.home["path"], ctx.run.id, parts, base)
+        branch = ctx.root.run.branches().get("/".join(parts)) or templates.render(template, variables).strip()  # named once
+        return await _git(ctx, _named_worktree, ctx.root.run, ctx.home["path"], parts, base, branch)
     shared = job["vars"]["workspace"].get(kind)
     if shared is None:
         raise _Failed(f"`{kind}` hasn't run yet, so it has no workspace to share", job["attempt"])
     return shared
+
+
+def _named_worktree(run: Run, repo: str, parts: list[str], base: str, branch: str) -> dict:
+    """The worktree on the branch a node's `branch` named: one this run made for it, or a new one.
+    A branch that exists and that this run didn't make is never taken over."""
+    path = "/".join(parts)
+    made = run.branches()
+    if made.get(path) == branch:  # a later pass, or the run resumed
+        return workspaces.worktree(repo, run.id, parts, base, branch)
+    if problem := workspaces.branch_problem(repo, branch):
+        raise workspaces.WorkspaceError(f"can't name the branch `{branch}`: {problem}")
+    if owner := next((p for p, b in made.items() if b == branch), None):
+        raise workspaces.WorkspaceError(f"`{owner}` already works on branch `{branch}` in this run")
+    if workspaces.branch_exists(repo, branch):
+        raise workspaces.WorkspaceError(f"branch `{branch}` already exists and this run didn't make it; "
+                                        "delete it or name another")
+    workspace = workspaces.worktree(repo, run.id, parts, base, branch)
+    run.add_branch(path, branch)  # once it exists: the record lists only branches this run made
+    return workspace
 
 
 _GIT = threading.Lock()  # held by the thread itself: see _git

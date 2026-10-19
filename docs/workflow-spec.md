@@ -17,7 +17,8 @@ typed, later steps, conditions and fan-outs can rely on their fields, and
 - **Pass**: one run of a node. A node inside a loop has several passes.
 - **Item**: one element of a `for_each` list. Each item runs separately.
 - **Attempt**: one try at a pass or item. Retries and fallbacks add attempts.
-- **Run**: one execution of a workflow, with its own folder under `.wf/runs/`.
+- **Run**: one execution of a workflow, with its own folder under `.wf/runs/` (or in a runs
+  folder, see [Run folder](#run-folder)).
 
 ## Example
 
@@ -136,6 +137,10 @@ end:
 
 `wf run` exit codes: 0 succeeded, 1 failed or stopped by a limit, 2 paused waiting for a person
 (only with `--no-input` or when there's no terminal).
+
+Every command that makes or finds runs (`run`, `resume`, `answer`, `wait`, `status`, `list`,
+`report`, `discard`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
+[Run folder](#run-folder)).
 
 ### Setup
 
@@ -291,6 +296,7 @@ Fields every kind accepts:
 | `on_item_error` | `fail` | `fail` or `continue`. |
 | `workspace` | `repo` | Where the node runs. See [Workspaces](#workspaces). |
 | `base` | the workflow's base commit | Git ref that a `new` workspace branches from. |
+| `branch` | `wf/<run-id>/...` | The name of a `new` workspace's branch, as a template. See [Workspaces](#workspaces). |
 | `timeout` | `60m` (none for human and workflow nodes) | Per attempt. Written like `90s`, `30m`, `2h`. An agent attempt's timeout starts once it has an [agent slot](#agent-slots). A workflow node's steps have their own timeouts. |
 | `retry` | 1 for agent nodes, 0 for others | Extra attempts after a failure. |
 | `description` | none | Shown in progress output and by `wf graph`. |
@@ -666,6 +672,12 @@ the context to fix them.
 
 - Branch names are `wf/<run-id>/` followed by the path of node ids and item indexes, for
   example `wf/<run-id>/build/2/implement`.
+- `branch` names a node's branch instead, as a template: `branch: "{{ start.branch }}"`
+  lets whoever starts the run choose the branch that carries the result. The name is
+  rendered on the node's first pass; later passes and `wf resume` keep that branch. It
+  can't start with `wf/`. A branch that already exists is refused, unless this run made it
+  for the same node: `branches.json` in the run folder records the branches a run made.
+  `wf discard --branches`, and a dry run that succeeds, delete them as they do `wf/` ones.
 - A node keeps the same worktree across passes, so a loop keeps working on one branch.
   Each item gets its own.
 - Worktrees live outside the repo, under `~/.wf/worktrees/`, so agents searching the repo
@@ -689,6 +701,7 @@ the context to fix them.
 .wf/runs/<run-id>/              <run-id> is like 20261018-1432-implement-k3f9
   workflow/                     copies of the workflow files as they were run
   input.json
+  branches.json                 the branches `branch` named, once there are any
   output.json                   the end output, once the run succeeds
   status.json                   running | waiting | succeeded | failed | limit
   events.jsonl                  one line per event: node started, finished, route taken, ...
@@ -703,6 +716,12 @@ the context to fix them.
 - `.wf/` is added to the repo's `.git/info/exclude`, so it never shows up in `git status`.
 - While a run is `running`, `agents_waiting` in `status.json` lists the attempts waiting
   for an [agent slot](#agent-slots).
+- A runs folder keeps run folders outside the repo instead: `--runs-dir <dir>`, or the
+  `WF_RUNS_DIR` environment variable (the option wins). Run folders then go to
+  `<dir>/<repo key>/<run-id>/`. The repo key is the repo folder's name and a hash of its
+  path, like `wf-3f9a1c2b4d5e`, so the runs of two repos never mix. Nothing is written in
+  the repo, not even `.git/info/exclude`: only the worktrees and branches of `workspace: new`.
+  Later commands for the run need the same setting, in the same folder.
 - `wf resume` uses the copies in `workflow/`, so editing the YAML doesn't change a run
   that's already in progress.
 
@@ -729,6 +748,11 @@ Errors:
 10. Each short-form end output is a single field reference.
 11. Each sub-workflow exists and is valid, no workflow includes itself (directly or
     indirectly), and `with` sets every required input with a matching type.
+12. `branch` is only on nodes with `workspace: new`. On a `for_each` node it uses `item` or
+    `index`. It doesn't read the node's own workspace or start with `wf/`. No two nodes'
+    `branch` can render the same name: the text before their first `{{ }}` or `{% %}`, or
+    after their last, must tell them apart, like `fix/{{ start.task }}` and
+    `review/{{ start.task }}`.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`

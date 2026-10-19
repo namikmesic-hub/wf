@@ -55,7 +55,7 @@ item, index, session. A node's kind is whichever of these keys it has:
 | workflow | `workflow` (path), `with` (inputs) | the sub-workflow's end.output |
 
 Every kind: `needs`, `routes`, `for_each`, `max_parallel` (4), `max_items` (20),
-`on_item_error` (fail | continue), `workspace` (repo), `base`, `timeout` (60m;
+`on_item_error` (fail | continue), `workspace` (repo), `base`, `branch`, `timeout` (60m;
 none for human and workflow), `retry` (1 for agents, else 0), `description`.
 
 Agents also: `harness`, `model`, `effort` (maps by harness when `harness` is a
@@ -109,7 +109,7 @@ is the output it just produced. Every loop must pass through a route with `max`.
 ## Templates and expressions
 
 Sandboxed Jinja.
-Templates (`{{ }}`, `{% %}`): instruction, human, command, env, with, base, harness, model, effort, end values.
+Templates (`{{ }}`, `{% %}`): instruction, human, command, env, with, base, branch, harness, model, effort, end values.
 Expressions (no braces): `when`, `for_each`.
 A template that is exactly one `{{ ... }}` keeps its type (a list stays a list).
 
@@ -149,6 +149,14 @@ To run several steps per item, make the node a workflow node.
 sub-workflow, its node's workspace), `new` (a git worktree on branch
 `wf/<run-id>/<path>`, from `base` or the commit the run started at), `<node id>`
 (that node's latest workspace), `temp` (an empty folder).
+
+`branch` names a `new` worktree's branch instead, as a template:
+`branch: "{{ start.branch }}"` lets the caller pick the branch that carries the
+result. It's named on the node's first pass and kept after that. A branch that
+exists already and that the run didn't make is refused. On a `for_each` node it
+must use `item` or `index`, and no two nodes may be able to render the same name:
+give it to the one node that makes the deliverable, and run the others in its
+workspace (`workspace: <that node>`).
 
 A `new` worktree has only what's committed: an uncommitted script or fixture a
 step needs isn't there (`wf run` lists such files when it starts). Worktrees and
@@ -234,4 +242,6 @@ dry runs out.
 NAME=VALUE]`, `resume [--limit NAME=VALUE]`, `answer`, `wait`, `status`, `list` (newest first), `report [--real |
 --dry-runs] [--version V]`, `discard [<run-id>... | --workflow NAME
 [--dry-runs]]`. Exit codes: 0 succeeded, 1 failed or limit, 2 waiting for a
-person, 3 (`wf wait`) nothing new, 130 Ctrl-C.
+person, 3 (`wf wait`) nothing new, 130 Ctrl-C. The commands that make or find
+runs take `--runs-dir DIR` (or `WF_RUNS_DIR`): run folders then go to
+`DIR/<repo key>/` instead of `.wf/runs/`, and nothing is written in the repo.
