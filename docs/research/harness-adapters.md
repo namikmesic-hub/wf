@@ -21,8 +21,7 @@ Versions checked:
      as a *dynamic tool*. The server sends each call back to the runner as an `item/tool/call`
      request.
    - **Cursor:** the `cursor-sdk` Python package, with `submit_result` as a `custom_tools` entry.
-     Superseded on 2026-10-19: wf drives `cursor-agent acp` on the local login instead, see
-     [section 6](#6-cursor-through-acp).
+     Superseded on 2026-10-19: wf drives `cursor-agent acp` on the local login instead, see [section 6](#6-cursor-through-acp).
 2. **Keep `session: fresh` as the default.** `session: continue` stays opt-in. It forks the
    previous pass's session where the harness can, sends only the new feedback, and drops
    back to fresh when it can't continue cleanly.
@@ -34,8 +33,8 @@ The spec changes this implies are listed at the [end](#4-proposed-spec-changes).
 
 ## 1. The three harnesses side by side
 
-The Cursor column describes the `cursor-sdk` design. [Section 6](#6-cursor-through-acp)
-replaced it on 2026-10-19 with `cursor-agent acp`, which runs on the local login.
+The Cursor column describes the `cursor-sdk` design.
+[Section 6](#6-cursor-through-acp) replaced it on 2026-10-19 with `cursor-agent acp`, which runs on the local login.
 
 | | Claude Code | Codex | Cursor |
 |---|---|---|---|
@@ -199,8 +198,7 @@ Why this shape:
 
 ### Cursor adapter
 
-Superseded on 2026-10-19 by [section 6](#6-cursor-through-acp): this design needs a dashboard
-API key, and `cursor-agent acp` doesn't.
+Superseded on 2026-10-19 by [section 6](#6-cursor-through-acp): this design needs a dashboard API key, and `cursor-agent acp` doesn't.
 
 - **Setup.** `pip install cursor-sdk`. The wheel is about 50 MB and bundles Node. It needs an
   API key from the Cursor dashboard [V]. Read `CURSOR_API_KEY` once, pass it as `api_key=`,
@@ -336,12 +334,10 @@ All seven were applied to `docs/workflow-spec.md` on 2026-10-18.
 
 ## 6. Cursor through ACP
 
-Checked 2026-10-19 with `cursor-agent` 2026.10.14-0f9edde and 2026.10.16-e3cb207, for
-`workflow/harnesses/cursor.py`. `cursor-agent acp` speaks the Agent Client Protocol,
-JSON-RPC 2.0 over stdio, on the local Cursor login, so it needs no API key and no
-`cursor-sdk`. Each row says what Cursor does, what the adapter does about it, where, and
-which test fails when the two disagree. Tests marked `-m harness` run the real
-`cursor-agent`.
+Checked 2026-10-19 with `cursor-agent` 2026.10.14-0f9edde and 2026.10.16-e3cb207, for `workflow/harnesses/cursor.py`.
+`cursor-agent acp` speaks the Agent Client Protocol, JSON-RPC 2.0 over stdio, on the local Cursor login, so it needs no API key and no `cursor-sdk`.
+Each row says what Cursor does, what the adapter does about it, where, and which test fails when the two disagree.
+Tests marked `-m harness` run the real `cursor-agent`.
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|

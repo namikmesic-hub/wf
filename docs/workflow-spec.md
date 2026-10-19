@@ -153,12 +153,10 @@ Each harness needs its own login, and only the harnesses a workflow uses need to
 - **Codex**: the `codex` CLI, signed in with `codex login`. `wf` is tested against one Codex
   version and warns when the installed one differs, because the parts of Codex it uses are
   marked experimental.
-- **Cursor**: `cursor-agent`, signed in with `cursor-agent login`. Runs use that login, not
-  an API key: the runner removes `CURSOR_API_KEY` from the environment Cursor and its agents
-  see. Each cursor-agent process gets a settings folder of its own, outside the repo, so your
-  `~/.cursor` settings don't apply and aren't changed. `wf` is tested against one
-  cursor-agent version and warns when the installed one differs, because it reads the
-  messages Cursor writes.
+- **Cursor**: `cursor-agent`, signed in with `cursor-agent login`.
+  Runs use that login, not an API key: the runner removes `CURSOR_API_KEY` from the environment Cursor and its agents see.
+  Each cursor-agent process gets a settings folder of its own, outside the repo, so your `~/.cursor` settings don't apply and aren't changed.
+  `wf` is tested against one cursor-agent version and warns when the installed one differs, because it reads the messages Cursor writes.
 
 `wf init my-flow` writes:
 
@@ -329,16 +327,15 @@ Each harness adapter maps these levels to its own permission settings (see
 [Harness adapters](#harness-adapters)). Nodes never stop to ask for permission: anything
 outside the level is refused.
 
-With `edit`, agents can't write to `.git` under Codex's sandbox. So the runner makes the
-commits (see [Workspaces](#workspaces)), and a node that runs git commands that write, such
-as `git merge` or `git rebase`, needs `access: full`.
+With `edit`, agents can't write to `.git` under Codex's sandbox.
+So the runner makes the commits (see [Workspaces](#workspaces)), and a node that runs git commands that write, such as `git merge` or `git rebase`, needs `access: full`.
 
 Agents run with the harness's normal coding setup: its own system prompt, plus the repo's
 instruction files (`CLAUDE.md`, `AGENTS.md`). Where the harness allows it, user-level
-settings and memory aren't loaded, so a workflow behaves the same on every machine. Codex
-and Cursor are the exceptions. Codex always loads your global `~/.codex/AGENTS.md`. Cursor
-loads your Cursor account's User Rules and the skills in your home folder, such as
-`~/.claude/skills` and `~/.agents/skills`.
+settings and memory aren't loaded, so a workflow behaves the same on every machine.
+Codex and Cursor are the exceptions.
+Codex always loads your global `~/.codex/AGENTS.md`.
+Cursor loads your Cursor account's User Rules and the skills in your home folder, such as `~/.claude/skills` and `~/.agents/skills`.
 
 #### Command nodes
 
@@ -426,11 +423,10 @@ for each harness.
 The runner always passes the model and effort to the harness explicitly, so your personal
 harness config never decides them. When nothing is set, it uses the harness's own default:
 for Codex, the default model in the app server's model list. Cursor has no default, so any
-node that can run on Cursor needs a `model`. A Cursor model id carries its own effort, as in
-`gpt-5.6-sol-max-fast`, `gemini-4-argon-high` or `claude-fable-5-1-thinking-max`, so `effort`
-doesn't apply to Cursor and `wf validate` warns when it's set. The id must be one that
-`cursor-agent --list-models` lists. Any other makes Cursor unavailable for that attempt, so
-the next harness in the node's list runs.
+node that can run on Cursor needs a `model`.
+A Cursor model id carries its own effort, as in `gpt-5.6-sol-max-fast`, `gemini-4-argon-high` or `claude-fable-5-1-thinking-max`, so `effort` doesn't apply to Cursor and `wf validate` warns when it's set.
+The id must be one that `cursor-agent --list-models` lists.
+Any other makes Cursor unavailable for that attempt, so the next harness in the node's list runs.
 
 ### limits
 
@@ -451,11 +447,14 @@ and says which limit is still reached. `wf run <file> --limit ...` starts a run 
 different limit.
 
 - **Tokens** are input plus output tokens, as each harness reports them (cached input
-  included). Claude Code and Codex report them. Cursor doesn't.
-- **Cost** only counts harnesses that report it in dollars. Claude Code does. Codex and
-  Cursor don't.
-- A harness that doesn't report tokens or cost adds nothing to them, and `wf validate` warns
-  when a limit or a template counts them. `duration` caps every harness.
+  included).
+  Claude Code and Codex report them.
+  Cursor doesn't.
+- **Cost** only counts harnesses that report it in dollars.
+  Claude Code does.
+  Codex and Cursor don't.
+- A harness that doesn't report tokens or cost adds nothing to them, and `wf validate` warns when a limit or a template counts them.
+  `duration` caps every harness.
 
 ## Templates and expressions
 
@@ -591,7 +590,8 @@ gets depends on `session`:
   - The runner records each pass's session id in its pass folder.
   - The next pass *forks* that session: Claude Code with `fork_session`, Codex with
     `thread/fork`. The earlier session is never changed, so a retry forks from the same
-    point again. Cursor can't fork, so it loads the previous session itself (`session/load`).
+    point again.
+    Cursor can't fork, so it loads the previous session itself (`session/load`).
   - The rendered instruction is sent as the next message. `session.continued` is true while
     it renders, so the template can send just the new feedback instead of the whole task.
     The runner adds that a new `submit_result` call is needed.
@@ -658,12 +658,11 @@ Each agent attempt gets one tool, `submit_result`. Its input schema is the node'
   `claude_code_chat/native_tools.py`.
 - **Codex**: a dynamic tool, declared when the thread starts. The app server sends each call
   to the runner as an `item/tool/call` request on the same connection.
-- **Cursor**: an MCP server the runner serves over HTTP on 127.0.0.1, given to Cursor when
-  the session starts. Each session gets its own URL, with an unguessable token in it. A
-  request from a web page (an Origin header that isn't 127.0.0.1 or localhost) gets no answer.
+- **Cursor**: an MCP server the runner serves over HTTP on 127.0.0.1, given to Cursor when the session starts.
+  Each session gets its own URL, with an unguessable token in it.
+  A request from a web page (an Origin header that isn't 127.0.0.1 or localhost) gets no answer.
 
-Each call arrives tied to its session (a process, a thread id or a session's URL), so a
-result can only reach the attempt it belongs to.
+Each call arrives tied to its session (a process, a thread id or a session's URL), so a result can only reach the attempt it belongs to.
 
 The runner uses this tool instead of each harness's own structured-output feature because
 it works the same everywhere, and the agent gets validation errors back while it still has
@@ -796,8 +795,7 @@ Warnings:
   contain instructions aimed at agents, and this passes them to one with no restrictions.
 - Two `edit` nodes could run at the same time in the same workspace.
 - A `for_each` reads a list whose schema has no `maxItems`.
-- The workflow uses `run.cost_usd` or `limits.cost_usd` with a harness that doesn't
-  report cost, or `run.tokens` or `limits.tokens` with one that doesn't report tokens.
+- The workflow uses `run.cost_usd` or `limits.cost_usd` with a harness that doesn't report cost, or `run.tokens` or `limits.tokens` with one that doesn't report tokens.
 - A node that can run on `cursor` sets `effort`.
 
 ## Implementation notes (Python, LangGraph)
@@ -831,9 +829,9 @@ The `wf` command is a `[project.scripts]` entry in `pyproject.toml`:
 `wf = "workflow.cli:main"`.
 
 Dependencies to add to `pyproject.toml`: `jinja2`, `pyyaml`, `jsonschema` and
-`langgraph-checkpoint-sqlite`. (`pyyaml` and `jsonschema` are already installed through
-LangChain, but the package should list what it imports.) Codex and Cursor need no Python
-package: the runner talks to the `codex` and `cursor-agent` CLIs.
+`langgraph-checkpoint-sqlite`.
+(`pyyaml` and `jsonschema` are already installed through LangChain, but the package should list what it imports.)
+Codex and Cursor need no Python package: the runner talks to the `codex` and `cursor-agent` CLIs.
 
 ### Harness adapters
 
@@ -884,29 +882,22 @@ Notes:
   timeout of its own. So the runner always replies, even on errors.
 - Codex's app-server login is for local use on your own account. Don't run `wf` as a hosted
   service on someone else's ChatGPT login.
-- Cursor asks before what it may not do by itself, and the runner answers from the node's
-  access level with "allow once" or "reject", never "allow always", which Cursor would save.
-- Cursor saves the model it was started with, and the parameters it last used for that
-  model, into its settings folder, and reads its permissions from there. So each
-  cursor-agent process gets a new folder in `~/.wf/temp/<run-id>/cursor-agent/`. It's outside
-  the repo because Cursor also writes your account's details there. A session that a later
-  pass may continue is kept there until the run succeeds.
-- Outside the workspace, Cursor writes to temp folders and to Markdown files in `~/.cursor`
-  without asking. For `edit`, deny rules block those writes. For `read-only`, a deny rule
-  blocks every write.
-- Cursor's sandbox is off at every level. With it on, a command still asks first, and one the
-  runner allows runs outside the sandbox: in a live check it wrote outside the workspace and
-  reached the network. So the sandbox would confine nothing the runner doesn't already decide.
-- The effort in a Cursor model id applies only when the client says it takes parameterized
-  models, which the adapter does. Each attempt's transcript records the model and parameters
-  Cursor reports for the session.
-- `--disable-project-configs` keeps the repo's `.cursor/cli.json` from changing Cursor's
-  permissions.
-- Cursor reports a failed request as a paragraph at the end of the turn's last message, not
-  as an error, so the adapter reads that message to tell a usage limit or a login problem
-  from other failures.
-- What Cursor can't switch off: a web fetch that Cursor's server marks as needing no approval
-  runs even with `web: false`.
+- Cursor asks before what it may not do by itself, and the runner answers from the node's access level with "allow once" or "reject", never "allow always", which Cursor would save.
+- Cursor saves the model it was started with, and the parameters it last used for that model, into its settings folder, and reads its permissions from there.
+  So each cursor-agent process gets a new folder in `~/.wf/temp/<run-id>/cursor-agent/`.
+  It's outside the repo because Cursor also writes your account's details there.
+  A session that a later pass may continue is kept there until the run succeeds.
+- Outside the workspace, Cursor writes to temp folders and to Markdown files in `~/.cursor` without asking.
+  For `edit`, deny rules block those writes.
+  For `read-only`, a deny rule blocks every write.
+- Cursor's sandbox is off at every level.
+  With it on, a command still asks first, and one the runner allows runs outside the sandbox: in a live check it wrote outside the workspace and reached the network.
+  So the sandbox would confine nothing the runner doesn't already decide.
+- The effort in a Cursor model id applies only when the client says it takes parameterized models, which the adapter does.
+  Each attempt's transcript records the model and parameters Cursor reports for the session.
+- `--disable-project-configs` keeps the repo's `.cursor/cli.json` from changing Cursor's permissions.
+- Cursor reports a failed request as a paragraph at the end of the turn's last message, not as an error, so the adapter reads that message to tell a usage limit or a login problem from other failures.
+- What Cursor can't switch off: a web fetch that Cursor's server marks as needing no approval runs even with `web: false`.
 
 How it maps onto LangGraph:
 - **It's not one LangGraph node per YAML node.** The settle rule needs to know what's
