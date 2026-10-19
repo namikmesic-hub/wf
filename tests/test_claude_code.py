@@ -86,7 +86,9 @@ nodes:
   read:
     needs: [start]
     instruction: Use git to see what changed in notes.txt since the last commit. Report the old and the new secret word.
-    output: {old: {type: string}, new: {type: string}}
+    output:
+      old: {type: string, pattern: "^[A-Za-z]+$", description: The old secret word only}
+      new: {type: string, pattern: "^[A-Za-z]+$", description: The new secret word only}
 end:
   output:
     old: "{{ read.old }}"
@@ -96,7 +98,7 @@ end:
     assert cli.main(["run", "flow.yaml"]) == 0, capsys.readouterr()
     (folder,) = Path(".wf/runs").iterdir()
     out = json.loads((folder / "output.json").read_text())
-    assert (out["old"].strip(" .").lower(), out["new"].strip(" .").lower()) == ("marmalade", "quince")
+    assert (out["old"].lower(), out["new"].lower()) == ("marmalade", "quince")
     assert out["cost"] > 0
     log = [json.loads(line) for line in (folder / "nodes" / "read" / "1" / "attempt-1.log").read_text().splitlines()]
     assert any(e["kind"] == "tool" and e["name"] == GIT for e in log)  # it used the runner's git tool
