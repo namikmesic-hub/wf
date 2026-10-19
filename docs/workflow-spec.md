@@ -321,7 +321,7 @@ Fields every kind accepts:
 | `web` | `false` | Allow web search and page fetching. |
 | `session` | `fresh` | `fresh` starts a new agent session for every pass: the code carries over through the workspace, and the instruction carries the feedback. `continue` carries the conversation over too. See [Sessions](#sessions). |
 | `max_turns`, `budget_usd` | none | Passed to harnesses that support them. |
-| `tools` | none | wf tools the agent may use: `[slack, linear]`. Each gets only its read operations, unless the entry is `{name: ..., write: true}`, which gets every operation the server offers. See [docs/tools.md](tools.md). |
+| `tools` | none | wf tools the agent may use: `[slack, linear]`. Each gets only its read operations, unless the entry is `{name: ..., write: true}`, which gets every operation the server offers. A node with `tools`, even `tools: []`, gets no other MCP server or connector, at any access level. See [docs/tools.md](tools.md). |
 
 Access levels:
 - `read-only`: read and search files, and run commands that don't change anything, such

@@ -527,7 +527,7 @@ class _Checker:
             if self.wf.setting(source, "web"):
                 self.warn(where, f"an agent with `access: full` reads output from `{source}`, which has `web: true`; "
                                  "web pages can carry instructions aimed at agents")
-            if tools := [use.name for use in self.wf.setting(source, "tools")]:
+            if tools := [use.name for use in self.wf.setting(source, "tools") or ()]:
                 self.warn(where, f"an agent with `access: full` reads output from `{source}`, which reads {', '.join(tools)}; "
                                  "messages, notes and mail that other people write can carry instructions aimed at agents")
 

@@ -4,7 +4,7 @@ An agent node can read Slack, Granola meeting notes, Linear, Notion and Gmail th
 Each tool is the vendor's own MCP server.
 You sign in to it once per machine with `wf tools <name> setup`, which keeps the secret in the macOS Keychain.
 A node lists the tools its agent may use, and wf attaches them to that agent's session on Claude Code, Codex or Cursor.
-Your own connectors and MCP servers don't matter here, because wf's sessions don't load them.
+Such a node gets only those tools: none of your account's connectors, and none of your own MCP servers.
 
 ```sh
 wf tools list              # each tool, how it signs in, and whether it's set up
@@ -176,6 +176,10 @@ Or it's `{name: ..., write: true}`, which gives the agent every operation the se
 That includes deleting, and for Granola signing out.
 Posting, sending and creating reach other people, so a node only gets them when it asks for them by name.
 
+A node that lists `tools` gets exactly those, and no other MCP server or connector, at every access level.
+`tools: []` gives it none at all.
+A node without `tools` gets what it got before, which on Claude Code at `full` access includes your claude.ai connectors.
+
 The tests named below are in `tests/test_tools.py` for validation, and in `tests/test_tool_sessions.py` for runs.
 
 | Condition | Effect | Source line | Conformance assertion |
@@ -188,11 +192,13 @@ The tests named below are in `tests/test_tools.py` for validation, and in `tests
 | An agent with `access: full` reads the output of an agent with tools | `wf validate` warns: messages and mail can carry instructions aimed at agents. | `workflow/validate.py:531` | `test_a_full_access_agent_that_reads_what_a_tool_using_agent_wrote_gets_a_warning` |
 | An attempt starts | It connects to the node's tools. The session gets each tool's read operations, or all of them with `write: true`. | `workflow/nodes.py:343`, `workflow/tools/relay.py:59` | `test_each_node_gets_its_own_tools_and_only_their_reads_unless_it_opts_in`, `test_every_page_of_a_servers_operations_is_attached` |
 | The agent calls an operation its node may not use | wf refuses the call, which never reaches the vendor. | `workflow/tools/relay.py:70` | `test_a_read_only_node_cannot_call_a_write` |
-| A tool isn't set up, or its server refuses the sign-in when the attempt connects | The node fails at once, with what to run: a retry would find the same. | `workflow/nodes.py:499` | `test_a_tool_that_is_not_set_up_fails_the_node_without_a_retry`, `test_a_sign_in_the_server_refuses_when_connecting_fails_the_node_without_a_retry` |
+| A tool isn't set up, or its server refuses the sign-in when the attempt connects | The node fails at once, with what to run: a retry would find the same. | `workflow/nodes.py:501` | `test_a_tool_that_is_not_set_up_fails_the_node_without_a_retry`, `test_a_sign_in_the_server_refuses_when_connecting_fails_the_node_without_a_retry` |
 | Two tools fail to connect | The failure that setup fixes is the one reported. | `workflow/tools/relay.py:95` | `test_the_failure_that_setup_fixes_wins_when_two_tools_fail` |
-| A tool's server doesn't answer | The attempt fails, and `retry` applies. | `workflow/nodes.py:501` | `test_a_server_that_does_not_answer_fails_the_attempt_and_the_retry_tries_again` |
-| During the session, a tool's sign-in is refused or its connection is lost | The call's answer says why, and the attempt fails after the session, even when the agent submitted a result. | `workflow/tools/relay.py:148`, `workflow/nodes.py:495` | `test_a_sign_in_refused_in_the_middle_of_a_session_says_what_to_run`, `test_a_node_whose_tool_stopped_working_fails_even_with_a_result` |
+| A tool's server doesn't answer | The attempt fails, and `retry` applies. | `workflow/nodes.py:503` | `test_a_server_that_does_not_answer_fails_the_attempt_and_the_retry_tries_again` |
+| During the session, a tool's sign-in is refused or its connection is lost | The call's answer says why, and the attempt fails after the session, even when the agent submitted a result. | `workflow/tools/relay.py:148`, `workflow/nodes.py:497` | `test_a_sign_in_refused_in_the_middle_of_a_session_says_what_to_run`, `test_a_node_whose_tool_stopped_working_fails_even_with_a_result` |
 | An operation answers with an error | The agent reads the error, as it would any tool's, and nothing fails. | `workflow/tools/relay.py:78` | `test_an_operation_that_answers_with_an_error_doesnt_fail_the_node` |
+| A node lists `tools`, `tools: []` included | Its agent gets those wf tools and no other MCP server or connector, at every access level. Claude Code leaves out the repo's MCP servers, yours, and your claude.ai connectors. Codex switches off the MCP servers and plugins in your config, and never loads your ChatGPT connectors. Cursor refuses other servers' tools. | `workflow/nodes.py:381`, `workflow/harnesses/claude_code.py:136`, `workflow/harnesses/codex.py:161`, `workflow/harnesses/cursor.py:443` | `test_a_node_that_lists_tools_gets_no_other_mcp_server_and_one_without_keeps_them`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools`, `test_codex_switches_off_your_mcp_servers_and_plugins_for_a_node_with_tools`, `test_cursor_refuses_other_mcp_servers_tools_for_a_node_with_tools_even_at_full`, and with a real Claude Code, `test_a_real_claude_code_node_with_tools_at_full_access_sees_no_other_mcp_server` |
+| A node doesn't list `tools` | Its agent gets the MCP servers and connectors it got before. | `workflow/nodes.py:343` | `test_codex_keeps_your_mcp_servers_for_a_node_without_tools`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools` |
 | A dry run | No tools are attached, so a dry run works without any set up. | `workflow/nodes.py:343` | `test_a_dry_run_attaches_no_tools` |
 
 ## What counts as a read

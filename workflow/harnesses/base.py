@@ -16,6 +16,10 @@ Besides submit_result, a session can carry wf tools (SessionSpec.tools: Slack,
 Linear, ...; see tools/relay.py). Each is a ToolServer with the operations its
 node may use, and the adapter wraps them the way it wraps submit_result, so the
 agent's calls come back to the runner, which passes them on to the vendor.
+A node that lists `tools` gets those and no other MCP server or connector, at
+every access level (SessionSpec.only_wf_tools), and each adapter switches off
+what its harness would otherwise load. A node without `tools` gets what it got
+before.
 
 How a turn ended:
 - done: the turn finished normally (the agent may or may not have called
@@ -67,6 +71,7 @@ class SessionSpec:
     continuable: bool = False  # a later pass may continue this session, so the harness must keep it
     prior_cost_usd: float = 0.0  # what fork_from had spent: a forked session's totals include it
     tools: list["ToolServer"] = field(default_factory=list)  # wf tools the agent may call, besides submit_result
+    only_wf_tools: bool = False  # the node lists `tools`: no other MCP servers or connectors, whatever the access
 
 
 @dataclass

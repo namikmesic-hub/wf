@@ -12,7 +12,10 @@ mcp__wf__submit_result.
 wf tools (spec.tools) are in-process MCP servers too, one per tool, named after
 it: the agent sees mcp__slack__slack_read_channel, and each call comes back
 here to be passed on (tools/relay.py). Each operation the node may use is in
-allowed_tools; the server lists no others. What a wf tool returns stays out of
+allowed_tools; the server lists no others. A node that lists `tools` gets no
+other MCP server: strict_mcp_config leaves out the repo's and your own, and
+ENABLE_CLAUDEAI_MCP_SERVERS=false your claude.ai connectors, which Claude Code
+would otherwise load at `full` access. What a wf tool returns stays out of
 the transcript, which notes only its size: it's other people's messages and
 mail, and the run folder outlives the session.
 
@@ -80,6 +83,7 @@ GIT = f"mcp__{SERVER}__{git_tool.NAME}"
 SEARCH = ["Read", "Grep", "Glob"]
 WEB = ["WebSearch", "WebFetch"]
 API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+CONNECTORS = "ENABLE_CLAUDEAI_MCP_SERVERS"  # false: Claude Code loads none of your claude.ai connectors
 
 
 class ClaudeCode:
@@ -129,7 +133,9 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
         setting_sources=["project"],
         system_prompt={"type": "preset", "preset": "claude_code"},
         mcp_servers=servers,
-        env={} if use_api_key else {name: "" for name in API_KEY_VARS},
+        strict_mcp_config=spec.only_wf_tools,
+        env={**({} if use_api_key else {name: "" for name in API_KEY_VARS}),
+             **({CONNECTORS: "false"} if spec.only_wf_tools else {})},
         resume=spec.fork_from,
         fork_session=spec.fork_from is not None,
     )

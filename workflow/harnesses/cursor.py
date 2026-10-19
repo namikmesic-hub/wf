@@ -44,7 +44,9 @@ wf tools (spec.tools) are served the same way: each tool gets a URL of its own
 on that server, named after the tool (`linear`), with the operations its node
 may use. A call comes back to the runner, which passes it on to the vendor
 (tools/relay.py), so Cursor never sees the vendor's token. The transcript keeps
-such a call's input and outcome, but not what the vendor returned.
+such a call's input and outcome, but not what the vendor returned. A node that
+lists `tools` may call no other MCP server's tools, at any access level: its
+own config folder already holds none of yours, and permit() refuses the rest.
 
 Access levels: the node never stops to ask. Permission requests are answered
 from its level with "allow once" or "reject", never "allow always", which
@@ -340,7 +342,8 @@ class CursorSession:
         """The answer to session/request_permission: the node's access level decides."""
         asked = params.get("toolCall") or {}
         call = {**self.calls.get(asked.get("toolCallId"), {}), **{k: v for k, v in asked.items() if v}}
-        allowed = allows(self.spec.access, self.spec.web, self.spec.cwd, call, {SERVER, *(t.name for t in self.spec.tools)})
+        allowed = allows(self.spec.access, self.spec.web, self.spec.cwd, call, {SERVER, *(t.name for t in self.spec.tools)},
+                         only_these=self.spec.only_wf_tools)
         transcript(self.spec.log, "permission", tool_kind=call.get("kind"), title=call.get("title"), allowed=allowed)
         return choose(params.get("options") or [], allowed)
 
@@ -429,12 +432,16 @@ def _effective(result: dict) -> dict:
     return {o.get("id"): o.get("currentValue") for o in options or [] if isinstance(o, dict) and o.get("id") != "mode"}
 
 
-def allows(access: str, web: bool, cwd: Path, call: dict, servers: set[str] = frozenset({SERVER})) -> bool:
+def allows(access: str, web: bool, cwd: Path, call: dict, servers: set[str] = frozenset({SERVER}),
+           only_these: bool = False) -> bool:
     """Is what a permission request asks for within the node's access level? `servers`: the MCP
-    servers wf gave the session, wf's own and its tools'."""
+    servers wf gave the session, wf's own and its tools'. `only_these`: the node lists `tools`,
+    so no other server's tools, even at `full`."""
     kind = call.get("kind")
     if kind in ("fetch", "search"):  # web fetch and web search: searching files never asks
         return web
+    if kind == "other" and only_these:
+        return (call.get("rawInput") or {}).get("providerIdentifier") in servers
     if kind == "read" or access == "full":
         return True
     if kind == "other":  # an MCP tool: only on a server wf gave it

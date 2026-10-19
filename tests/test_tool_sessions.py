@@ -165,6 +165,56 @@ def test_an_image_the_vendor_returns_reaches_the_agent_as_an_image(vendor):
     assert (content, is_error) == ([{"type": "image", "data": png_base64(), "mimeType": "image/png"}], False)
 
 
+# ---------- a node with tools gets no other MCP server ----------
+
+
+def test_a_node_that_lists_tools_gets_no_other_mcp_server_and_one_without_keeps_them(vendor, repo, monkeypatch):
+    sign_in(vendor)
+    fake = install(monkeypatch, Fake("claude-code", *[submit({"summary": "ok"})] * 3))
+    flow("[linear]", nodes=("  none_listed:\n    needs: [read]\n    instruction: Sum up\n"
+                            "  empty:\n    needs: [none_listed]\n    instruction: Sum up\n    tools: []\n"))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert [(len(s.tools), s.only_wf_tools) for s in fake.specs] == [(1, True), (0, False), (0, True)]
+
+
+@pytest.mark.parametrize("access", ["read-only", "edit", "full"])
+def test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools(tmp_path, access):
+    only = options(replace(spec(tmp_path, [], access), only_wf_tools=True))
+    assert only.strict_mcp_config is True and only.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+    usual = options(spec(tmp_path, [], access))
+    assert usual.strict_mcp_config is False and "ENABLE_CLAUDEAI_MCP_SERVERS" not in usual.env
+
+
+def test_codex_switches_off_your_mcp_servers_and_plugins_for_a_node_with_tools(vendor, repo, monkeypatch):
+    sign_in(vendor)
+    yours = {"mcp_servers": {"node_repl": {"command": "node"}}, "plugins": {"computer-use@openai-bundled": {"enabled": True}}}
+    log = codex(monkeypatch, repo, [{"tool": {"arguments": {"summary": "done"}}}], config=yours)
+    assert cli.main(["run", flow("[linear]", harness="codex")]) == 0
+    (thread,) = [e["params"] for e in codex_log(log, "request") if e["method"] == "thread/start"]
+    assert thread["config"]["mcp_servers"] == {"node_repl": {"enabled": False}}
+    assert thread["config"]["plugins"] == {"computer-use@openai-bundled": {"enabled": False}}
+
+
+def test_codex_keeps_your_mcp_servers_for_a_node_without_tools(repo, monkeypatch):
+    log = codex(monkeypatch, repo, [{"tool": {"arguments": {"summary": "done"}}}], config={"mcp_servers": {"node_repl": {}}})
+    Path("flow.yaml").write_text(Path(flow("[]", harness="codex")).read_text().replace("    tools: []\n", ""))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    (thread,) = [e["params"] for e in codex_log(log, "request") if e["method"] == "thread/start"]
+    assert "mcp_servers" not in thread["config"] and not [e for e in codex_log(log, "request") if e["method"] == "config/read"]
+
+
+def test_cursor_refuses_other_mcp_servers_tools_for_a_node_with_tools_even_at_full(vendor, repo, monkeypatch):
+    sign_in(vendor)
+    yours = {"kind": "other", "title": "notes: read_notes", "rawInput": {"providerIdentifier": "notes", "toolName": "read_notes"}}
+    log = cursor(monkeypatch, repo, [{"permission": yours}, {"tool": {"arguments": {"summary": "done"}}}])
+    text = Path(flow("[linear]", harness="cursor")).read_text()
+    Path("flow.yaml").write_text(text.replace("    tools: [linear]\n", "    tools: [linear]\n    access: full\n"))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert [answer["outcome"]["optionId"] for answer in codex_log(log, "permission")] == ["reject-once", "allow-once"]
+    assert not allows("full", False, repo, yours, {"wf", "linear"}, only_these=True)
+    assert allows("full", False, repo, yours, {"wf"})  # a node without tools keeps full's everything
+
+
 # ---------- when a tool fails ----------
 
 
@@ -367,10 +417,10 @@ def test_progress_names_a_wf_tools_operation_the_same_on_every_harness():
 # ---------- Codex ----------
 
 
-def codex(monkeypatch, tmp_path: Path, *turns) -> Path:
+def codex(monkeypatch, tmp_path: Path, *turns, config: dict | None = None) -> Path:
     """Use the fake Codex app server; returns the log of everything wf sent it."""
     scenario, log = tmp_path / "scenario.json", tmp_path / "requests.jsonl"
-    scenario.write_text(json.dumps({"turns": list(turns)}))
+    scenario.write_text(json.dumps({"turns": list(turns), **({"config": config} if config else {})}))
     monkeypatch.setitem(harnesses.FACTORIES, "codex",
                         lambda: Codex(command=[sys.executable, str(FAKE_CODEX), str(scenario), str(log)], request_timeout=10))
     return log
@@ -567,3 +617,28 @@ def test_a_real_agent_reads_through_a_tool(harness, vendor, repo):
     assert cli.main(["run", "flow.yaml"]) == 0
     assert ("list_issues", {"query": "open"}) in vendor.calls
     assert "list_issues answered 'open'" in json.loads((run_dir() / "output.json").read_text())["summary"]
+
+
+@pytest.mark.harness
+def test_a_real_claude_code_node_with_tools_at_full_access_sees_no_other_mcp_server(vendor, repo):
+    sign_in(vendor)
+    Path("flow.yaml").write_text(dedent("""
+        version: 1
+        name: real-only-tools
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: claude-haiku-5-5, effort: low}}}
+        start: {input: {}}
+        nodes:
+          look:
+            needs: [start]
+            access: full
+            tools: [linear]
+            instruction: >-
+              Don't call any tool but submit_result. Submit the exact name of every tool you
+              can call whose name starts with mcp__.
+            output: {names: {type: array, items: {type: string}}}
+        end: {output: {names: "{{ look.names }}"}}
+        """))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    names = json.loads((run_dir() / "output.json").read_text())["names"]
+    assert "mcp__linear__list_issues" in names
+    assert all(name.startswith(("mcp__wf__", "mcp__linear__")) for name in names), names

@@ -30,6 +30,11 @@ take a while, so every request from the app server is answered in a task of
 its own, and the connection keeps reading meanwhile. The transcript keeps such
 a call's operation, arguments and outcome, but not what the vendor returned.
 
+A node that lists `tools` gets no other MCP server. `--disable apps` already
+keeps your ChatGPT connectors out of every thread. The thread's config also
+switches off each MCP server your config.toml names, and each plugin, since
+plugins bring MCP servers of their own: config/read says which there are.
+
 Access levels map to Codex's sandbox: read-only, workspace-write and
 danger-full-access, with approvalPolicy "never" so nothing stops to ask (any
 approval request that still arrives is declined). Web search is "live" with
@@ -152,6 +157,8 @@ class CodexSession:
                                                       f"so your ~/.codex/config.toml decides it"})
         if spec.access == "edit":
             config["sandbox_workspace_write"] = {"network_access": spec.web}
+        if spec.only_wf_tools:
+            config.update(await self._without_mcp_servers())
         params = {
             "cwd": str(spec.cwd), "sandbox": SANDBOX[spec.access], "approvalPolicy": "never",
             **({"model": model} if model else {}),
@@ -173,6 +180,18 @@ class CodexSession:
         self.id = thread_id
         self.rpc.threads[self.id] = self
         transcript(spec.log, "thread", id=self.id, model=result.get("model"), sandbox=params["sandbox"], config=config)
+
+    async def _without_mcp_servers(self) -> dict:
+        """Thread config that switches off the MCP servers and plugins Codex would load here.
+        A server that the config doesn't name can't be switched off by name (Codex refuses the
+        thread), which is why plugins go too: they bring theirs."""
+        try:
+            found = (await self.rpc.request("config/read", {"cwd": str(self.spec.cwd)})).get("config") or {}
+        except (_RpcError, TimeoutError) as error:
+            raise Unavailable(f"Codex didn't say which MCP servers it has, so wf can't keep them out: {error}") from error
+        off = {"enabled": False}
+        return {"mcp_servers": {name: off for name in found.get("mcp_servers") or {}},
+                "plugins": {name: off for name in found.get("plugins") or {}}}
 
     def pending_usage(self) -> Usage:
         return Usage(tokens=self._total - self._turn_start) if self.turn else Usage()

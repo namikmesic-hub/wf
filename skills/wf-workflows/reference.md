@@ -68,6 +68,7 @@ Agent nodes also take `tools`, the wf tools the agent may use, on every harness.
 For example `tools: [slack, granola, linear, notion, gmail]`.
 An entry gets only the tool's read operations.
 `{name: linear, write: true}` gets every operation the server offers, deleting and signing out included.
+A node with `tools`, even `tools: []`, gets no other MCP server or connector, at any access level.
 Each tool is set up once per machine with `wf tools <name> setup`, and `wf validate` warns about one that isn't.
 For Slack and Linear, `setup --write` asks for the write scopes too, which a node with `write: true` needs.
 docs/tools.md lists the reads.

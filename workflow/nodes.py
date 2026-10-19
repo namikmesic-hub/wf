@@ -346,7 +346,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     names = list(harness) if isinstance(harness, list) else [templates.render(harness, variables).strip()]
     chosen = {name: tuple(_rendered_setting(job, ctx, name, key, variables) for key in ("model", "effort")) for name in names}
     schema = schemas.node_output_schema(wf, node_id)
-    uses = () if ctx.root.script else wf.setting(node_id, "tools")
+    listed = None if ctx.root.script else wf.setting(node_id, "tools")  # None: the node doesn't list tools
+    uses = listed or ()
 
     async def attempt(number: int, name: str) -> dict:
         # Every attempt but the job's very first starts from the commit the job started from:
@@ -383,6 +384,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             fork_from=source["id"] if source else None,
             prior_cost_usd=source["cost_usd"] if source else 0.0,
             tools=tools,
+            only_wf_tools=listed is not None,
         )
         try:
             session = await agent.session(spec)

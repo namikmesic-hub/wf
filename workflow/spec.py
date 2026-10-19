@@ -290,7 +290,6 @@ _BUILTIN = {
     "workspace": "repo",
     "access": "read-only",
     "web": False,
-    "tools": (),
     "session": "fresh",
     "check": True,
 }
