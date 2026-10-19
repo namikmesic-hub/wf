@@ -29,8 +29,8 @@ hash of its path) keeps two repos' runs apart. Then the repo's working tree and
 .git/info/exclude stay as they were: only `workspace: new` adds branches and
 worktree records under .git. run.json's `repo` workspace is the repo's path,
 so a run folder found by its path alone (Run.at) still knows its repo. The
-commands wf prints for a run (Run.command) name its runs folder when wf
-wouldn't look there by itself. A runs folder inside the repo goes into
+commands wf prints for a run in a runs folder (Run.command) name that folder
+with --runs-dir. A runs folder inside the repo goes into
 .git/info/exclude, as .wf/ does.
 
 The checkpoints are LangGraph's; this module only says where they live.
@@ -95,14 +95,14 @@ class Run:
         return run
 
     def command(self, verb: str, *more: str) -> str:
-        """The wf command that does `verb` to this run, as typed in its repo, e.g. `wf resume <id>`:
-        with what makes wf look for the run where it is, if it wouldn't by itself."""
+        """The wf command that does `verb` to this run, as typed in its repo, e.g. `wf resume <id>`.
+        For a run in a runs folder it ends in --runs-dir, so it finds the run whatever WF_RUNS_DIR
+        holds where it's typed. For one in ./.wf/runs while WF_RUNS_DIR is set, it starts with
+        `WF_RUNS_DIR=`, which turns the setting off: no --runs-dir value names ./.wf/runs."""
         text = " ".join(["wf", verb, self.id, *more])
-        if self.dir.parent == runs_folder(self.repo):
-            return text
-        if self.dir.parent == self.repo.resolve() / ROOT:  # in ./.wf/runs, while WF_RUNS_DIR points elsewhere
-            return f"{RUNS_DIR}= {text}"
-        return f"{text} --runs-dir {shlex.quote(str(self.dir.parent.parent))}"
+        if self.dir.parent != self.repo.resolve() / ROOT:
+            return f"{text} --runs-dir {shlex.quote(str(self.dir.parent.parent))}"
+        return f"{RUNS_DIR}= {text}" if runs_folder(self.repo) != self.dir.parent else text
 
     @property
     def checkpoints(self) -> Path:

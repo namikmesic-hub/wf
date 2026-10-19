@@ -140,8 +140,9 @@ end:
 
 Every command that makes or finds runs (`run`, `resume`, `answer`, `wait`, `status`, `list`,
 `report`, `discard`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
-[Run folder](#run-folder)). The commands that wf prints for such a run, like
-`wf resume <run-id>`, include the option.
+[Run folder](#run-folder)). The commands that wf prints for a run in a runs folder, like
+`wf resume <run-id>`, include the option, so they find the run whether or not
+`WF_RUNS_DIR` is set where you type them.
 
 ### Setup
 
@@ -735,7 +736,9 @@ the context to fix them.
   branches, and git's records of its worktrees in `.git/worktrees/`; the worktree folders
   are under `~/.wf/worktrees/` (see [Workspaces](#workspaces)). A runs folder inside the
   repo goes into `.git/info/exclude`, as `.wf/` does. Later commands for the run need the
-  same setting, in the same folder. A blank value counts as no setting.
+  same setting, in the same folder. A blank value counts as no setting. For a run in
+  `.wf/runs/` while `WF_RUNS_DIR` is set, the commands that wf prints start with
+  `WF_RUNS_DIR=`, which turns the setting off for that command.
 - `wf resume` uses the copies in `workflow/`, so editing the YAML doesn't change a run
   that's already in progress.
 
@@ -767,9 +770,10 @@ Errors:
     `branch` in its sub-workflow. `branch` isn't empty, isn't `wf` or under `wf/` in any
     case, and doesn't read the node's own workspace.
     No two `branch` fields, in a file and the sub-workflows it runs, can name the same
-    branch, or a branch and one under it (`fix/a` and `fix/a/b`). Names compare as git
-    compares them: with case ignored, and without the spaces around them. The check reads
-    each `{{ }}` or `{% %}` as text without a `/`, and a sub-workflow's
+    branch, or a branch and one under it (`fix/a` and `fix/a/b`). Names compare with case
+    ignored, on every machine: git ignores case on macOS and Windows, so a file that
+    validates on Linux must also run there. The spaces around a name don't count. The
+    check reads each `{{ }}` or `{% %}` as text without a `/`, and a sub-workflow's
     `{{ start.<input> }}` as the value that `with` gives. So `fix/{{ start.task }}` and
     `review/{{ start.task }}` are apart, and so are `fm/{{ start.task }}/author` and
     `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.

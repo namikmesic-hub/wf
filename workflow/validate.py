@@ -893,9 +893,9 @@ class _Branch:
 
 
 def _folded(pattern) -> tuple:
-    """A templates.pattern() as git compares branch names: each run of fixed text stripped, since
-    the name is stripped and can't hold whitespace, and casefolded, since git ignores case on
-    macOS and Windows."""
+    """A templates.pattern() ready to compare: each run of fixed text stripped, since the name is
+    stripped and can't hold whitespace, and casefolded on every machine, since git ignores case
+    on macOS and Windows and a workflow file that validates here may run there."""
     found, text = [], ""
     for token in (*pattern, None):
         if isinstance(token, str):

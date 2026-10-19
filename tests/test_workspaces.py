@@ -266,7 +266,7 @@ def test_branch_names_the_worktrees_branch(repo, monkeypatch):
     use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "x"}))
     write(NAMED + "\nother: {needs: [start], command: 'true', workspace: new}", inputs=BRANCH_INPUT,
           end='{branch: "{{ workspace.impl.branch }}", other: "{{ workspace.other.branch }}"}')
-    assert cli.main(["run", "flow.yaml", "branch=fm/task"]) == 0
+    assert cli.main(["run", "flow.yaml", "branch= fm/task "]) == 0  # the name is stripped
     assert output() == {"branch": "fm/task", "other": f"wf/{only_run().name}/other"}  # without `branch`: as before
     assert git("show", "fm/task:new.txt") == "made"
     branches = json.loads((only_run() / "branches.json").read_text())
@@ -327,6 +327,7 @@ def test_a_resumed_run_keeps_the_branch_it_made(repo, monkeypatch, tmp_path):
           end='{branch: "{{ workspace.impl.branch }}"}')
     assert cli.main(["run", "flow.yaml", "branch=fm/task"]) == 1
     shutil.rmtree(tmp_path / "home" / "worktrees")  # the branch outlives its worktree
+    git("worktree", "prune")  # and git's record of it: only branches.json says the run made the branch
     use(monkeypatch, edits({"good.txt": "ok\n"}, {"summary": "done"}))
     assert cli.main(["resume", only_run().name]) == 0
     assert output() == {"branch": "fm/task"}
@@ -374,6 +375,11 @@ def test_each_item_names_its_own_branch_and_two_items_cannot_share_one(repo, mon
                workspace: new, branch: "fix/{{ item }}"}
     """) == 1
     assert "`each/0` already works on branch `fix/c` in this run" in capsys.readouterr().err
+    assert run("""
+        each: {needs: [start], for_each: '["d", "d/e"]', max_parallel: 1, command: "true", workspace: new,
+               branch: "fix/{{ item }}"}
+    """) == 1
+    assert "`each/0` works on branch `fix/d` in this run, and git can't have both `fix/d` and `fix/d/e`" in capsys.readouterr().err
 
 
 def test_an_item_keeps_its_branch_only_while_its_index_holds_the_same_item(repo, monkeypatch, capsys):

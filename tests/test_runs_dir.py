@@ -163,9 +163,9 @@ def test_the_commands_wf_prints_for_a_run_find_its_runs_folder(repo, tmp_path, m
     assert hint == f"wf resume {folder.name} --runs-dir {(tmp_path / 'runs').resolve()}"
     assert cli.main(["status", folder.name, "--json", *given]) == 0
     assert json_out(capsys)["resume"] == hint
-    monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "runs"))  # then wf finds it by itself
+    monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "runs"))  # the same, where it's typed without the setting too
     assert cli.main(["status", folder.name, "--json"]) == 0
-    assert json_out(capsys)["resume"] == f"wf resume {folder.name}"
+    assert json_out(capsys)["resume"] == hint
     monkeypatch.delenv("WF_RUNS_DIR")
     flag.touch()
     assert cli.main(shlex.split(hint)[1:]) == 0  # the printed command works as it is

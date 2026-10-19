@@ -482,7 +482,7 @@ def test_branches_git_cannot_have_side_by_side_are_refused(tmp_path):
     """).replace("defaults:\n", "defaults:\n  workspace: new\n"))
     assert_problems(report, [
         ("error", "nodes.b.branch", "`a` and `b` could name the same branch, or one under the other"),
-        ("error", "nodes.d.branch", "`c` and `d` could name the same branch"),  # git ignores case on macOS
+        ("error", "nodes.d.branch", "`c` and `d` could name the same branch"),  # on any machine: git ignores case on macOS
         ("error", "nodes.f.branch", "`e` and `f` could name the same branch"),  # an empty task renders `pick`
     ])
 
