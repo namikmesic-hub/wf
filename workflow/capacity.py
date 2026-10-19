@@ -6,7 +6,7 @@ more agent sessions at once than the machine, or an account's quota, holds.
 `max_agents` caps them all:
 
     WF_MAX_AGENTS=4                       this process, and the background drivers it starts
-    max_agents: 4   in ~/.wf/config.yaml  every wf process of the user (WF_HOME moves ~/.wf)
+    max_agents: 4   in ~/.wf/config.yaml  every wf process of the user (settings.py)
 
 The environment variable wins over the file. With neither there is no cap, and
 nothing here runs. Give every wf process the same cap; the file does that. A
@@ -36,8 +36,7 @@ import json
 import os
 from pathlib import Path
 
-import yaml
-
+from . import settings
 from .workspaces import home
 
 ENV = "WF_MAX_AGENTS"
@@ -48,35 +47,18 @@ class CapError(Exception):
     """The cap is set, but not to a whole number of 1 or more."""
 
 
-def config_file() -> Path:
-    return home() / "config.yaml"
-
-
 def slots_dir() -> Path:
     return home() / "agent-slots"
 
 
 def configured() -> int | None:
-    """The cap: WF_MAX_AGENTS, else `max_agents` in config.yaml, else None (no cap). Raises CapError."""
+    """The cap: WF_MAX_AGENTS, else `max_agents` in config.yaml, else None (no cap).
+    Raises CapError, or settings.SettingsError when config.yaml is wrong."""
     raw = os.environ.get(ENV, "").strip()
     if raw:
         return _at_least_one(int(raw) if raw.isdigit() else raw, ENV)
-    path = config_file()
-    try:
-        settings = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
-        raise CapError(f"can't read {path}: {error}") from None
-    if settings is None:  # an empty file
-        return None
-    if not isinstance(settings, dict):
-        raise CapError(f"{path} must hold settings by name, like `max_agents: 4`")
-    unknown = [str(name) for name in settings if name != "max_agents"]
-    if unknown:  # a misspelt max_agents must not quietly mean no cap
-        raise CapError(f"{path}: unknown setting {', '.join(unknown)} (the one setting is max_agents)")
     value = settings.get("max_agents")
-    return None if value is None else _at_least_one(value, f"max_agents in {path}")
+    return None if value is None else _at_least_one(value, f"max_agents in {settings.path()}")
 
 
 def _at_least_one(value: object, where: str) -> int:

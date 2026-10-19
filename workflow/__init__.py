@@ -17,6 +17,7 @@ Then the runner, built on LangGraph:
                    the bookkeeping the schedule node does with it
     context.py     what nodes get that isn't saved (LangGraph's runtime context)
     limits.py      the run's limits: reaching one pauses it, `wf resume --limit` continues it
+    settings.py    wf's own settings for the user, in ~/.wf/config.yaml
     capacity.py    the cap on live agent sessions across every run on the machine (WF_MAX_AGENTS)
     runs.py        the run folder on disk
     workspaces.py  git worktrees for `workspace: new`, and the runner's commits

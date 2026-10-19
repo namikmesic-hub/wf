@@ -596,7 +596,8 @@ max_agents: 4
 
 The `WF_MAX_AGENTS` environment variable sets the same cap, and wins over the file. With
 neither, there is no cap. The cap is a whole number of 1 or more; `wf run` and `wf resume`
-refuse to start with anything else.
+refuse to start with anything else. `config.yaml` holds wf's own settings, and a name in it
+that wf doesn't know stops them too, so a misspelt `max_agents` can't quietly mean no cap.
 
 - Every agent attempt takes a slot before its session opens, and gives it back when the
   attempt ends. A retry or a fallback takes a slot again. Command, human and workflow nodes
@@ -756,6 +757,7 @@ workflow/
     claude_code.py  Claude Agent SDK
     codex.py        codex app-server, JSON-RPC over stdio
     cursor.py       cursor-sdk
+  settings.py       ~/.wf/config.yaml: wf's own settings, and the names it knows
   capacity.py       the agent slots: one cap on live agent sessions across all runs
   nodes.py          runs one attempt of each node kind, including the reminder loop
   scheduler.py      the rules in "When a node runs": pending, settled, routes, end

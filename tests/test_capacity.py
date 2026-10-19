@@ -17,7 +17,7 @@ from textwrap import dedent
 
 import pytest
 
-from workflow import capacity, cli, harnesses, operate, runner
+from workflow import capacity, cli, harnesses, operate, runner, settings
 from workflow.runs import Run
 from fakes import Fake, ends, submit
 
@@ -135,11 +135,19 @@ def test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home(monkeypatch, 
     assert capacity.configured() == 3
 
 
+def test_another_setting_in_the_config_leaves_the_cap_alone(monkeypatch, wf_home):
+    monkeypatch.setattr(settings, "KNOWN", ("max_agents", "tools"))
+    (wf_home / "config.yaml").write_text("tools: [git]\n")
+    assert capacity.configured() is None
+    (wf_home / "config.yaml").write_text("tools: [git]\nmax_agents: 2\n")
+    assert capacity.configured() == 2
+
+
 @pytest.mark.parametrize("env, config, problem", [
     ("0", None, "WF_MAX_AGENTS must be a whole number of 1 or more, not `0`"),
     ("four", None, "not `four`"),
     (None, "max_agents: 2.5\n", "must be a whole number of 1 or more, not `2.5`"),
-    (None, "max_agent: 4\n", "unknown setting max_agent"),
+    (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents)"),
     (None, "- 4\n", "must hold settings by name"),
 ])
 def test_a_bad_cap_stops_wf_run_before_the_run_exists(repo, monkeypatch, capsys, wf_home, env, config, problem):

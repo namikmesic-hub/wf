@@ -41,7 +41,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, runs, schemas, spec, validate, workspaces
+from . import ask, capacity, dryrun, graph, limits, operate, runs, schemas, settings, spec, validate, workspaces
 from .context import RunContext
 
 RECURSION_LIMIT = 10_000  # LangGraph's cap on steps; each pass of a node takes two
@@ -67,7 +67,7 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         return 1
     try:
         max_agents = capacity.configured()  # a bad cap stops a run before it exists, a detached one too
-    except capacity.CapError as error:
+    except (capacity.CapError, settings.SettingsError) as error:
         print(f"wf run: {error}", file=sys.stderr)
         return 1
     report = validate.check(path)
@@ -134,7 +134,8 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
         answers = json.loads(Path(answers_file).read_text(encoding="utf-8")) if answers_file else None
         overrides = limits.parse(limit_pairs or [])
         max_agents = capacity.configured()
-    except (OSError, spec.SpecError, ValueError, limits.LimitError, capacity.CapError) as error:  # ValueError: not JSON, or not UTF-8
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, capacity.CapError,
+            settings.SettingsError) as error:  # ValueError: not JSON, or not UTF-8
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:
