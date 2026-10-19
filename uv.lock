@@ -344,22 +344,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cursor-sdk"
-version = "1.0.38"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/25/d3e9af2d84eefae854bfa8ace9a5768f53340babacf986f0f2e3776baab4/cursor_sdk-1.0.38.tar.gz", hash = "sha256:14eb186f811747758236e98b46e2032f30f1efb248e9ad2e54473da658169dcc", size = 1176, upload-time = "2026-10-16T22:06:14.102Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/08/2f/7c171fff7f309375ea313cbcd6a12c45c4383a357e501621069035af288c/cursor_sdk-1.0.38-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c059526e356cda677f74c1ec12a29cf615b7454523967d81f7c9472258ccd2b4", size = 49960585, upload-time = "2026-10-16T22:05:59.286Z" },
-    { url = "https://files.pythonhosted.org/packages/f2/05/6987277bdb5aa562d652c0f07b74c658c434b36f98a8ca7e2e98451bb11d/cursor_sdk-1.0.38-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:a2f5e503a66badb20f382080ecd3e4c3bda3e0837cccaed22878cc6f1beb008a", size = 51468068, upload-time = "2026-10-16T22:06:02.291Z" },
-    { url = "https://files.pythonhosted.org/packages/32/78/bc22665e888a1d7001d0a49ff59928e171d809e60c25cb6830e82bce0238/cursor_sdk-1.0.38-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:79a38010a1a38384e34d2cf2cda101430a09206670915664a92f59849413ff78", size = 59350176, upload-time = "2026-10-16T22:06:05.244Z" },
-    { url = "https://files.pythonhosted.org/packages/dc/2c/a2090a49982d19b33d819e2501d12183c878b09198b9c43930f6b3a557b8/cursor_sdk-1.0.38-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:e79f76211e5b5384564c2c17a959ad643d5fe3d4b3dffa8e13483ab20ad0a664", size = 59962810, upload-time = "2026-10-16T22:06:08.743Z" },
-    { url = "https://files.pythonhosted.org/packages/00/7c/a18b1f4bc362b026b2da2660ddeaa8fa22d47ee77773eb39d5971d0b40ff/cursor_sdk-1.0.38-py3-none-win_amd64.whl", hash = "sha256:001e4eeacc9d4abba8c631280fcb854f3a45c5c3791ebd76a81fd251252cf072", size = 46050291, upload-time = "2026-10-16T22:06:12.144Z" },
-]
-
-[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1461,11 +1445,6 @@ dependencies = [
     { name = "pyyaml" },
 ]
 
-[package.optional-dependencies]
-cursor = [
-    { name = "cursor-sdk" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -1474,7 +1453,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.168" },
-    { name = "cursor-sdk", marker = "extra == 'cursor'", specifier = ">=1.0.38" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "langgraph", specifier = ">=1.2.16" },
@@ -1482,7 +1460,6 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.14" },
     { name = "pyyaml", specifier = ">=6.0.3" },
 ]
-provides-extras = ["cursor"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.1.1" }]

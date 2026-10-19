@@ -646,7 +646,28 @@ def test_cost_limits_with_harnesses_that_do_not_report_cost_warn(tmp_path):
         top="limits: {cost_usd: 5}\n",
         end='spent: {type: number, value: "{{ run.cost_usd }}"}',
     ))
-    assert_problems(report, [("warning", "limits.cost_usd", "codex")])
+    assert_problems(report, [("warning", "limits.cost_usd", "codex doesn't report cost in dollars")])
+
+
+def test_cursor_reports_neither_cost_nor_tokens_and_takes_no_effort(tmp_path):
+    report = check(tmp_path, flow(
+        "a: {needs: [start], instruction: x, harness: cursor, model: gpt-5.6-sol-max-fast, effort: high}",
+        top="limits: {cost_usd: 5, tokens: 100000}\n",
+        end='used: {type: integer, value: "{{ run.tokens }}"}',
+    ))
+    assert_problems(report, [
+        ("warning", "nodes.a", "cursor doesn't use `effort`: a Cursor model id carries its own"),
+        ("warning", "limits.cost_usd", "cursor doesn't report cost in dollars"),
+        ("warning", "limits.tokens", "cursor doesn't report tokens"),
+    ])
+
+
+def test_a_template_reading_run_tokens_warns_when_cursor_runs(tmp_path):
+    report = check(tmp_path, flow(
+        "a: {needs: [start], instruction: x, harness: [claude-code, cursor], model: {claude-code: opus, cursor: composer-2.5}}",
+        end='used: {type: integer, value: "{{ run.tokens }}"}',
+    ))
+    assert_problems(report, [("warning", "end.output.used.value", "cursor doesn't report tokens")])
 
 
 # ---------- malformed files are reported, never crash ----------

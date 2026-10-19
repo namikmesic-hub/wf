@@ -10,10 +10,11 @@ version: 1                     # always 1
 name: my-flow                  # lowercase letters, digits, -; used in run ids and branch names
 description: One line.
 defaults:                      # every node inherits these; a node's own value wins
-  harness: claude-code         # claude-code | codex, or a list to fall back through
+  harness: claude-code         # claude-code | codex | cursor, or a list to fall back through
   harnesses:
     claude-code: {model: claude-opus-5-5, effort: high}
     codex: {}                  # Codex: the default model from its model list
+    cursor: {model: gpt-5.6-sol-high}   # Cursor: a model is required, and its id carries the effort
   access: read-only            # read-only | edit | full
   timeout: 60m
   retry: 1
@@ -71,11 +72,11 @@ exit fails the node; false: route on `exit_code`).
 access, which it has none of otherwise: a Codex step that installs packages
 (`uv lock`, `npm install`) needs `web: true`. Dry runs can't catch a missing one.
 
-Access: `read-only` reads and searches but changes nothing: on Claude Code it
-gets a read-only `git` tool (diff, log, show, blame, status); on Codex it runs
-commands, git included, in Codex's read-only sandbox. `edit` edits files and
-runs commands in its workspace; `full` has no limits (git merge, rebase, pushes
-need it).
+Access: `read-only` reads and searches but changes nothing: on Claude Code and
+Cursor it gets a read-only `git` tool (diff, log, show, blame, status) and no
+shell; on Codex it runs commands, git included, in Codex's read-only sandbox.
+`edit` edits files and runs commands in its workspace; `full` has no limits (git
+merge, rebase, pushes need it).
 
 A human node pauses the run. At a terminal wf asks the questions; otherwise the
 run waits (`wf status <run-id>` shows them) until `wf answer <run-id>
@@ -200,7 +201,8 @@ budget (`NAME=none` removes a limit; the new limit holds for the rest of the
 run). It carries on where it stopped, sub-workflows included, and then writes
 its end output as usual. `wf run <file> --limit ...` starts with a different
 limit. Codex reports no dollar cost, so `cost_usd` counts Claude Code only: cap
-Codex with `tokens` (validate warns about this).
+Codex with `tokens`. Cursor reports neither, so only `duration` caps it
+(validate warns about both).
 
 One cap also holds on the agent sessions live at once, across all runs that use
 the same `~/.wf` (spec: "Agent slots"):

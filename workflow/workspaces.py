@@ -16,8 +16,7 @@ not clash with a branch that exists: git can't have fix/a beside fix/a/b, or
 FIX/a beside fix/a where it ignores case. A node keeps its worktree across
 passes, so a loop keeps working on one branch.
 
-The runner commits, not the agent: Codex's sandbox (and probably Cursor's)
-keeps .git read-only. After an `edit` or `full` agent finishes in a worktree
+The runner commits, not the agent: Codex's sandbox keeps .git read-only. After an `edit` or `full` agent finishes in a worktree
 the runner made, anything left uncommitted becomes the commit
 "wf: <node> (<run-id>)". Before a retry, the worktree goes back to the commit
 the job started from, so a retry is the same instruction on the same commit.

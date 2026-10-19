@@ -25,7 +25,9 @@ against `retry`. What an attempt spends is counted even when it fails; for a
 turn cut off by the timeout, that's what the harness reported before it.
 With `session: continue`, a pass forks the session the node's last pass ended
 in (Claude Code's fork_session, Codex's thread/fork), so that session is never
-changed and a retry forks from the same point again. `session.continued` is
+changed and a retry forks from the same point again. Cursor can't fork: it
+loads the session itself, and refuses to load it again after a continued
+attempt failed, so the retry starts fresh. `session.continued` is
 true while its instruction renders, and NEW_RESULT asks for a fresh
 submit_result call. It starts fresh instead, with an event saying why, when
 the harness or model differs from the last pass, the fork fails, or the two

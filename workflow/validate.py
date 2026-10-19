@@ -105,6 +105,7 @@ class _Checker:
         self.subs: dict[str, _Result] = {}
         self.harnesses: set[str] = set()
         self.cost_refs: list[str] = []  # where templates read run.cost_usd
+        self.token_refs: list[str] = []  # where templates read run.tokens
         self.end_fields: dict[str, dict] = {}
         self.branches: list[_Branch] = []
         self._warned: set = set()
@@ -134,7 +135,7 @@ class _Checker:
         self._branches()
         self._end()
         self._concurrent_edits()
-        self._cost()
+        self._usage()
         end_schema = {
             "type": "object", "properties": self.end_fields,
             "required": list(self.end_fields), "additionalProperties": False,
@@ -378,6 +379,8 @@ class _Checker:
             return
         if name == "run" and ref.path[:1] == ("cost_usd",):
             self.cost_refs.append(where)
+        if name == "run" and ref.path[:1] == ("tokens",):
+            self.token_refs.append(where)
         self._might_not_have_run(where, ref, node_id, context)
 
     def _might_not_have_run(self, where: str, ref: Ref, node_id: str | None, context: str) -> None:
@@ -551,6 +554,8 @@ class _Checker:
             self.error(where, f"unknown harness `{harness}` (choose from {choices})")
         if "cursor" in possible and self.wf.harness_setting(node_id, "cursor", "model") is None:
             self.error(at, "this node can run on cursor, which needs a `model` (set `model` here, or defaults.harnesses.cursor.model)")
+        if "cursor" in possible and self.wf.harness_setting(node_id, "cursor", "effort") is not None:
+            self.warn(at, "cursor doesn't use `effort`: a Cursor model id carries its own, like gpt-5.6-sol-max-fast")
         self.harnesses |= possible
         if not possible and isinstance(harness, str) and ("{{" in harness or "{%" in harness):
             possible = self._named_by(harness, node_id)
@@ -766,19 +771,18 @@ class _Checker:
         """Is there a path from one to the other, so they can't overlap?"""
         return b in self.topo.reachable(self.topo.successors.get(a, ())) or a in self.topo.reachable(self.topo.successors.get(b, ()))
 
-    def _cost(self) -> None:
-        silent = sorted(self.harnesses & {"codex", "cursor"})
-        if not silent:
-            return
-        if self.wf.limits.cost_usd is not None:
-            where = "limits.cost_usd"
-        elif self.cost_refs:
-            where = self.cost_refs[0]
-        else:
-            return
-        verb = "doesn't" if len(silent) == 1 else "don't"
-        self.warn(where, f"{' and '.join(silent)} {verb} report cost in dollars, so spending there isn't counted; "
-                         "limits.tokens works for every harness")
+    def _usage(self) -> None:
+        """Warn where a limit or a template counts what a harness here doesn't report."""
+        silent = sorted(self.harnesses & {"codex", "cursor"})  # no dollars
+        where = "limits.cost_usd" if self.wf.limits.cost_usd is not None else next(iter(self.cost_refs), None)
+        if silent and where:
+            verb = "doesn't" if len(silent) == 1 else "don't"
+            hint = "limits.tokens counts Codex, " if "codex" in silent else ""
+            self.warn(where, f"{' and '.join(silent)} {verb} report cost in dollars, so spending there isn't counted; "
+                             f"{hint}limits.duration caps every harness")
+        where = "limits.tokens" if self.wf.limits.tokens is not None else next(iter(self.token_refs), None)
+        if "cursor" in self.harnesses and where:
+            self.warn(where, "cursor doesn't report tokens, so its spending isn't counted; limits.duration caps every harness")
 
 
 class _Order:

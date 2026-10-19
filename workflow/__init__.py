@@ -23,7 +23,8 @@ Then the runner, built on LangGraph:
     workspaces.py  git worktrees for `workspace: new`, and the runner's commits
     output_tool.py submit_result: how an agent hands back its typed result
     harnesses/     the coding-agent adapters: base.py, then claude_code.py,
-                   codex.py, and git_tool.py (read-only git without a shell)
+                   codex.py, cursor.py (with mcp_http.py, which serves it
+                   submit_result), and git_tool.py (read-only git without a shell)
     nodes.py       running one job: agents, commands, human questions via interrupt()
     graph.py       the LangGraph wiring: schedule -> Send -> execute -> schedule
     ask.py         questions at the terminal

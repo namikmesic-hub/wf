@@ -21,6 +21,8 @@ Versions checked:
      as a *dynamic tool*. The server sends each call back to the runner as an `item/tool/call`
      request.
    - **Cursor:** the `cursor-sdk` Python package, with `submit_result` as a `custom_tools` entry.
+     Superseded on 2026-10-19: wf drives `cursor-agent acp` on the local login instead, see
+     [section 6](#6-cursor-through-acp).
 2. **Keep `session: fresh` as the default.** `session: continue` stays opt-in. It forks the
    previous pass's session where the harness can, sends only the new feedback, and drops
    back to fresh when it can't continue cleanly.
@@ -194,6 +196,9 @@ Why this shape:
 
 ### Cursor adapter
 
+Superseded on 2026-10-19 by [section 6](#6-cursor-through-acp): this design needs a dashboard
+API key, and `cursor-agent acp` doesn't.
+
 - **Setup.** `pip install cursor-sdk`. The wheel is about 50 MB and bundles Node. It needs an
   API key from the Cursor dashboard [V]. Read `CURSOR_API_KEY` once, pass it as `api_key=`,
   and remove it from the environment before starting the bridge. Agent shell commands inherit
@@ -313,7 +318,7 @@ All seven were applied to `docs/workflow-spec.md` on 2026-10-18.
 
 ## 5. To check before or while building
 
-- **Cursor** (needs an API key):
+- **Cursor** (needs an API key; for the ACP adapter, see [section 6](#6-cursor-through-acp)):
   - Does `setting_sources=["project"]` load `AGENTS.md`, `.cursor/rules` and `CLAUDE.md`?
   - Can a sandboxed `edit` agent run git in a worktree?
   - How does a usage limit actually show up?
@@ -325,3 +330,38 @@ All seven were applied to `docs/workflow-spec.md` on 2026-10-18.
   - How many threads can one app-server run at once?
   - Run `generate-json-schema --experimental` in CI to catch protocol drift.
 - **Claude:** does an explicit `model` on a resumed session override the recorded one?
+
+## 6. Cursor through ACP
+
+Checked 2026-10-19 with `cursor-agent` 2026.10.14-0f9edde, for `workflow/harnesses/cursor.py`.
+
+`cursor-agent acp` speaks the Agent Client Protocol, JSON-RPC 2.0 over stdio, on the local
+Cursor login. It needs no API key and no `cursor-sdk` [V live].
+
+- **Login.** `initialize` offers one auth method, `cursor_login`, and says the agent takes MCP
+  servers over `http` and `sse` and can load sessions. `authenticate` with `cursor_login`
+  returns at once when the CLI is logged in. When it isn't, it starts a browser login, so the
+  adapter runs `cursor-agent --list-models` first and sets `NO_OPEN_BROWSER` [V].
+- **One model per process.** Choosing a model in one session switches every session in the
+  process, and `session/set_config_option` only takes the variants it lists. `--model <id>` at
+  start takes any id from `--list-models`, effort included: `gemini-4-argon-high` gave
+  `reasoning_effort: high` [V live]. So the adapter starts one process per session.
+- **The model is saved.** `--model` rewrote `selectedModel` in `~/.cursor/cli-config.json`
+  during this check. `CURSOR_CONFIG_DIR` moves that file, the saved sessions, MCP servers and
+  hooks to another folder. The login is kept outside it and still works [V live].
+- **`submit_result` over MCP.** An HTTP MCP server named in `session/new` loads without
+  approval. Each call comes first as `session/request_permission` (kind `other`), then as
+  `tools/call` to the server [V live].
+- **Permissions.** With `approvalMode: allowlist` and an empty allowlist, every shell command
+  asks (kind `execute`), and so do MCP tools (`other`) and web search and fetch (`search`,
+  `fetch`), except a fetch that Cursor's server marks as needing no approval. Writes inside
+  the workspace don't ask, and a `Write(**)` deny rule makes them fail. Ask mode still offers
+  the shell, which asks [V live].
+- **No usage.** `session/prompt` returns only a `stopReason`, and no update carries tokens or
+  cost [V].
+- **Errors are text.** A failed request ends the turn with `end_turn` and a last message
+  `Error: ...`, or a notice such as `Upgrade your plan to continue` for a plan, payment or
+  sign-in problem [V].
+- **Continue.** Sessions are saved in the config folder. `session/load` replays the
+  conversation as `session/update` notifications, then answers. There's no fork [V].
+- Starting a process and a session takes 4 to 6 seconds [V live].

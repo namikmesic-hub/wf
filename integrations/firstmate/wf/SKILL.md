@@ -10,7 +10,7 @@ user-invocable: false
 
 # wf
 
-wf runs a workflow file: a graph of steps where agents (Claude Code, Codex) do
+wf runs a workflow file: a graph of steps where agents (Claude Code, Codex, Cursor) do
 the work in their own git worktrees, commands test it, and people answer
 questions. It is deterministic about order, retries, loops and limits; you
 supervise it, you don't drive each step.
