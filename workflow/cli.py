@@ -82,8 +82,8 @@ def main(argv: list[str] | None = None) -> int:
     graph.set_defaults(handler=_graph)
 
     no_input = {"action": "store_true", "help": "never ask questions: pause instead (exit code 2)"}
-    runs_dir = {"type": Path, "metavar": "DIR", "help": "run folders are in DIR, a folder per repo, "
-                                                        "instead of ./.wf/runs (default: WF_RUNS_DIR)"}
+    runs_dir = {"type": _folder, "metavar": "DIR", "help": "run folders are in DIR, a folder per repo, "
+                                                           "instead of ./.wf/runs (default: WF_RUNS_DIR)"}
     run = commands.add_parser("run", help="validate, then run a workflow")
     limit_help = {"help": "a limit for this run instead of the file's: cost_usd=20, tokens=5000000, "
                           "duration=2h, or NAME=none for no limit (repeat for several)"}
@@ -156,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     discarding.add_argument("--workflow", metavar="NAME", help="every run of this workflow in this folder")
     discarding.add_argument("--dry-runs", action="store_true", help="only dry runs (with --workflow)")
     discarding.add_argument("--branches", action="store_true",
-                            help="delete their branches too, wf/<run-id>/ and any `branch` named (a dry run's always go)")
+                            help="delete their branches too: wf/<run-id>/, and the ones `branch` named while they're still "
+                                 "the run's work (a dry run's always go)")
     discarding.add_argument("--runs-dir", **runs_dir)
     discarding.set_defaults(handler=_discard)
 
@@ -177,6 +178,12 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:  # anywhere the runner doesn't handle it itself
         print("\nStopped.", file=sys.stderr)
         return runner.STOPPED
+
+
+def _folder(text: str) -> Path | None:
+    """A folder option's value: a blank one is no folder, as if the option weren't there
+    (Path("") would be the current folder)."""
+    return Path(text) if text.strip() else None
 
 
 def _init(args) -> int:
@@ -281,11 +288,11 @@ def _list(args) -> int:
 def _describe(current: dict) -> str:
     status, run_id = current.get("status"), current.get("run")
     if status == "waiting":
-        detail = f"waiting for a person: {', '.join(current.get('nodes', []))} (wf answer {run_id} <answers.json>)"
+        detail = f"waiting for a person: {', '.join(current.get('nodes', []))} ({current.get('answer')})"
     elif status == "failed":
-        detail = f"failed: {current.get('node', '?')}: {current.get('error', '')} (wf resume {run_id})"
+        detail = f"failed: {current.get('node', '?')}: {current.get('error', '')} ({current.get('resume')})"
     elif status == "stopped":
-        detail = f"stopped: {current.get('reason')} (wf resume {run_id})"
+        detail = f"stopped: {current.get('reason')} ({current.get('resume')})"
     elif status == "limit":
         detail = f"paused at a limit: {current.get('reason')} ({current.get('resume')})"
     elif status == "running" and current.get("agents_waiting"):
@@ -358,7 +365,9 @@ def _discard(args) -> int:
         except OSError as error:
             print(f"wf discard: can't delete run {run.id}: {error.strerror or error}", file=sys.stderr)
             return 1
-        note = f"; kept its branches {', '.join(kept)} (--branches deletes them)" if kept else ""
+        own = [branch for branch, why in kept.items() if why == runs.KEPT]
+        note = f"; kept its branches {', '.join(own)} (--branches deletes them)" if own else ""
+        note += "".join(f"; kept branch {branch}: {why}" for branch, why in kept.items() if why != runs.KEPT)
         print(f"Discarded run {run.id}{note}")
     return 0
 

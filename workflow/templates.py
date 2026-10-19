@@ -211,19 +211,36 @@ def constant(expression: str) -> tuple[bool, Any]:
     return True, node.set_environment(ENV).as_const()
 
 
-def fixed_text(source: str) -> str | tuple[str, str]:
-    """What a template writes whatever its variables hold: all of its text if it has no {{ }} or
-    {% %}, else the text before the first of them and after the last, as a pair."""
-    parts = []  # each piece of text, or None where something is computed
+@dataclass(frozen=True)
+class Hole:
+    """Where pattern() can't tell what a template writes: a {{ }} or a {% %}. `input` is the
+    start input when the hole is just {{ start.<input> }}, so a caller can put in what it holds."""
+
+    input: str | None = None
+
+
+def pattern(source: str) -> tuple[str | Hole, ...]:
+    """What a template writes whatever its variables hold: each character of its fixed text,
+    in order, with a Hole for each {{ }} or {% %}."""
+    found: list[str | Hole] = []
     for statement in _parse(source, expression=False).body:
-        if isinstance(statement, nodes.Output):
-            parts += [n.data if isinstance(n, nodes.TemplateData) else None for n in statement.nodes]
-        else:
-            parts.append(None)
-    if None not in parts:
-        return "".join(parts)
-    first, last = parts.index(None), len(parts) - parts[::-1].index(None)
-    return "".join(parts[:first]), "".join(parts[last:])
+        if not isinstance(statement, nodes.Output):
+            found.append(Hole())
+            continue
+        for node in statement.nodes:
+            found += node.data if isinstance(node, nodes.TemplateData) else [Hole(_start_input(node))]
+    return tuple(found)
+
+
+def _start_input(node) -> str | None:
+    """`k` for the expression start.k or start["k"], else None."""
+    if not isinstance(getattr(node, "node", None), nodes.Name) or node.node.name != "start":
+        return None
+    if isinstance(node, nodes.Getattr):
+        return node.attr
+    if isinstance(node, nodes.Getitem) and isinstance(node.arg, nodes.Const) and isinstance(node.arg.value, str):
+        return node.arg.value
+    return None
 
 
 def _parse(source: str, *, expression: bool):

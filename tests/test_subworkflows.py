@@ -13,7 +13,7 @@ from textwrap import dedent
 import pytest
 
 from fakes import Fake, edits
-from workflow import cli, harnesses, runner
+from workflow import cli, harnesses, runner, runs
 
 
 @pytest.fixture
@@ -469,4 +469,4 @@ def test_a_sub_workflow_names_its_branch_once_per_parent_item(repo, capsys):
     """)
     assert cli.main(["run", "main.yaml"]) == 0
     assert output() == {"branches": ["fix/a", "fix/b"]}
-    assert json.loads((only_run() / "branches.json").read_text()) == {"each/0/impl": "fix/a", "each/1/impl": "fix/b"}
+    assert runs.Run.at(only_run()).branches() == {"each/0/impl": "fix/a", "each/1/impl": "fix/b"}

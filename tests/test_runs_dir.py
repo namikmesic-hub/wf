@@ -5,6 +5,7 @@ folder elsewhere leaves `git status` empty.
 """
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from textwrap import dedent
@@ -151,3 +152,54 @@ def test_a_run_folder_without_a_recorded_repo_is_in_its_repo(repo, tmp_path, cap
     (folder,) = (repo / ".wf" / "runs").iterdir()
     (folder / "run.json").write_text("{}")
     assert runs.Run.at(folder).repo == repo.resolve()
+
+
+def test_the_commands_wf_prints_for_a_run_find_its_runs_folder(repo, tmp_path, monkeypatch, capsys):
+    given = ["--runs-dir", str(tmp_path / "runs")]
+    flag = tmp_path / "flag"
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={flag}", *given]) == 1
+    (folder,) = runs.runs_folder(repo, tmp_path / "runs").iterdir()
+    hint = capsys.readouterr().out.split("continue with: ")[1].strip()
+    assert hint == f"wf resume {folder.name} --runs-dir {(tmp_path / 'runs').resolve()}"
+    assert cli.main(["status", folder.name, "--json", *given]) == 0
+    assert json_out(capsys)["resume"] == hint
+    monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "runs"))  # then wf finds it by itself
+    assert cli.main(["status", folder.name, "--json"]) == 0
+    assert json_out(capsys)["resume"] == f"wf resume {folder.name}"
+    monkeypatch.delenv("WF_RUNS_DIR")
+    flag.touch()
+    assert cli.main(shlex.split(hint)[1:]) == 0  # the printed command works as it is
+    assert cli.main(["run", write(tmp_path / "ask.yaml", ASK), "branch=fm/task", *given]) == 2
+    assert f"Answer with: wf resume {runs.all_runs(repo, tmp_path / 'runs')[-1].id} --runs-dir " in capsys.readouterr().out
+    assert cli.main(["status", runs.all_runs(repo, tmp_path / "runs")[-1].id, "--json", *given]) == 0
+    assert json_out(capsys)["answer"].endswith(f"<answers.json> --runs-dir {(tmp_path / 'runs').resolve()}")
+
+
+def test_a_run_in_the_repo_while_wf_runs_dir_points_elsewhere_says_how_to_find_it(repo, tmp_path, monkeypatch):
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path / 'nope'}"]) == 1
+    (run,) = runs.all_runs(repo)
+    monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "runs"))
+    assert run.command("resume") == f"WF_RUNS_DIR= wf resume {run.id}"  # a blank WF_RUNS_DIR is no setting
+
+
+def test_a_blank_runs_folder_setting_is_no_setting(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("WF_RUNS_DIR", "  ")
+    assert runs.runs_folder(repo) == repo.resolve() / ".wf" / "runs"
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--runs-dir", ""]) == 0
+    assert len(list((repo / ".wf" / "runs").iterdir())) == 1
+    assert sorted(p.name for p in repo.iterdir()) == [".git", ".wf", "README"]
+
+
+def test_the_option_wins_over_wf_runs_dir(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "from-env"))
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--runs-dir", str(tmp_path / "given")]) == 0
+    assert len(list(runs.runs_folder(repo, tmp_path / "given").iterdir())) == 1
+    assert not (tmp_path / "from-env").exists()
+
+
+def test_a_run_folder_in_a_runs_folder_must_record_its_repo(repo, tmp_path):
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--runs-dir", str(tmp_path / "runs")]) == 0
+    (folder,) = runs.runs_folder(repo, tmp_path / "runs").iterdir()
+    (folder / "run.json").write_text("{}")
+    with pytest.raises(ValueError, match="doesn't say which repo the run is in"):
+        runs.Run.at(folder)  # three folders up is the runs folder's parent, not a repo

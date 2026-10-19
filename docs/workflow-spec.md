@@ -140,7 +140,8 @@ end:
 
 Every command that makes or finds runs (`run`, `resume`, `answer`, `wait`, `status`, `list`,
 `report`, `discard`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
-[Run folder](#run-folder)).
+[Run folder](#run-folder)). The commands that wf prints for such a run, like
+`wf resume <run-id>`, include the option.
 
 ### Setup
 
@@ -674,11 +675,19 @@ the context to fix them.
   example `wf/<run-id>/build/2/implement`.
 - `branch` names a node's branch instead, as a template: `branch: "{{ start.branch }}"`
   lets whoever starts the run choose the branch that carries the result. The name is
-  rendered on the node's first pass; later passes and `wf resume` keep that branch. It
-  can't be empty or start with `wf/`. A branch that already exists is refused, unless this
-  run made it for the same node: `branches.json` in the run folder records the branches a
-  run made.
-  `wf discard --branches`, and a dry run that succeeds, delete them as they do `wf/` ones.
+  rendered on the node's first pass; later passes and `wf resume` keep that branch. A
+  `for_each` item, also one in a sub-workflow that a `for_each` node runs, renders its
+  name again on every pass. Worktrees go by item index, so the item fails if its index
+  names another branch than before.
+- The name can't be empty, `wf`, or under `wf/`, in any case. A branch that already
+  exists is refused, unless this run made it for the same node. So is a name that git
+  can't have beside an existing branch: `fix/a` beside `fix/a/b`, or `FIX/a` beside
+  `fix/a` where git ignores case (`core.ignorecase`, as on macOS and Windows).
+  `branches.json` in the run folder records the branches a run made.
+- `wf discard --branches` deletes a named branch while a worktree of the run has it
+  checked out, or while the branch is on the commit that the run left it on. After that,
+  somebody may have made it again or worked on it, so it stays, and discard says so. A dry
+  run that succeeds deletes its named branches.
 - A node keeps the same worktree across passes, so a loop keeps working on one branch.
   Each item gets its own.
 - Worktrees live outside the repo, under `~/.wf/worktrees/`, so agents searching the repo
@@ -702,7 +711,7 @@ the context to fix them.
 .wf/runs/<run-id>/              <run-id> is like 20261018-1432-implement-k3f9
   workflow/                     copies of the workflow files as they were run
   input.json
-  branches.json                 the branches `branch` named, once there are any
+  branches.json                 the branches `branch` named, and where the run left them
   output.json                   the end output, once the run succeeds
   status.json                   running | waiting | succeeded | failed | limit
   events.jsonl                  one line per event: node started, finished, route taken, ...
@@ -722,7 +731,8 @@ the context to fix them.
   `<dir>/<repo key>/<run-id>/`. The repo key is the repo folder's name and a hash of its
   path, like `wf-3f9a1c2b4d5e`, so the runs of two repos never mix. Nothing is written in
   the repo, not even `.git/info/exclude`: only the worktrees and branches of `workspace: new`.
-  Later commands for the run need the same setting, in the same folder.
+  Later commands for the run need the same setting, in the same folder. A blank value
+  counts as no setting.
 - `wf resume` uses the copies in `workflow/`, so editing the YAML doesn't change a run
   that's already in progress.
 
@@ -750,16 +760,23 @@ Errors:
 11. Each sub-workflow exists and is valid, no workflow includes itself (directly or
     indirectly), and `with` sets every required input with a matching type.
 12. `branch` is only on nodes with `workspace: new`. On a `for_each` node it uses `item` or
-    `index`. It isn't empty, and doesn't read the node's own workspace or start with `wf/`.
-    No two nodes' `branch` can render the same name: the text before their first `{{ }}` or `{% %}`, or
-    after their last, must tell them apart, like `fix/{{ start.task }}` and
-    `review/{{ start.task }}`.
+    `index`. A `for_each` workflow node gives `item` or `index`, through `with`, to each
+    `branch` in its sub-workflow. `branch` isn't empty, isn't `wf` or under `wf/` in any
+    case, and doesn't read the node's own workspace.
+    No two `branch` fields, in a file and the sub-workflows it runs, can name the same
+    branch, or a branch and one under it (`fix/a` and `fix/a/b`). Names compare as git
+    compares them: with case ignored, and without the spaces around them. The check reads
+    each `{{ }}` or `{% %}` as text without a `/`, and a sub-workflow's
+    `{{ start.<input> }}` as the value that `with` gives. So `fix/{{ start.task }}` and
+    `review/{{ start.task }}` are apart, and so are `fm/{{ start.task }}/author` and
+    `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`
   that checks it.
 - A `command` uses node outputs without `env` or `| quote`, or uses a `start` input that a
-  parent workflow fills from node output.
+  parent workflow fills from node output, or a `workspace.<node>.branch` that a `branch`
+  names from node output.
 - An agent with `access: full` reads output from a node with `web: true`. Web pages can
   contain instructions aimed at agents, and this passes them to one with no restrictions.
 - Two `edit` nodes could run at the same time in the same workspace.

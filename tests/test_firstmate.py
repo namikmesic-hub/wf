@@ -88,7 +88,16 @@ def test_poll_follows_a_run_kept_in_a_runs_folder_outside_the_repo(repo, monkeyp
     reply = call(monkeypatch, capsys, "invoke", invoke("source.poll", source_id="ask-run", config_ref=f"wf-run:{folder}"))
     state = json.loads(reply["result"]["output"])
     assert (state["status"], state["dir"], state["questions"][0]["node"]) == ("waiting", str(folder), "approve")
+    assert state["answer"] == f"wf answer {folder.name} <answers.json> --runs-dir {folder.parent.parent}"
     assert runs.Run.at(folder).repo == repo.resolve()
+
+
+def test_poll_refuses_a_runs_folder_run_that_does_not_record_its_repo(repo, monkeypatch, capsys, tmp_path_factory):
+    folder = waiting_run(capsys, tmp_path_factory.mktemp("runs"))
+    (folder / "run.json").write_text("{}")
+    reply = call(monkeypatch, capsys, "invoke", invoke("source.poll", source_id="ask-run", config_ref=f"wf-run:{folder}"))
+    assert (reply["ok"], reply["error"]["code"]) == (False, "unavailable")
+    assert "doesn't say which repo the run is in" in reply["error"]["diagnostic"]
 
 
 @pytest.mark.parametrize("status, kind, terminal", [

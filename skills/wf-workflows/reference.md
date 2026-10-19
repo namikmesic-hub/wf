@@ -152,11 +152,29 @@ sub-workflow, its node's workspace), `new` (a git worktree on branch
 
 `branch` names a `new` worktree's branch instead, as a template:
 `branch: "{{ start.branch }}"` lets the caller pick the branch that carries the
-result. It's named on the node's first pass and kept after that. An empty name,
-and a branch that exists already and that the run didn't make, are refused. On a `for_each` node it
-must use `item` or `index`, and no two nodes may be able to render the same name:
-give it to the one node that makes the deliverable, and run the others in its
-workspace (`workspace: <that node>`).
+result. Give it to the one node that makes the deliverable, and run the others
+in its workspace (`workspace: <that node>`). Each rule below names the test that
+fails when the code stops doing what the row says.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| A `workspace: new` node has `branch` | Its worktree's branch is the rendered name, stripped, instead of `wf/<run-id>/...` | `workflow/nodes.py:155` | `tests/test_workspaces.py::test_branch_names_the_worktrees_branch` |
+| `branch` is on a node whose workspace isn't `new` | `wf validate` error | `workflow/validate.py:612` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
+| A later pass of the node, or `wf resume` | The name of the first pass stays | `workflow/nodes.py:153` | `tests/test_workspaces.py::test_a_loop_keeps_the_branch_its_first_pass_named` |
+| A `for_each` item, also in a sub-workflow that a `for_each` node runs | The name renders on every pass; another name at the same index fails the item | `workflow/nodes.py:174` | `tests/test_workspaces.py::test_an_item_keeps_its_branch_only_while_its_index_holds_the_same_item` |
+| The name is empty, `wf`, under `wf/` in any case, or not a git branch name | The node fails | `workflow/workspaces.py:96` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| The fixed text is empty, `wf`, or starts with `wf/` in any case | `wf validate` error | `workflow/validate.py:627` | `tests/test_validate.py::test_branch_cannot_be_wf_or_under_it_in_any_case` |
+| The branch exists, and this run didn't make it for this node | The node fails | `workflow/nodes.py:188` | `tests/test_workspaces.py::test_a_branch_that_already_exists_is_refused` |
+| git can't have the name beside a branch that exists: `fix/a` and `fix/a/b`, or `FIX/a` and `fix/a` with `core.ignorecase` | The node fails | `workflow/nodes.py:186` | `tests/test_workspaces.py::test_a_branch_git_cannot_have_beside_an_existing_one_is_refused` |
+| Another node or item of the run has that name, or one that git can't have beside it | The node fails | `workflow/nodes.py:181` | `tests/test_workspaces.py::test_each_item_names_its_own_branch_and_two_items_cannot_share_one` |
+| Two `branch` fields, in a file or the sub-workflows it runs, could name the same branch or one under the other | `wf validate` error | `workflow/validate.py:633` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused` |
+| A sub-workflow's `branch` reads `{{ start.<input> }}` | `wf validate` compares it with the value that `with` gives | `workflow/validate.py:651` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
+| A `for_each` node's `branch` doesn't use `item` or `index` | `wf validate` error | `workflow/validate.py:619` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
+| A `for_each` workflow node doesn't give `item` or `index` to a `branch` in its sub-workflow | `wf validate` error | `workflow/validate.py:665` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
+| The run made the branch but stopped before it recorded it | The next pass records it and goes on | `workflow/nodes.py:177` | `tests/test_workspaces.py::test_a_run_that_stopped_before_recording_its_branch_takes_it_up_again` |
+| `wf discard --branches` | Deletes a named branch only while a worktree of the run has it, or while it's on the commit that the run left it on | `workflow/runs.py:348` | `tests/test_workspaces.py::test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work` |
+| A dry run succeeds | Its named branches are deleted | `workflow/runner.py:391` | `tests/test_workspaces.py::test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them` |
+| A `command` writes `workspace.<node>.branch` unquoted, and that node's `branch` reads node output | `wf validate` warning | `workflow/validate.py:463` | `tests/test_validate.py::test_a_branch_named_from_agent_output_is_untrusted_in_a_command` |
 
 A `new` worktree has only what's committed: an uncommitted script or fixture a
 step needs isn't there (`wf run` lists such files when it starts). Worktrees and
@@ -244,4 +262,7 @@ NAME=VALUE]`, `resume [--limit NAME=VALUE]`, `answer`, `wait`, `status`, `list` 
 [--dry-runs]]`. Exit codes: 0 succeeded, 1 failed or limit, 2 waiting for a
 person, 3 (`wf wait`) nothing new, 130 Ctrl-C. The commands that make or find
 runs take `--runs-dir DIR` (or `WF_RUNS_DIR`): run folders then go to
-`DIR/<repo key>/` instead of `.wf/runs/`, and nothing is written in the repo.
+`DIR/<repo key>/` instead of `.wf/runs/`. Then the repo's working tree and
+`.git/info/exclude` stay as they were: only `workspace: new` adds branches and
+worktree records under `.git`. A blank value counts as no setting, and the
+commands wf prints for the run include `--runs-dir`.

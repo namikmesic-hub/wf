@@ -11,8 +11,10 @@ Worktrees live under ~/.wf/worktrees/<run-id>/ (set WF_HOME to move ~/.wf),
 outside the repo, so an agent searching the repo doesn't find copies of it.
 Their branches are wf/<run-id>/<node>, or wf/<run-id>/<node>/<item index>
 for the items of a for_each node, unless the node's `branch` names one
-(nodes.py checks that name, and records it in the run folder). A node keeps
-its worktree across passes, so a loop keeps working on one branch.
+(nodes.py checks that name, and records it in the run folder). A name must
+not clash with a branch that exists: git can't have fix/a beside fix/a/b, or
+FIX/a beside fix/a where it ignores case. A node keeps its worktree across
+passes, so a loop keeps working on one branch.
 
 The runner commits, not the agent: Codex's sandbox (and probably Cursor's)
 keeps .git read-only. After an `edit` or `full` agent finishes in a worktree
@@ -88,18 +90,59 @@ def worktree(repo: str | Path, run_id: str, parts: list[str], base: str, branch:
 
 
 def branch_exists(repo: str | Path, branch: str) -> bool:
-    return bool(_git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False))
+    return tip(repo, branch) is not None
 
 
 def branch_problem(repo: str | Path, branch: str) -> str | None:
     """Why `branch` can't be a node's branch name, or None if it can."""
     if not branch:  # before git: check-ref-format's empty output would look like a match
         return "the name is empty"
-    if branch.startswith("wf/"):
-        return "wf/ is where wf names branches itself (wf/<run-id>/...)"
+    if clash(branch, "wf", fold=True):  # in any case: where git ignores case, WF/x is in wf/
+        return "wf and wf/... are where wf names branches itself (wf/<run-id>/...)"
     if _git(repo, "check-ref-format", "--branch", branch, check=False) != branch:  # @{-1} would print another name
         return "git doesn't allow it as a branch name"
     return None
+
+
+def clash(a: str, b: str, fold: bool) -> bool:
+    """Can't git have both branches? The same name (in any case, with `fold`), or one under
+    the other, like fix/a and fix/a/b: the ref fix/a can't also be a folder."""
+    if fold:
+        a, b = a.casefold(), b.casefold()
+    return a == b or a.startswith(f"{b}/") or b.startswith(f"{a}/")
+
+
+def ignores_case(repo: str | Path) -> bool:
+    """Does git take FIX/a and fix/a for one branch here? It does with core.ignorecase (git sets
+    it on macOS and Windows), because a branch can be a file named after it."""
+    return _git(repo, "config", "--type=bool", "core.ignorecase", check=False) == "true"
+
+
+def clashing_branch(repo: str | Path, branch: str) -> str | None:
+    """A branch that exists and that git can't have beside `branch` (see clash), if any."""
+    fold = ignores_case(repo)
+    for ref in _git(repo, "for-each-ref", "--format=%(refname)", "refs/heads/", check=False).splitlines():
+        if clash(name := ref.removeprefix("refs/heads/"), branch, fold):
+            return name
+    return None
+
+
+def run_worktrees(repo: str | Path, run_id: str) -> dict[str, tuple[str | None, str]]:
+    """A run's worktrees, by node path (build/2/implement): the branch each has checked out
+    (None if none) and its commit."""
+    folder, found = (root() / run_id).resolve(), {}
+    for block in _git(repo, "worktree", "list", "--porcelain", check=False).split("\n\n"):
+        entry = dict(line.partition(" ")[::2] for line in block.splitlines())
+        path = Path(entry.get("worktree") or "/").resolve()
+        if path.is_relative_to(folder) and path != folder:
+            branch = entry.get("branch", "").removeprefix("refs/heads/") or None
+            found[path.relative_to(folder).as_posix()] = (branch, entry.get("HEAD", ""))
+    return found
+
+
+def tip(repo: str | Path, branch: str) -> str | None:
+    """The commit a branch is on, or None if there's no such branch."""
+    return _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False) or None
 
 
 def head(path: str | Path) -> str:

@@ -64,11 +64,11 @@ def state(run: Run) -> dict:
         except (OSError, ValueError):  # damaged: the status still matters, and wf list goes on
             pass
     if status == "waiting":
-        current["answer"] = f"wf answer {run.id} <answers.json>"
+        current["answer"] = run.command("answer", "<answers.json>")
     if status in ("failed", "stopped"):
-        current["resume"] = f"wf resume {run.id}"
+        current["resume"] = run.command("resume")
     if status == "limit":  # paused: a bigger limit continues it
-        current["resume"] = limits.hint(run.id, current.get("limit"))
+        current["resume"] = run.command("resume", limits.hint(current.get("limit")))
     current["dir"] = str(run.dir)
     info = run.info()  # read once: wait() calls this five times a second
     current["workflow"] = info.get("workflow")
