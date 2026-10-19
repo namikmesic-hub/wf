@@ -4,14 +4,17 @@ Worktrees go under WF_HOME, which each test points at its own folder.
 """
 
 import json
+import os
+import shutil
 import subprocess
+import time
 from pathlib import Path
 from textwrap import dedent, indent
 
 import pytest
 
 from fakes import Fake, edits, submit, talk
-from workflow import cli, harnesses, runner
+from workflow import cli, harnesses, runner, workspaces
 from workflow.output_tool import FINISH
 
 
@@ -191,3 +194,62 @@ def test_a_retry_also_removes_a_git_repo_the_failed_attempt_made(repo, monkeypat
 
     use(monkeypatch, clone, talk(), talk(), edits({"good.txt": "ok\n"}, {"summary": "done"}, check=clean))
     assert run("impl: {needs: [start], instruction: work, access: edit, workspace: new}") == 0
+
+
+IMPL = "impl: {needs: [start], instruction: work, access: edit, workspace: new}"
+
+
+def test_the_runners_commit_message_has_no_trailer_even_when_a_hook_would_add_one(repo, monkeypatch):
+    hook = repo / ".git" / "hooks" / "prepare-commit-msg"  # git commit --no-verify still runs this one
+    hook.write_text('#!/bin/sh\necho "Co-authored-by: An Agent <agent@example.com>" >> "$1"\n')
+    hook.chmod(0o755)
+    use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run(IMPL, end='{branch: "{{ workspace.impl.branch }}"}') == 0
+    assert git("log", "-1", "--format=%B", output()["branch"]) == f"wf: impl ({only_run().name})"
+
+
+def sign_with(key: Path) -> None:
+    """A git config that signs every commit with an ssh key."""
+    git("config", "gpg.format", "ssh")
+    git("config", "user.signingkey", str(key))
+    git("config", "commit.gpgsign", "true")
+
+
+@pytest.mark.skipif(shutil.which("ssh-keygen") is None, reason="ssh-keygen isn't installed")
+def test_the_runner_signs_its_commits_when_your_git_config_does(repo, monkeypatch, tmp_path):
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(tmp_path / "key")], check=True)
+    sign_with(tmp_path / "key.pub")
+    (tmp_path / "signers").write_text("wf@localhost " + (tmp_path / "key.pub").read_text())
+    git("config", "gpg.ssh.allowedSignersFile", str(tmp_path / "signers"))
+    use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run(IMPL, end='{branch: "{{ workspace.impl.branch }}"}') == 0
+    assert git("log", "-1", "--format=%G?", output()["branch"]) == "G"  # a good signature
+
+
+def test_a_commit_that_cant_be_signed_fails_the_node_and_says_so(repo, monkeypatch, tmp_path, capsys):
+    sign_with(tmp_path / "missing.pub")
+    use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run(IMPL) == 1
+    assert f"impl: workspace: can't sign the commit with {tmp_path / 'missing.pub'} (commit.gpgsign is on)" in \
+        capsys.readouterr().err
+
+
+def test_a_key_waiting_for_a_touch_fails_the_node_quickly(repo, monkeypatch, tmp_path, capsys):
+    signer = tmp_path / "signer"  # stands in for ssh-keygen waiting for a security key to be touched
+    signer.write_text(f"#!/bin/sh\necho $$ > {tmp_path / 'pid'}\nexec sleep 60\n")
+    signer.chmod(0o755)
+    sign_with(tmp_path / "key.pub")
+    git("config", "gpg.ssh.program", str(signer))
+    monkeypatch.setattr(workspaces, "SIGNING_TIMEOUT", 2)
+    use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run(IMPL) == 1
+    assert "can't sign the commit with" in capsys.readouterr().err
+    pid = int((tmp_path / "pid").read_text())
+    for _ in range(50):  # the signing program is stopped with git, not left waiting
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the signing program still runs")
