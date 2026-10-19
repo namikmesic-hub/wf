@@ -278,7 +278,8 @@ def test_retry_gives_another_attempt(repo, capsys):
     assert cli.main(["run", "retry.yaml"]) == 0
     folder = only_run()
     assert output(folder) == {"out": "ok\n"}
-    assert sorted(p.name for p in (folder / "nodes" / "flaky" / "1").glob("attempt-*")) == ["attempt-1.log", "attempt-2.log"]
+    assert sorted(p.name for p in (folder / "nodes" / "flaky" / "1").glob("attempt-*.log")) == ["attempt-1.log", "attempt-2.log"]
+    assert (folder / "nodes" / "flaky" / "1" / "attempt-2.stdout").read_text() == "ok\n"  # each stream in a file of its own too
 
 
 def test_a_timeout_fails_the_attempt(repo, capsys):

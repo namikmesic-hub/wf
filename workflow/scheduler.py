@@ -95,11 +95,16 @@ def choose_route(routes: Sequence[Route], taken: Mapping[int, int], is_true: Cal
     is true (or missing). `taken` counts how often each route was taken in this run;
     `is_true` evaluates a `when`, and is only called for routes that are still possible."""
     for index, route in enumerate(routes):
-        if route.max is not None and taken.get(index, 0) >= route.max:
+        if used_up(route, taken.get(index, 0)):
             continue
         if route.when is None or is_true(route.when):
             return index
     raise ValueError("no route can be taken (validate makes sure the last route has no `when` and no `max`)")
+
+
+def used_up(route: Route, taken: int) -> bool:
+    """Has a route been taken as often as its `max` allows?"""
+    return route.max is not None and taken >= route.max
 
 
 def add_pending(topo: Topology, pending: Sequence[str], nodes: Iterable[str]) -> list[str]:

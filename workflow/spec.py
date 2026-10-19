@@ -198,6 +198,7 @@ class CommandNode(_Node):
     kind: ClassVar[str] = "command"
     command: str
     env: dict[str, Annotated[str, BeforeValidator(_text)]] = {}
+    secret_env: list[str] = []  # names in `env` whose values the run's trace never shows (trace.py)
     check: bool | None = None
 
 
@@ -269,6 +270,7 @@ class Defaults(_Model):
     on_item_error: Literal["fail", "continue"] | None = None
     check: bool | None = None
     env: dict[str, Annotated[str, BeforeValidator(_text)]] = {}
+    secret_env: list[str] = []
 
 
 class Limits(_Model):
@@ -324,6 +326,8 @@ class Workflow(_Model):
         node = self.nodes[node_id]
         if name == "env":  # env maps merge, the node's keys winning
             return {**self.defaults.env, **getattr(node, "env", {})}
+        if name == "secret_env":  # a name either one marks is secret
+            return list(dict.fromkeys([*self.defaults.secret_env, *getattr(node, "secret_env", [])]))
         value = getattr(node, name, None)
         if value is None and name in Defaults.model_fields:
             if name != "timeout" or node.kind in _TIMEOUT:

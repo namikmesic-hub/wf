@@ -17,7 +17,9 @@ belongs to the whole run is the top-level context's, reached through `root`:
 the clock, the usage counters and the limits (a sub-workflow's own `limits`
 are ignored; `limits` is the file's, with any `--limit` the run was given on
 top: limits.py), the agent cap and the attempts waiting for it, the open
-harnesses, the git lock and the checkpointer.
+harnesses, the git lock, the checkpointer and the trace file. `trace` is the
+trace as this workflow writes it (trace.Scope): a sub-workflow's ids start with
+the attempt that runs it (`trace_parent`).
 """
 
 import asyncio
@@ -32,6 +34,7 @@ from .limits import check
 from .runs import Run
 from .scheduler import Topology
 from .spec import Workflow
+from .trace import Scope, Trace
 
 
 @dataclass
@@ -48,6 +51,7 @@ class RunContext:
     limits: spec.Limits | None = None  # the run's limits, if not just the workflow file's (--limit)
     usage: dict = field(default_factory=lambda: {"cost_usd": 0.0, "tokens": 0})  # spent so far, kept live
     max_agents: int | None = None  # the cap on live agent sessions across runs (capacity.py), if any
+    trace_parent: str = "run"  # in the trace, the attempt that runs this sub-workflow
     _clock_start: float = field(default_factory=time.monotonic)
     _elapsed_before: float = 0.0
     _slots: dict = field(default_factory=dict)
@@ -56,6 +60,8 @@ class RunContext:
     _git: asyncio.Lock | None = None  # one git operation at a time (see workspaces.py)
     _workflows: dict = field(default_factory=dict)  # sub-workflow files, parsed once
     _agents_waiting: dict = field(default_factory=dict)  # attempts waiting for an agent slot, for status.json
+    _trace_file: Trace | None = None  # the run's trace, on the top-level context
+    _trace: Scope | None = None
 
     def __post_init__(self):
         if self.topo is None:
@@ -75,10 +81,22 @@ class RunContext:
         return {"id": self.run.id, "dir": str(self.root.run.dir), "base": self.home["base"],
                 "branch": self.home["branch"], "repo": self.home["path"]}
 
-    def child(self, workflow: Workflow, folder: Path, home: dict, path: list[str], label: str) -> "RunContext":
-        """The context for a sub-workflow run in `folder`, working in `home`, for node `label`."""
+    def child(self, workflow: Workflow, folder: Path, home: dict, path: list[str], label: str, attempt: str) -> "RunContext":
+        """The context for a sub-workflow run in `folder`, working in `home`, for node `label`,
+        by the attempt whose trace id is `attempt`."""
         return RunContext(workflow=workflow, run=Run(self.run.id, folder, self.run.repo), home=home,
-                          parent=self, prefix=(*self.prefix, *path), where=f"{self.where}{label}/", saver=self.saver)
+                          parent=self, prefix=(*self.prefix, *path), where=f"{self.where}{label}/", saver=self.saver,
+                          trace_parent=attempt)
+
+    @property
+    def trace(self) -> Scope:
+        """The run's trace, as this workflow writes it."""
+        if self._trace is None:
+            root = self.root
+            if root._trace_file is None:
+                root._trace_file = Trace(root.run.dir)
+            self._trace = Scope(root._trace_file, self.workflow, self.load, self.trace_parent, self.where)
+        return self._trace
 
     def load(self, path: Path) -> Workflow:
         """A sub-workflow file, parsed once per process."""

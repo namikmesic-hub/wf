@@ -27,6 +27,10 @@ AGENTS.md, Cursor's rules), as the harness loads them, unless the node sets
 adapter keeps out every such file its harness lets it. Its docstring names
 what stays, and `wf validate` warns about that (harnesses.KEPT_INSTRUCTIONS).
 
+Each adapter also reports to SessionSpec.trace, a Recorder, what the agent did:
+its text, and each tool call with its full arguments and answer. These go into
+the run's trace (trace.py). What a wf tool answers isn't kept there either.
+
 How a turn ended:
 - done: the turn finished normally (the agent may or may not have called
   submit_result; the attempt loop checks the tool).
@@ -41,7 +45,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from ..output_tool import ResultTool
 
@@ -57,6 +61,21 @@ class Usage:
     def add(self, other: "Usage") -> None:
         self.tokens += other.tokens
         self.cost_usd += other.cost_usd
+
+
+class Recorder:
+    """Where an adapter reports what the agent does in a turn. The runner gives each attempt a
+    trace.Attempt, which writes the run's trace. This one keeps nothing."""
+
+    def text(self, text: str) -> None:
+        """Text the agent wrote."""
+
+    def tool_call(self, call: str, tool: str, arguments: Any) -> None:
+        """The agent called `tool`. `call` is the harness's id for the call."""
+
+    def tool_result(self, call: str, result: Any, is_error: bool = False, kept: bool = True) -> None:
+        """The answer to a call. kept=False for a wf tool's answer (other people's messages and
+        mail): the trace notes only its size."""
 
 
 @dataclass
@@ -81,6 +100,7 @@ class SessionSpec:
     tools: list["ToolServer"] = field(default_factory=list)  # wf tools the agent may call, besides submit_result
     only_wf_tools: bool = False  # the node lists `tools`: no other MCP servers or connectors, whatever the access
     project_instructions: bool = True  # False: the repo's CLAUDE.md, AGENTS.md and rules stay out of the session
+    trace: Recorder = field(default_factory=Recorder)  # the agent's text and tool calls, for the run's trace
 
 
 @dataclass

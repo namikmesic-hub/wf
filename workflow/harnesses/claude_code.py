@@ -220,18 +220,22 @@ class ClaudeSession:
                 for block in item.content:
                     if isinstance(block, TextBlock) and block.text.strip():
                         transcript(log, "text", text=block.text)
+                        self.spec.trace.text(block.text)
                     elif isinstance(block, ToolUseBlock):
                         if block.name.startswith(self._tool_prefixes):
                             self._relayed.add(block.id)
                         transcript(log, "tool", name=block.name, input=block.input)
+                        self.spec.trace.tool_call(block.id, _tool_name(block.name), block.input)
                         emit({"event": "agent_tool", "tool": _tool_name(block.name), "detail": _detail(block, self.spec.cwd)})
             elif isinstance(item, UserMessage) and isinstance(item.content, list):
                 for block in item.content:
                     if isinstance(block, ToolResultBlock) and block.tool_use_id in self._relayed:
                         transcript(log, "tool_result", is_error=bool(block.is_error), kept=False,
                                    characters=len(str(block.content)))
+                        self.spec.trace.tool_result(block.tool_use_id, block.content, bool(block.is_error), kept=False)
                     elif isinstance(block, ToolResultBlock):
                         transcript(log, "tool_result", is_error=bool(block.is_error), content=short(block.content, 2000))
+                        self.spec.trace.tool_result(block.tool_use_id, block.content, bool(block.is_error))
             elif isinstance(item, RateLimitEvent):
                 info = item.rate_limit_info
                 transcript(log, "rate_limit", status=info.status, resets_at=info.resets_at)

@@ -387,10 +387,14 @@ class CursorSession:
             kept = {"kept": False, "characters": len(json.dumps(output))} if relayed else {"output": short(output, 2000)}
             transcript(self.spec.log, "tool", title=call.get("title"), tool_kind=call.get("kind"), status=status,
                        input=call.get("rawInput"), **kept)
+            self.spec.trace.tool_call(update.get("toolCallId"), _label(call),
+                                      {"title": call.get("title"), "kind": call.get("kind"), "input": call.get("rawInput")})
+            self.spec.trace.tool_result(update.get("toolCallId"), output, status == "failed", kept=not relayed)
 
     def _flush(self) -> None:
         if self.text.strip():
             transcript(self.spec.log, "text", text=self.text)
+            self.spec.trace.text(self.text)
         self.text = ""
 
     async def _submit(self, args: dict) -> tuple[str, bool]:

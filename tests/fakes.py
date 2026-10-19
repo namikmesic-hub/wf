@@ -51,9 +51,11 @@ class _FakeSession:
 
 
 def submit(*results, tokens=100, cost=0.01):
-    """A turn that calls submit_result with each result in turn."""
+    """A turn that reads notes.txt, then calls submit_result with each result in turn."""
     async def turn(session):
         session.spec.emit({"event": "agent_tool", "tool": "Read", "detail": "notes.txt"})
+        session.spec.trace.tool_call("read-1", "Read", {"file_path": "notes.txt"})
+        session.spec.trace.tool_result("read-1", "the notes")
         for result in results:
             session.fake.replies.append(session.spec.tool.submit(result))
         return TurnEnd("done", usage=Usage(tokens, cost))
@@ -61,7 +63,9 @@ def submit(*results, tokens=100, cost=0.01):
 
 
 def talk(tokens=100, cost=0.01):
+    """A turn that only writes text."""
     async def turn(session):
+        session.spec.trace.text("Still looking.")
         return TurnEnd("done", usage=Usage(tokens, cost))
     return turn
 

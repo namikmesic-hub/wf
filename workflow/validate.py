@@ -134,6 +134,7 @@ class _Checker:
         self.order = _Order(self.topo)
         if self.wf.defaults.tools is not None:  # once, whether or not an agent node inherits them
             self._tool_list("defaults.tools", self.wf.defaults.tools)
+        self._secret_env()
         for node_id in self.nodes:
             self._node(node_id)
         self._branches()
@@ -347,6 +348,18 @@ class _Checker:
             if route.when is not None:
                 self._template(f"{at}.routes[{i}].when", route.when, node_id, "when", expression=True)
         self._workspace(node_id)
+
+    def _secret_env(self) -> None:
+        """Each name in `secret_env` is one that `env` sets: in the node, or for defaults in any command node."""
+        commands = [n for n, node in self.nodes.items() if node.kind == "command"]
+        for name in self.wf.defaults.secret_env:
+            if not any(name in self.wf.setting(n, "env") for n in commands):
+                self.error("defaults.secret_env", f"`{name}` isn't set in any command node's `env`")
+        for node_id in commands:
+            env = self.wf.setting(node_id, "env")
+            for name in self.nodes[node_id].secret_env:
+                if name not in env:
+                    self.error(f"nodes.{node_id}.secret_env", f"`{name}` isn't set in `env`{_hint(name, env)}")
 
     def _template(self, where: str, source: str, node_id: str | None, context: str, *, expression: bool = False):
         """Check one template or expression. context: node, for_each, when or end."""

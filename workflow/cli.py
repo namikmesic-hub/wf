@@ -18,6 +18,8 @@ For an operator that isn't at a terminal (operate.py):
     wf answer <run-id> <file>        answer what it's waiting on, and continue
     wf status <run-id> / wf list     where runs stand (newest first)
     wf report <run-id>... | --workflow NAME   what runs did, per node (report.py)
+    wf trace <run-id> [--node N] [--pass P] [--field F] [--var PATH]
+                                     what one run read, decided and did, from its trace (trace_view.py)
     wf discard <run-id>...           delete runs: folders, worktrees, temp folders
     wf integrate firstmate <dir>     write the firstmate extension package (firstmate.py)
 
@@ -43,7 +45,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from . import diagram, firstmate, operate, report, runner, runs, spec, validate, workspaces
+from . import diagram, firstmate, operate, report, runner, runs, spec, trace_view, validate, workspaces
 from .tools import keychain, signin
 from .tools.catalog import TOOLS
 
@@ -160,6 +162,16 @@ def main(argv: list[str] | None = None) -> int:
     reporting.add_argument("--json", action="store_true")
     reporting.add_argument("--runs-dir", **runs_dir)
     reporting.set_defaults(handler=_report)
+
+    tracing = commands.add_parser("trace", help="what one run read, decided and did: renders, routes, attempts, tool calls")
+    tracing.add_argument("run_id", metavar="run-id")
+    tracing.add_argument("--node", metavar="N", help="only this node: its id, or its path like build[1]/implement")
+    tracing.add_argument("--pass", type=int, dest="pass_no", metavar="P", help="only this pass of the node")
+    tracing.add_argument("--field", metavar="F", help="only renders of this field (instruction, command, env, routes, ...)")
+    tracing.add_argument("--var", metavar="PATH", help="the value of a variable path in each render that read it, e.g. review.blocking_issues")
+    tracing.add_argument("--json", action="store_true")
+    tracing.add_argument("--runs-dir", **runs_dir)
+    tracing.set_defaults(handler=_trace)
 
     discarding = commands.add_parser("discard", help="delete runs: their folders, worktrees and temp folders")
     discarding.add_argument("run_ids", nargs="*", metavar="run-id")
@@ -370,6 +382,32 @@ def _report(args) -> int:
         return 1
     found = report.build(chosen)
     print(json.dumps(found, indent=2, ensure_ascii=False, default=str) if args.json else report.text(found))
+    return 0
+
+
+def _trace(args) -> int:
+    run = _find(args.run_id, args.runs_dir)
+    if run is None:
+        return 1
+    found = trace_view.records(run)
+    if not found:
+        print(f"wf trace: run {run.id} has no trace (runs keep one since wf wrote trace.jsonl)", file=sys.stderr)
+        return 1
+    chosen = trace_view.select(found, args.node, args.pass_no, args.field, renders=args.var is not None)
+    if args.var is not None:
+        try:
+            path = trace_view.parse_path(args.var)
+        except trace_view.PathError as error:
+            print(f"wf trace: --var {error}", file=sys.stderr)
+            return 1
+        matches = trace_view.values(run, chosen, path)
+        print(json.dumps({"run": run.id, "var": args.var, "values": matches}, indent=2, ensure_ascii=False, default=str)
+              if args.json else trace_view.values_text(matches, args.var))
+        return 0
+    if args.json:
+        print(json.dumps({"run": run.id, "dir": str(run.dir), "records": chosen}, indent=2, ensure_ascii=False, default=str))
+    else:
+        print(trace_view.text(run, chosen, args.field) or "no records match")
     return 0
 
 

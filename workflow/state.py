@@ -16,8 +16,10 @@ and empties it by returning Overwrite([]), which bypasses the reducer.
 Progress is a working copy of RunState with the operations `schedule` needs:
 record() a finished job, starts_now() for the nodes whose needs are settled,
 retry() what failed. It uses the pure rules in scheduler.py and evaluates `when`
-and `for_each` with templates.py. It does no I/O, so it's easy to follow
-(and to test) without LangGraph.
+and `for_each` with templates.py. It does no I/O itself, so it's easy to follow
+(and to test) without LangGraph. Progress events go to `emit`. The run's trace
+(trace.Scope, when given) gets each pass, each route decision, and each
+`for_each` and `when` with what it read.
 """
 
 import copy
@@ -91,8 +93,8 @@ class Progress:
     """A working copy of RunState that `schedule` changes, then returns as its update."""
 
     def __init__(self, state: RunState, workflow: Workflow, topo: Topology, emit: Callable[[dict], None],
-                 run_usage: dict | None = None):
-        self.wf, self.topo, self.emit = workflow, topo, emit
+                 run_usage: dict | None = None, trace=None):
+        self.wf, self.topo, self.emit, self.trace = workflow, topo, emit, trace
         self.run_usage = run_usage  # a sub-workflow shows the whole run's spending in `run`
         self.s: dict = copy.deepcopy({k: v for k, v in state.items() if k not in ("inbox", "input")})
         for key, empty in (("pending", []), ("active", {}), ("passes", {}), ("taken", {}), ("outputs", {}),
@@ -224,7 +226,7 @@ class Progress:
         spec_node = self.wf.nodes[node]
         if spec_node.for_each is not None:
             try:
-                items = templates.evaluate(spec_node.for_each, variables)
+                items = self._for_each(node, pass_no, spec_node.for_each, variables)
             except templates.TemplateError as error:
                 return self._refuse(node, f"for_each: {error}")
             if not isinstance(items, (list, tuple)):
@@ -236,6 +238,8 @@ class Progress:
         self.s["passes"][node] = pass_no
         self.s["active"][node] = active
         count = None if active["items"] is None else len(active["items"])
+        if self.trace:
+            self.trace.started(node, pass_no, count)
         self.emit({"event": "node_started", "node": node, "pass": pass_no, **({"items": count} if count is not None else {})})
         if active["items"] is None:
             jobs = [self._job(node, active, None, None)]
@@ -245,6 +249,35 @@ class Progress:
         if not jobs:  # an empty list finishes the node at once, with []
             self._complete(node)
         return jobs
+
+    def _for_each(self, node: str, pass_no: int, expression: str, variables: dict):
+        if not self.trace:
+            return templates.evaluate(expression, variables)
+        return self.trace.render({"node": node, "pass_no": pass_no}, "for_each", expression, variables, templates.evaluate)
+
+    def _trace_routes(self, node: str, pass_no: int, routes, taken: dict, checks: list[dict], chosen: int | None) -> None:
+        """Record a route decision: every route in order, with what its `when` read and gave
+        (checks, in the order choose_route asked), and whether its `max` was used up."""
+        if not self.trace:
+            return
+        job = {"node": node, "pass_no": pass_no}
+        asked, decided, stopped = iter(checks), [], False  # stopped: a `when` failed, so no later route was checked
+        for index, route in enumerate(routes):
+            used_up = scheduler.used_up(route, taken.get(index, 0))
+            entry = {"index": index, "to": list(route.targets), "when": route.when, "max": route.max,
+                     "taken_before": taken.get(index, 0), "used_up": used_up}
+            if used_up or stopped or (chosen is not None and index > chosen):
+                entry["checked"] = False
+            elif route.when is None:
+                entry |= {"checked": True, "result": True}
+            else:
+                check = next(asked)
+                entry |= {"checked": True, **check}
+                stopped = "error" in check
+                self.trace.rendered(job, f"routes[{index}].when", route.when, check["reads"],
+                                    **({"error": check["error"]} if stopped else {"result": check["result"]}))
+            decided.append(entry)
+        self.trace.routes(job, decided, chosen)
 
     def _refuse(self, node: str, error: str) -> list[Job]:
         """The node can't start. It stays pending, so `wf retry` tries again."""
@@ -295,10 +328,23 @@ class Progress:
                          "workspace": {**base["workspace"], node: workspace},
                          "errors": {**base["errors"], node: errors}}
             taken = {i: self.s["taken"].get(f"{node}:{i}", 0) for i in range(len(routes))}
+            checks: list[dict] = []
+
+            def is_true(when: str) -> bool:
+                try:
+                    value, reads = templates.watched(templates.evaluate, when, variables)
+                except templates.TemplateError as error:
+                    checks.append({"reads": error.reads, "error": str(error)})
+                    raise
+                checks.append({"reads": reads, "result": bool(value)})
+                return bool(value)
+
             try:
-                route = scheduler.choose_route(routes, taken, lambda when: bool(templates.evaluate(when, variables)))
+                route = scheduler.choose_route(routes, taken, is_true)
             except templates.TemplateError as error:
+                self._trace_routes(node, active["pass"], routes, taken, checks, None)
                 return self._fail(node, f"routes: {error}")
+            self._trace_routes(node, active["pass"], routes, taken, checks, route)
             key = f"{node}:{route}"
             self.s["taken"][key] = self.s["taken"].get(key, 0) + 1
             chosen = routes[route]

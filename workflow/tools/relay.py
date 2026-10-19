@@ -29,6 +29,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Implementation
 
+from .. import trace
 from . import keychain, signin
 from .catalog import TOOLS
 from .signin import NotSetUp, Unreachable
@@ -191,10 +192,12 @@ class _Bearer(httpx2.Auth):
 
     async def _token(self, refused: str | None = None) -> str:
         try:
-            return await signin.access_token(self.tool, refused)
+            token = await signin.access_token(self.tool, refused)
         except (NotSetUp, Unreachable, keychain.Unavailable) as error:
             self.problem = error
             raise
+        trace.keep_out(token)  # should it ever show up in an agent's tool call, the run's trace won't keep it
+        return token
 
 
 async def _operations(client: Client) -> list[Operation]:

@@ -289,22 +289,27 @@ class CodexSession:
         elif kind == "webSearch":
             self.spec.emit({"event": "agent_tool", "tool": "web search", "detail": short(item.get("query") or "", 80)})
         elif kind in ("mcpToolCall", "dynamicToolCall"):
-            name = item.get("tool") or kind  # a wf tool's is linear.list_issues, as on the other harnesses
-            self.spec.emit({"event": "agent_tool", "tool": f"{item['namespace']}.{name}" if item.get("namespace") else name,
-                            "detail": ""})
+            self.spec.emit({"event": "agent_tool", "tool": _tool_label(item), "detail": ""})
 
     def _record(self, item: dict) -> None:
         kind = item.get("type")
+        relayed = kind == "dynamicToolCall" and item.get("namespace") in {server.name for server in self.spec.tools}
         if kind == "agentMessage":
             transcript(self.spec.log, "text", text=item.get("text"))
+            self.spec.trace.text(item.get("text") or "")
         elif kind == "commandExecution":
             transcript(self.spec.log, "command", command=item.get("command"), exit_code=item.get("exitCode"),
                        output=short(item.get("aggregatedOutput") or "", 2000))
-        elif kind == "dynamicToolCall" and item.get("namespace") in {server.name for server in self.spec.tools}:
+        elif relayed:
             transcript(self.spec.log, "tool", item={key: value for key, value in item.items() if key != "contentItems"},
                        kept=False, characters=sum(len(c.get("text") or c.get("imageUrl") or "") for c in item.get("contentItems") or []))
         elif kind in ("fileChange", "webSearch", "mcpToolCall", "dynamicToolCall"):
             transcript(self.spec.log, "tool", item=item)
+        if kind in TOOL_ITEMS:  # the call, and what came of it, as one item
+            call = str(item.get("id") or "")
+            self.spec.trace.tool_call(call, _tool_label(item), {k: v for k, v in item.items() if k not in ANSWER and k not in ("id", "type")})
+            self.spec.trace.tool_result(call, {k: v for k, v in item.items() if k in ANSWER},
+                                        item.get("status") == "failed" or item.get("success") is False, kept=not relayed)
 
     async def close(self) -> None:
         try:
@@ -448,6 +453,21 @@ class _Connection:
         # cancellation of this task (Ctrl-C during teardown) through
         await asyncio.gather(self.reader, *self.answering, return_exceptions=True)
         self.stderr.close()
+
+
+TOOL_ITEMS = {"commandExecution": "command", "fileChange": "edit", "webSearch": "web search", "mcpToolCall": None,
+              "dynamicToolCall": None}
+ANSWER = {"aggregatedOutput", "exitCode", "status", "result", "error", "contentItems", "success", "durationMs"}  # an item's outcome
+
+
+def _tool_label(item: dict) -> str:
+    """The name of a tool call: command, edit, web search, or the tool's name. A wf tool's is
+    linear.list_issues, as on the other harnesses."""
+    kind = item.get("type")
+    if TOOL_ITEMS.get(kind):
+        return TOOL_ITEMS[kind]
+    name = item.get("tool") or kind
+    return f"{item['namespace']}.{name}" if item.get("namespace") else name
 
 
 def _tool_reply(text: str, success: bool) -> dict:

@@ -29,6 +29,10 @@ left `waiting`, and `wf retry` asks again.
 Every stream opens the same SQLite checkpointer and uses the run id as
 LangGraph's thread_id, so a later `wf retry` process finds the run exactly
 where this one left it.
+
+The run's trace (trace.py) gets a `run` record when a process starts to drive
+the run. It gets a `run_stopped` record with the run's status when the process
+stops.
 """
 
 import asyncio
@@ -120,6 +124,7 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         with run.driving():
             ctx = RunContext(workflow, run, home, script=script, limits=limits.effective(workflow.limits, overrides),
                              max_agents=max_agents)
+            ctx.trace.run("started", workflow=workflow.name, inputs=inputs, dry_run=script is not None)
             return _drive(ctx, {"input": inputs}, asking)
     except runs.RunBusy as error:
         print(f"wf run: {error}", file=sys.stderr)
@@ -218,9 +223,11 @@ def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | 
             print(f"wf retry: can't read the run's input: {error}", file=sys.stderr)
             return 1
         print(f"Starting run {run.id}")
+        ctx.trace.run("started", workflow=ctx.workflow.name, inputs=inputs, dry_run=ctx.script is not None)
         return _drive(ctx, {"input": inputs}, asking)
     ctx.home = _run_home(run, state)
     print(f"{'Continuing' if answers is not None else 'Retrying'} run {run.id}")
+    ctx.trace.run("retried", workflow=ctx.workflow.name, **({"answers": True} if answers is not None else {}))
     if state.interrupts:
         command = _continue(state.interrupts, asking, run, answers, ctx.script)
         if isinstance(command, int):
@@ -315,6 +322,14 @@ def _home(repo: Path) -> dict:
 
 
 def _drive(ctx: RunContext, command, asking: bool) -> int:
+    code = _driving(ctx, command, asking)
+    status = ctx.run.status()
+    output = ctx.run.output() if status.get("status") == "succeeded" else None
+    ctx.trace.stopped(status, output)
+    return code
+
+
+def _driving(ctx: RunContext, command, asking: bool) -> int:
     run = ctx.run
     while True:
         run.set_status("running")
@@ -354,6 +369,7 @@ async def _stream(ctx: RunContext, command) -> StateSnapshot:
         ctx.saver = saver  # sub-workflows keep their threads in the same checkpoints
         before = await compiled.aget_state(config)
         ctx.restart_clock((before.values or {}).get("elapsed_s", 0.0))
+        ctx.trace.know(lambda: graph.variables(before.values, ctx))  # a job that reruns first may show them
         try:
             async for event in compiled.astream(command, config, context=ctx, stream_mode="custom", durability="sync"):
                 ctx.run.add_event(event)
