@@ -42,8 +42,9 @@ A limit reached while it waits ends the wait, and the attempt doesn't start.
 
 A node with `tools` doesn't run on a harness whose commands could reach the
 Keychain at its access level (harnesses.KEYCHAIN_SHELL) unless it sets
-`tools_with_shell: true`: that harness counts as unavailable, and the next one
-in the node's list takes over. `wf validate` says so before the run.
+`tools_with_shell: true`. `wf validate` refuses such a node before the run; at
+run time the check catches a harness that a template picks, which validate
+can't see, and the node fails.
 
 An agent node's wf tools (`tools`) are connected for each attempt and handed
 to the session in SessionSpec.tools (tools/relay.py). A tool that isn't set up
