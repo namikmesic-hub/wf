@@ -9,7 +9,8 @@ does what the entry says:
   with the problems);
 - `_fail`: the turn fails, so the node's retry applies;
 - `_unavailable`: the harness is out, so the next harness in the node's list runs.
-Later turns (the reminders) do nothing. `_tokens` and `_cost_usd` are reported
+Later turns (the reminders) do nothing. The attempt's log records the harness,
+model and effort the session was given. `_tokens` and `_cost_usd` are reported
 as the turn's usage, so limits can be tested. A node with no entry left raises
 dryrun.ScriptExhausted, which fails the node at once: a retry would find none either.
 """
@@ -52,7 +53,7 @@ class ScriptedSession:
         if self.turns > 1:
             return TurnEnd("done")
         entry = self.harness.script.take("agents", spec.where, spec.node)  # raises ScriptExhausted when used up
-        transcript(spec.log, "dry_run", harness=self.harness.name, entry=entry)
+        transcript(spec.log, "dry_run", harness=self.harness.name, model=spec.model, effort=spec.effort, entry=entry)
         if entry is None:
             raise dryrun.ScriptExhausted(f"dry run: the script has no entries for {spec.where or spec.node}")
         usage = Usage(int(entry.get("_tokens", 0)), float(entry.get("_cost_usd", 0.0)))  # failed attempts spend too

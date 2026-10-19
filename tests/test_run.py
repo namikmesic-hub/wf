@@ -402,6 +402,54 @@ def test_no_input_pauses_even_at_a_terminal(repo, monkeypatch, capsys):
     assert cli.main(["run", "ask.yaml", "--no-input"]) == 2
 
 
+NOTE = """
+version: 1
+name: note
+start: {input: {}}
+nodes:
+  approve:
+    needs: [start]
+    human: Ship it?
+    output: {ok: {type: boolean}, note: {type: string, optional: true}}
+  after: {needs: [approve], command: "echo {{ (approve.note or 'no note') | quote }}"}
+end:
+  output:
+    note: "{{ approve.note }}"
+    said: "{{ after.stdout }}"
+"""
+
+
+def test_an_optional_field_left_out_reads_as_none_later_and_in_the_end_output(repo, monkeypatch):
+    write("note.yaml", NOTE)
+    answers(monkeypatch, "yes", "")  # no note
+    assert cli.main(["run", "note.yaml"]) == 0
+    folder = only_run()
+    assert output(folder) == {"note": None, "said": "no note\n"}
+    assert json.loads((folder / "nodes" / "approve" / "1" / "output.json").read_text()) == {"ok": True, "note": None}
+
+
+@pytest.mark.parametrize("fields, required, result", [
+    ("{ok: {type: boolean}, note: {type: string}}", "[ok]", {"ok": True, "note": None}),
+    ("{ok: {type: boolean}}", "[ok]", {"ok": True}),  # an end schema that leaves the field out
+    ("{ok: {type: boolean}, note: {type: string}}", "[ok, note]", "answer: note: None is not of type 'string'"),
+])
+def test_an_end_output_schema_that_requires_a_left_out_field_still_fails(repo, monkeypatch, capsys, fields, required, result):
+    write("note.yaml", NOTE.replace("    said: \"{{ after.stdout }}\"\n", f"""    answer:
+      type: object
+      properties: {fields}
+      required: {required}
+      additionalProperties: false
+      value: "{{{{ approve }}}}"
+"""))
+    answers(monkeypatch, "yes", "")
+    failing = isinstance(result, str)
+    assert cli.main(["run", "note.yaml"]) == (1 if failing else 0)
+    if failing:
+        assert result in capsys.readouterr().err
+    else:
+        assert output(only_run()) == {"note": None, "answer": result}
+
+
 # ---------- resume ----------
 
 
@@ -538,3 +586,17 @@ def test_an_optional_input_with_a_default_gets_its_default(repo):
     """)
     assert cli.main(["run", "opt.yaml"]) == 0
     assert json.loads((only_run() / "output.json").read_text()) == {"said": "fast\n"}
+
+
+def test_an_optional_input_left_out_reads_as_none(repo):
+    write("opt.yaml", """
+        version: 1
+        name: opt
+        start: {input: {mode: {type: string, optional: true}}}
+        nodes:
+          say: {needs: [start], command: "echo {{ start.mode or 'normal' }}"}
+        end: {output: {said: "{{ say.stdout }}", mode: "{{ start.mode }}"}}
+    """)
+    assert cli.main(["run", "opt.yaml"]) == 0
+    assert output(only_run()) == {"said": "normal\n", "mode": None}
+    assert json.loads((only_run() / "input.json").read_text()) == {}  # the input as given

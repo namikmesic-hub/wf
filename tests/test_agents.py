@@ -184,6 +184,75 @@ def test_best_of_n_runs_the_same_task_on_each_harness(repo, monkeypatch):
     assert (claude.sent, codex.sent) == ([f"Try it on claude-code\n\n{FINISH}"], [f"Try it on codex\n\n{FINISH}"])
 
 
+# ---------- model and effort as templates ----------
+
+
+def seats(effort: str) -> str:
+    """Review seats as an input: each item names its own harness, model and effort."""
+    Path("seats.yaml").write_text(dedent(f"""
+        version: 1
+        name: seats
+        types:
+          seat:
+            name: {{type: string}}
+            harness: {{enum: [claude-code, codex]}}
+            model: {{type: string}}
+            effort: {{type: string, optional: true}}
+        start:
+          input:
+            seats:
+              type: array
+              maxItems: 3
+              items: {{$ref: seat}}
+              default:
+                - {{name: opus, harness: claude-code, model: claude-opus-5-5, effort: high}}
+                - {{name: sol, harness: codex, model: gpt-6}}
+        nodes:
+          review:
+            needs: [start]
+            for_each: start.seats
+            harness: "{{{{ item.harness }}}}"
+            model: "{{{{ item.model }}}}"
+            effort: {effort}
+            instruction: "Review as {{{{ item.name }}}}"
+        end: {{output: {{}}}}
+    """))
+    return "seats.yaml"
+
+
+def test_each_item_gets_the_harness_model_and_effort_its_templates_render(repo, monkeypatch):
+    claude, codex = Fake("claude-code", submit({"summary": "c"})), Fake("codex", submit({"summary": "x"}))
+    install(monkeypatch, claude, codex)
+    assert cli.main(["run", seats('{claude-code: "{{ item.effort }}"}')]) == 0
+    assert (claude.specs[0].model, claude.specs[0].effort) == ("claude-opus-5-5", "high")
+    assert (codex.specs[0].model, codex.specs[0].effort) == ("gpt-6", None)  # no effort set for codex
+    assert json.loads((run_dir() / "nodes" / "review" / "1" / "0" / "session.json").read_text())["model"] == "claude-opus-5-5"
+
+
+def test_an_effort_that_renders_to_none_fails_the_item_before_a_session_starts(repo, monkeypatch, capsys):
+    claude, codex = Fake("claude-code", submit({"summary": "c"})), Fake("codex", submit({"summary": "x"}))
+    install(monkeypatch, claude, codex)
+    assert cli.main(["run", seats('"{{ item.effort }}"')]) == 1  # the codex seat leaves effort out
+    assert codex.specs == []
+    assert "item 1: `effort` of node `review` renders to none for codex, but it must be a non-empty string" in capsys.readouterr().err
+
+
+def test_a_rendered_model_and_effort_lose_their_outer_whitespace(repo, monkeypatch):
+    fake = Fake("claude-code", submit({"steps": []}))
+    install(monkeypatch, fake)
+    assert cli.main(["run", flow(PLAN + "  model: \"{{ ' opus ' }}\"\n  effort: \"{{ ' high ' }}\"\n")]) == 0
+    assert (fake.specs[0].model, fake.specs[0].effort) == ("opus", "high")
+
+
+@pytest.mark.parametrize("model, shown", [('"{{ none }}"', "none"), ('"{{ \' \' }}"', '" "'), ('"{{ 5 }}"', "5")])
+def test_a_model_must_render_to_text(repo, monkeypatch, capsys, model, shown):
+    fake = Fake("claude-code", submit({"steps": []}))
+    install(monkeypatch, fake)
+    assert cli.main(["run", flow(PLAN + f"  model: {model}\n")]) == 1
+    assert fake.specs == []
+    assert f"`model` of node `plan` renders to {shown} for claude-code" in capsys.readouterr().err
+
+
 # ---------- usage and limits ----------
 
 

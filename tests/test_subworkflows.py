@@ -362,3 +362,89 @@ def test_answers_reach_the_right_question_across_separate_resumes(repo, monkeypa
     one_answer("no")
     assert cli.main(["resume", only_run().name]) == 0
     assert output() == {"ok": False}
+
+
+def test_an_optional_field_left_out_passes_through_with_and_reads_as_none_inside(repo, monkeypatch):
+    from fakes import submit
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", submit({"seat": {"name": "argon"}})).factory)
+    write("use.yaml", """
+        version: 1
+        name: use
+        types: {seat: {name: {type: string}, effort: {type: string, optional: true}}}
+        start: {input: {seat: {$ref: seat}}}
+        nodes:
+          say: {needs: [start], command: "echo {{ (start.seat.effort or 'no effort') | quote }}"}
+        end: {output: {said: "{{ say.stdout }}"}}
+    """)
+    write("main.yaml", """
+        version: 1
+        name: main
+        defaults: {harness: claude-code}
+        types: {seat: {name: {type: string}, effort: {type: string, optional: true}}}
+        start: {input: {}}
+        nodes:
+          pick: {needs: [start], instruction: pick a seat, output: {seat: {$ref: seat}}}
+          use: {needs: [pick], workflow: use.yaml, with: {seat: "{{ pick.seat }}"}}
+        end: {output: {said: "{{ use.said }}", effort: "{{ pick.seat.effort }}"}}
+    """)
+    assert cli.main(["run", "main.yaml"]) == 0
+    assert output() == {"said": "no effort\n", "effort": None}
+    assert json.loads((only_run() / "nodes" / "pick" / "1" / "output.json").read_text()) == {"seat": {"name": "argon", "effort": None}}
+
+
+def test_a_left_out_optional_field_fits_a_narrower_input_and_takes_its_default(repo, monkeypatch):
+    from fakes import submit
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", submit({"seat": {"name": "argon"}})).factory)
+    write("use.yaml", """
+        version: 1
+        name: use
+        start:
+          input:
+            seat: {type: object, properties: {name: {type: string}}, required: [name], additionalProperties: false}
+            effort: {type: string, default: high}
+        nodes:
+          say: {needs: [start], command: "echo {{ start.seat.name | quote }} {{ start.effort | quote }}"}
+        end: {output: {said: "{{ say.stdout }}"}}
+    """)
+    write("main.yaml", """
+        version: 1
+        name: main
+        defaults: {harness: claude-code}
+        types: {seat: {name: {type: string}, effort: {type: string, optional: true}}}
+        start: {input: {}}
+        nodes:
+          pick: {needs: [start], instruction: pick a seat, output: {seat: {$ref: seat}}}
+          use: {needs: [pick], workflow: use.yaml, with: {seat: "{{ pick.seat }}", effort: "{{ pick.seat.effort }}"}}
+        end: {output: {said: "{{ use.said }}"}}
+    """)
+    assert cli.main(["run", "main.yaml"]) == 0
+    assert output() == {"said": "argon high\n"}
+
+
+def test_an_optional_field_a_sub_workflows_end_output_leaves_out_reads_as_none_in_the_parent(repo):
+    write("child.yaml", """
+        version: 1
+        name: child
+        start: {input: {}}
+        nodes:
+          say: {needs: [start], command: echo hi}
+        end:
+          output:
+            result:
+              type: object
+              properties: {said: {type: string}, note: {type: string}}
+              required: [said]
+              additionalProperties: false
+              value: "{{ {'said': say.stdout} }}"
+    """)
+    write("main.yaml", """
+        version: 1
+        name: main
+        start: {input: {}}
+        nodes:
+          child: {needs: [start], workflow: child.yaml}
+          after: {needs: [child], command: "echo {{ (child.result.note or 'no note') | quote }}"}
+        end: {output: {said: "{{ after.stdout }}", note: "{{ child.result.note }}"}}
+    """)
+    assert cli.main(["run", "main.yaml"]) == 0
+    assert output() == {"said": "no note\n", "note": None}

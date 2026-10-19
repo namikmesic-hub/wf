@@ -25,7 +25,7 @@ import operator
 from collections.abc import Callable
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from . import scheduler, templates
+from . import scheduler, schemas, templates
 from .scheduler import START, Topology
 from .spec import Workflow
 
@@ -134,7 +134,7 @@ class Progress:
     def begin(self, inputs: dict, run: dict) -> None:
         """The first step: `start` finishes at once, with the input as its output."""
         self.s["run"] = run
-        self.s["outputs"][START] = inputs
+        self.s["outputs"][START] = schemas.absent_as_none(inputs, schemas.object_schema(self.wf.start.input, self.wf.types))
         self._make_pending(scheduler.triggered(self.topo, START, None))
 
     def record(self, finished: Finished) -> None:

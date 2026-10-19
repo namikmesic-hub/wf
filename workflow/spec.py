@@ -312,13 +312,18 @@ class Workflow(_Model):
     def harness_setting(self, node_id: str, harness: str, name: str) -> Any:
         """model, effort, max_turns or budget_usd for one harness: the node's, else
         defaults.harnesses.<harness>, else defaults.<name>. A map is read by harness."""
-        for value in (getattr(self.nodes[node_id], name, None), getattr(self.defaults.harnesses.get(harness), name, None),
-                      getattr(self.defaults, name)):
+        return self.harness_setting_at(node_id, harness, name)[1]
+
+    def harness_setting_at(self, node_id: str, harness: str, name: str) -> tuple[str | None, Any]:
+        """harness_setting(), with the key path it comes from, like defaults.harnesses.codex.model."""
+        for where, value in ((f"nodes.{node_id}.{name}", getattr(self.nodes[node_id], name, None)),
+                             (f"defaults.harnesses.{harness}.{name}", getattr(self.defaults.harnesses.get(harness), name, None)),
+                             (f"defaults.{name}", getattr(self.defaults, name))):
             if isinstance(value, dict):
-                value = value.get(harness)
+                where, value = f"{where}.{harness}", value.get(harness)
             if value is not None:
-                return value
-        return None
+                return where, value
+        return None, None
 
 
 # ---------- loading ----------

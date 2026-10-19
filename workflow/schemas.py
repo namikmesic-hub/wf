@@ -22,7 +22,10 @@ Three users:
   schemas, and field_at() checks that `{{ plan.tasks }}` names a real field.
 - the runner: check() validates agent results, human answers, workflow inputs
   and end outputs, and words each problem with its field path, so an agent
-  can read the errors and fix its submit_result call.
+  can read the errors and fix its submit_result call. absent_as_none() then
+  puts none in every optional field a result or input left out, since a
+  template reads a missing optional field as none, and without_none() takes
+  that none out again where a value a template made meets a schema.
 - templates and the graph: ANY stands for "a value we know nothing about".
 """
 
@@ -260,6 +263,45 @@ def _path(parts) -> str:
     for part in parts:
         text += f"[{part}]" if isinstance(part, int) else f".{part}" if text else str(part)
     return text
+
+
+def absent_as_none(value: Any, schema: Mapping) -> Any:
+    """`value` with none in every optional field it leaves out, at any depth, so templates read none there."""
+    if not isinstance(schema, Mapping):
+        return value
+    properties, items = schema.get("properties"), schema.get("items")
+    if isinstance(value, dict):
+        filled = {k: absent_as_none(v, _field(schema, k)) for k, v in value.items()}
+        declared = properties if isinstance(properties, Mapping) else {}
+        return filled | {k: None for k in declared if k not in value and k not in schema.get("required", ())}
+    if isinstance(value, list) and isinstance(items, Mapping):
+        return [absent_as_none(v, items) for v in value]
+    return value
+
+
+def without_none(value: Any, schema: Mapping) -> Any:
+    """`value` without none in the fields `schema` doesn't require, at any depth.
+
+    For a value a template made before it meets a schema: it can carry none where its
+    source left an optional field out, and that none counts as left out.
+    """
+    if not isinstance(schema, Mapping):
+        return value
+    items = schema.get("items")
+    if isinstance(value, dict):
+        required = schema.get("required", ())
+        return {k: without_none(v, _field(schema, k)) for k, v in value.items() if v is not None or k in required}
+    if isinstance(value, list) and isinstance(items, Mapping):
+        return [without_none(v, items) for v in value]
+    return value
+
+
+def _field(schema: Mapping, name: str) -> Any:
+    """The schema of one field of an object: its own in `properties`, else `additionalProperties`."""
+    properties, others = schema.get("properties"), schema.get("additionalProperties")
+    if isinstance(properties, Mapping) and name in properties:
+        return properties[name]
+    return others if isinstance(others, Mapping) else ANY
 
 
 # ---------- looking up fields ----------

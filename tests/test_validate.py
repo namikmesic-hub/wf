@@ -281,6 +281,60 @@ def test_harness_lists_need_model_maps_and_cursor_needs_a_model(tmp_path):
     ])
 
 
+def test_templates_in_model_and_effort_are_checked_where_they_are_set(tmp_path):
+    top = "defaults:\n  harnesses:\n    codex: {model: '{{ item.model }}'}\n"
+    seats = "seats: {type: array, maxItems: 2, items: {type: object, properties: {model: {type: string}}, additionalProperties: false}}"
+    report = check(tmp_path, flow("""
+        a: {needs: [start], for_each: start.seats, instruction: x, model: "{{ item.modle }}"}
+        b: {needs: [start], instruction: x, effort: {claude-code: "{{ start.effort }}"}}
+        c: {needs: [start], instruction: x, harness: codex}
+        d: {needs: [start], for_each: start.seats, instruction: x, harness: codex}
+    """, inputs=seats, top=top).replace("defaults:\n  harness: claude-code\n", "", 1).replace(
+        "  harnesses:", "  harness: claude-code\n  harnesses:"))
+    assert_problems(report, [
+        ("error", "nodes.a.model", "`item.modle`: no field `modle` (fields: model)"),
+        ("error", "nodes.b.effort.claude-code", "`start.effort`: no field `effort`"),
+        ("error", "defaults.harnesses.codex.model", "`item` is only defined inside a for_each node"),
+    ])
+
+
+
+def test_model_and_effort_are_checked_for_the_harnesses_a_node_can_run_on(tmp_path):
+    report = check(tmp_path, dedent("""
+        version: 1
+        name: t
+        defaults:
+          harness: claude-code
+          effort: "{{ nope }}"
+          harnesses: {cursor: {model: "{{ cursor_only }}"}}
+        start:
+          input:
+            seats:
+              type: array
+              maxItems: 2
+              items: {type: object, properties: {harness: {enum: [claude-code, codex]}, model: {type: string}}}
+        nodes:
+          a: {needs: [start], for_each: start.seats, instruction: x, harness: "{{ item.harness }}", model: "{{ item.model }}", effort: high}
+          b: {needs: [start], instruction: x, model: {claude-code: opus, codex: "{{ start.nope }}"}, effort: low}
+          c: {needs: [start], instruction: x}
+        end: {output: {}}
+    """))
+    assert_problems(report, [  # `a` can't run on cursor, so its default isn't checked there
+        ("error", "nodes.b.model.codex", "`start.nope`: no field `nope`"),
+        ("error", "defaults.effort", "unknown name `nope`"),
+    ])
+
+
+def test_model_and_effort_cannot_read_the_session(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], instruction: x, model: "{{ 'opus' if session.continued else 'sonnet' }}"}
+        b: {needs: [start], instruction: x, effort: {claude-code: "{{ session.continued }}"}}
+    """))
+    assert_problems(report, [
+        ("error", "nodes.a.model", "`session` isn't available here"),
+        ("error", "nodes.b.effort.claude-code", "`session` isn't available here"),
+    ])
+
 # ---------- 10. end outputs ----------
 
 
