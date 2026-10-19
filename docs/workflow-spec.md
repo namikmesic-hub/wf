@@ -708,19 +708,37 @@ the context to fix them.
   commits anything left uncommitted (`wf: <node> (<run-id>)`). It never commits in your own
   checkout. The runner tells `edit` agents not to commit, because some harness sandboxes
   keep `.git` read-only.
-- The commit skips git hooks, so its message is only that line, with no trailers.
-  It is signed when your git config signs commits (`commit.gpgsign`), with your signing key.
-  Nobody is at a terminal to unlock that key, so use one that needs no passphrase, PIN or touch.
-  For example, set a key file as the repo's `user.signingkey`, with its absolute path.
-  A relative path fails, because the runner commits in worktrees outside your checkout.
-  When a run may commit, `wf run` and `wf resume` first sign a test commit, before any agent works.
-  If that fails, the command stops there with an error that names the fix.
-  A commit that can't be signed, or isn't signed within 30 seconds, fails the node with an error that says so.
-  When wf stops on Ctrl-C, a closed terminal or SIGTERM, it stops git and the signing program too.
-  SIGKILL ends wf at once, so git and the signing program keep running.
+- The commit skips git hooks, and it is signed when your git config signs commits.
+  "Commit signing" below has the rules.
 - When a run succeeds, its worktrees are removed and its branches are kept. A failed run
   keeps its worktrees for `wf resume`.
 - `wf validate` warns when two `edit` nodes could run at the same time in the same workspace.
+
+### Commit signing
+
+The runner signs its commits as your git config says, with nobody at a terminal.
+So use a signing key that needs no passphrase, PIN or touch.
+For example, set a key file's absolute path as the repo's `user.signingkey`.
+The tests named below are in `tests/test_workspaces.py`.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| The runner commits in a worktree it made | The commit skips every git hook, so its message is only `wf: <node> (<run-id>)`, with no trailers. | `workflow/workspaces.py:188` | `test_the_runners_commit_message_has_no_trailer_even_when_a_hook_would_add_one` |
+| Your git config signs commits (`commit.gpgsign`) | The runner's commit is signed too, with your signing key (`user.signingkey`). | `workflow/workspaces.py:189` | `test_the_runner_signs_its_commits_when_your_git_config_does` |
+| A run may commit: an `edit` or `full` agent works in a worktree the runner made, directly, through a node's workspace or in a sub-workflow | `wf run` and `wf resume` sign a test commit before any agent works. The test commit goes to a temporary object folder, so the repository keeps nothing. | `workflow/runner.py:90`, `workflow/runner.py:189`, `workflow/runner.py:286`, `workflow/workspaces.py:257` | `test_checking_the_key_leaves_nothing_in_the_repository`, `test_an_agent_that_edits_another_nodes_worktree_needs_a_key_that_signs`, `test_an_edit_agent_in_a_sub_workflow_needs_a_key_that_signs_when_it_works_in_a_worktree`, `test_a_run_from_an_unborn_branch_with_a_base_of_its_own_checks_the_key`, `test_a_resumed_run_checks_the_key_again_before_any_agent_works`, `test_a_resumed_run_checks_the_key_for_an_edit_agent_in_a_sub_workflow`, `test_a_resumed_run_without_its_run_json_checks_the_key_where_it_ran` |
+| No agent of the run commits: each `edit` agent works in your checkout, and the others only read | There is no test commit, so a key that can't sign doesn't stop the run. | `workflow/runner.py:277` | `test_a_run_the_runner_makes_no_commits_in_doesnt_check_the_key` |
+| The test commit fails, or isn't signed within 30 seconds (`SIGNING_TIMEOUT`) | The command exits 1 before any agent works. The error says the key needs a touch, a PIN or a passphrase, or doesn't work. It names the fix: a key file (ssh) or a key id (OpenPGP) that needs none, as the repository's `user.signingkey`. | `workflow/workspaces.py:225`, `workflow/workspaces.py:60` | `test_a_run_whose_key_cant_sign_fails_at_its_start_and_says_how_to_fix_it`, `test_a_key_waiting_for_a_touch_fails_the_run_at_its_start_within_the_timeout`, `test_the_fix_for_an_openpgp_key_names_a_key_id` |
+| The repository signs with ssh, and `user.signingkey` is a relative path | The command exits 1 before any agent works, and asks for the key's absolute path. The runner commits in worktrees outside your checkout, where the relative path finds no key. | `workflow/workspaces.py:211` | `test_a_relative_signing_key_fails_the_run_at_its_start` |
+| The signing program asks for a passphrase or a PIN at a terminal | It finds none, because git runs in a session of its own, so signing fails at once. | `workflow/workspaces.py:423` | `test_the_signing_program_has_no_terminal_to_ask_on` |
+| `wf resume` of a run that has ended | There is no test commit. It says how the run ended. | `workflow/runner.py:189` | `test_resuming_a_run_that_succeeded_says_so_without_checking_the_key` |
+| The background process of a detached run fails the test | `status.json` says `failed`, with the error, so `wf wait` reports the cause and not a crash. | `workflow/runner.py:192` | `test_a_detached_run_whose_background_check_fails_records_why` |
+| The runner's commit fails | The error says that signing failed only after a timeout, or when a signed test commit fails and an unsigned one works. Otherwise it is git's own error, as `git commit failed: ...`. | `workflow/workspaces.py:197`, `workflow/workspaces.py:263` | `test_a_commit_that_cant_be_signed_says_so`, `test_a_commit_that_fails_for_another_reason_doesnt_blame_signing`, `test_a_commit_whose_signing_test_cant_write_either_doesnt_blame_signing` |
+| An agent succeeds, and then the runner's commit fails | The node fails with the attempt that ran, so `wf resume` starts at the next attempt number. | `workflow/nodes.py:423` | `test_a_failed_commit_keeps_the_attempt_number_so_a_resume_starts_at_the_next_one` |
+| wf stops git: after `SIGNING_TIMEOUT`, for a cancelled job, on Ctrl-C, SIGHUP or SIGTERM | Its process group, with the signing program, gets SIGTERM, so git removes its temporary files. Whatever still runs 5 seconds later (`GRACE`) gets SIGKILL. | `workflow/workspaces.py:457`, `workflow/workspaces.py:462` | `test_a_signing_timeout_lets_git_remove_its_temporary_file`, `test_a_signing_program_that_ignores_sigterm_is_killed` |
+| A job is cancelled, for example by a node's `timeout` or Ctrl-C during a run | Its git command stops, and none of its later git commands starts. Its error says it was stopped, not that signing failed. | `workflow/nodes.py:225`, `workflow/workspaces.py:418` | `test_cancelling_a_job_stops_its_git_command_and_the_signing_program`, `test_a_job_cancelled_while_it_waits_for_git_starts_none`, `test_a_stopped_commit_isnt_called_a_signing_failure` |
+| Ctrl-C while git runs in wf's main thread, as in the test before a run | git stops, and wf stops as for any Ctrl-C. | `workflow/workspaces.py:449` | `test_ctrl_c_stops_git_and_the_signing_program` |
+| wf gets SIGHUP (its terminal closed) or SIGTERM | It stops every git command, also one that is just starting, and starts no new one. Then it exits by that signal, as before. SIGKILL can't be handled, so it still leaves git running. | `workflow/cli.py:177`, `workflow/workspaces.py:374`, `workflow/workspaces.py:383` | `test_wf_stops_git_and_the_signing_program_when_its_terminal_closes_or_it_is_killed`, `test_wf_stops_the_runners_commit_and_starts_no_more_git_when_it_is_killed`, `test_a_signal_while_git_starts_still_stops_that_git` |
+| SIGHUP is ignored when wf starts, as under `nohup` | It stays ignored. | `workflow/workspaces.py:364` | `test_a_hangup_that_wf_ignores_stays_ignored` |
 
 ## Run folder
 
