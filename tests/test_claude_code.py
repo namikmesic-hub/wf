@@ -1,4 +1,5 @@
-"""The Claude Code adapter: settings per access level, and (opt-in) one real run.
+"""The Claude Code adapter: settings per access level, messages from wf steer against a fake
+Claude Code (fake_claude.py), and (opt-in) one real run.
 
 The real run costs a little quota. Run it with:  uv run pytest -m harness
 """
@@ -10,10 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from workflow import cli, schemas
+from fake_claude import FakeClaude
+from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
+from workflow import cli, runner, schemas
 from workflow.harnesses.base import SessionSpec, Unavailable
-from workflow.harnesses.claude_code import GIT, TOOL, ClaudeCode, options
-from workflow.output_tool import ResultTool
+from workflow.harnesses.claude_code import GIT, REPLAY, TOOL, ClaudeCode, options
+from workflow.output_tool import FINISH, ResultTool, REMINDER
 
 
 def spec(tmp_path, access="read-only", web=False, **extra) -> SessionSpec:
@@ -59,6 +62,7 @@ def test_every_session_sets_everything_explicitly(tmp_path, monkeypatch):
     assert o.system_prompt == {"type": "preset", "preset": "claude_code"}
     assert list(o.mcp_servers) == ["wf"]
     assert o.env == {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}  # use the subscription login
+    assert o.extra_args == {REPLAY: None}  # Claude Code says which messages it read: wf steer needs that
 
 
 def test_without_project_instructions_no_setting_source_loads(tmp_path):
@@ -93,6 +97,76 @@ def test_opening_finds_the_claude_code_program_as_the_sdk_does(tmp_path, monkeyp
         asyncio.run(ClaudeCode().open(tmp_path))
     program.chmod(0o755)
     asyncio.run(ClaudeCode().open(tmp_path))
+
+
+# ---------- wf steer ----------
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    monkeypatch.chdir(tmp_path / "repo")
+    monkeypatch.setattr(runner, "interactive", lambda: False)
+    subprocess.run(["git", "init", "-q"], check=True)
+    return tmp_path
+
+
+def run_flow() -> int:
+    Path("flow.yaml").write_text("""
+version: 1
+name: cc
+defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+start: {input: {}}
+nodes:
+  ask: {needs: [start], instruction: Say hi}
+end: {output: {out: "{{ ask.summary }}"}}
+""")
+    return cli.main(["run", "flow.yaml"])
+
+
+GOOD = {"submit": {"summary": "hi"}}
+
+
+def test_claude_code_reads_a_message_from_wf_steer_at_its_next_step(repo, monkeypatch):
+    claude = FakeClaude(repo, [{"tool": "Read"}, {"pause": "p"}, {"tool": "Bash"}, GOOD])
+    claude.install(monkeypatch)
+    steering = at_pause(repo, "p")
+    assert run_flow() == 0
+    done = steering.result()
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("Queued for ask (attempt 1 on claude-code)")
+    assert claude.read == [f"Say hi\n\n{FINISH}", STEER]  # in the same turn: no turn of its own
+    queued, delivered = steer_events()
+    assert (queued["status"], queued["text"], queued["harness"]) == ("queued", STEER, "claude-code")
+    assert (delivered["status"], delivered["id"]) == ("delivered", queued["id"])
+    assert [line["status"] for line in steer_lines()] == ["queued", "delivered"]
+    assert left_in_mailbox() == []
+
+
+def test_a_message_claude_code_hasnt_read_when_the_agent_submits_is_dropped(repo, monkeypatch):
+    claude = FakeClaude(repo, [GOOD, {"pause": "p"}])  # no step after the message comes
+    claude.install(monkeypatch)
+    steering = at_pause(repo, "p")
+    assert run_flow() == 0
+    assert steering.result().returncode == 0
+    queued, dropped = steer_events()
+    assert (queued["status"], dropped["status"], dropped["id"]) == ("queued", "dropped", queued["id"])
+    assert dropped["reason"] == "the agent submitted its result before it read the message"
+
+
+def test_a_message_after_the_last_step_gets_a_turn_of_its_own_and_no_reminder_goes(repo, monkeypatch):
+    claude = FakeClaude(repo, [{"pause": "p"}], [GOOD])
+    claude.install(monkeypatch)
+    steering = at_pause(repo, "p")
+    assert run_flow() == 0
+    assert steering.result().returncode == 0
+    assert claude.read == [f"Say hi\n\n{FINISH}", STEER]
+    assert REMINDER not in claude.read
+    assert [e["status"] for e in steer_events()] == ["queued", "delivered"]
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    results = [json.loads(line) for line in (folder / "nodes/ask/1/attempt-1.log").read_text().splitlines()
+               if json.loads(line)["kind"] == "result"]
+    assert len(results) == 2  # one send() read both turns' results
 
 
 @pytest.mark.harness

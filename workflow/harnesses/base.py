@@ -31,6 +31,11 @@ Each adapter also reports to SessionSpec.trace, a Recorder, what the agent did:
 its text, and each tool call with its full arguments and answer. These go into
 the run's trace (trace.py). What a wf tool answers isn't kept there either.
 
+While a session is open, a person can send it a message with `wf steer`
+(steer.py). steer() offers the message to the turn that's running. A harness
+that can't take it now returns None, and the runner sends it as the next turn.
+Every message is recorded with steered(): in the transcript and as an event.
+
 How a turn ended:
 - done: the turn finished normally (the agent may or may not have called
   submit_result; the attempt loop checks the tool).
@@ -122,6 +127,12 @@ class Session(Protocol):
         """What a turn that hasn't returned yet has used so far (zero between turns), so a turn
         cut off by a timeout still counts. Harnesses that can't tell return Usage()."""
 
+    async def steer(self, text: str, ident: str) -> Literal["delivered", "queued"] | None:
+        """A message from `wf steer`, with its id. "delivered": the running turn has it now.
+        "queued": the harness holds it for the agent's next step, and records with steered() when
+        the agent reads it, or steer_dropped() when the session ends first. None: the harness
+        can't take it now, so the runner sends it as the next turn."""
+
     async def close(self) -> None:
         """End the session, interrupting a turn that's still running."""
 
@@ -149,6 +160,20 @@ def transcript(path: Path, kind: str, **data) -> None:
     """Add one line to an attempt's transcript (JSON lines: easy to read, easy to parse)."""
     with path.open("a", encoding="utf-8") as file:
         file.write(json.dumps({"kind": kind, **data}, ensure_ascii=False, default=str) + "\n")
+
+
+def steered(spec: SessionSpec, ident: str, status: str, **more) -> None:
+    """Record what became of a message from `wf steer`: a `steer` line in the transcript, and a
+    `steer` event."""
+    transcript(spec.log, "steer", id=ident, status=status, **more)
+    spec.emit({"event": "steer", "id": ident, "status": status, **more})
+
+
+def steer_dropped(spec: SessionSpec, ident: str) -> None:
+    """A message from `wf steer` that the agent never read, because its session ended first."""
+    reason = ("the agent submitted its result before it read the message" if spec.tool.result is not None
+              else "the session ended before the agent read the message")
+    steered(spec, ident, "dropped", reason=reason)
 
 
 def short(text: object, limit: int = 100) -> str:

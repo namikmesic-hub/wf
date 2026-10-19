@@ -22,6 +22,8 @@ through a counter file next to requests.jsonl: each session/prompt takes the nex
     {"rpc_error": {"code": -32000, "message": "..."}}  answer session/prompt with this error
     {"child": true}                                    start a process that ignores SIGTERM, and log its pid
     {"hang": true}                                     wait for session/cancel
+    {"pause": "p"}                                     write p.paused next to requests.jsonl, and wait until
+                                                       p.go is there (tests/steering.py)
     {"exit": true}                                     die mid-turn
 Sessions are kept in CURSOR_CONFIG_DIR/acp-sessions/<id>, as Cursor keeps them, so session/load
 works across processes; it replays the history first, as Cursor does. A new or loaded session
@@ -37,6 +39,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 import uuid
 from pathlib import Path
@@ -174,6 +177,11 @@ async def main() -> None:
             elif "hang" in action:
                 await cancelled.wait()
                 stop = "cancelled"
+            elif "pause" in action:
+                (log_path.parent / f"{action['pause']}.paused").touch()
+                deadline = time.monotonic() + 30
+                while not (log_path.parent / f"{action['pause']}.go").exists() and time.monotonic() < deadline:
+                    await asyncio.sleep(0.05)
             elif "exit" in action:
                 sys.stdout.flush()
                 os._exit(1)

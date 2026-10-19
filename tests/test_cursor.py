@@ -21,6 +21,7 @@ from textwrap import dedent, indent
 
 import pytest
 
+from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, harnesses, runner, schemas
 from workflow.harnesses.base import SessionSpec
 from workflow.harnesses.cursor import TESTED, WRITES_WITHOUT_ASKING, Cursor
@@ -607,3 +608,35 @@ end:
     assert "periwinkle" in out["told"].lower() and "tangerine" in out["told"].lower()  # by default the repo's files reach it
     assert "periwinkle" not in out["kept_out"].lower() and "tangerine" not in out["kept_out"].lower()
     assert Path("out.txt").read_text().strip() == "done"  # it still worked in the workspace
+
+
+# ---------- wf steer ----------
+
+
+def test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn(repo, monkeypatch, capsys):
+    log = cursor(monkeypatch, repo, [{"pause": "p"}], [GOOD])
+    steering = at_pause(repo, "p")
+    assert run() == 0
+    done = steering.result()
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("Queued for ask (attempt 1 on cursor)")  # ACP can't add to a running turn
+    assert [prompt["prompt"][0]["text"] for prompt in sent(log, "session/prompt")] == [f"Say hi\n\n{FINISH}", STEER]
+    queued, delivered = steer_events()
+    assert (queued["status"], queued["text"], queued["harness"]) == ("queued", STEER, "cursor")
+    assert (delivered["status"], delivered["id"]) == ("delivered", queued["id"])
+    assert [line["status"] for line in steer_lines()] == ["queued", "delivered"]
+    assert left_in_mailbox() == []
+    out = capsys.readouterr().out
+    assert f"ask: message from wf steer queued: {STEER}" in out
+    assert "ask: message from wf steer delivered" in out
+
+
+def test_a_message_for_cursor_is_dropped_when_the_agent_submits_first(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [{"pause": "p"}, GOOD])
+    steering = at_pause(repo, "p")
+    assert run() == 0
+    assert steering.result().returncode == 0
+    assert len(sent(log, "session/prompt")) == 1
+    queued, dropped = steer_events()
+    assert (queued["status"], dropped["status"]) == ("queued", "dropped")
+    assert dropped["reason"] == "the agent submitted its result before it read the message"

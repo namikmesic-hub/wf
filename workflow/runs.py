@@ -16,6 +16,7 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
       events.jsonl                  one line per progress event
       trace.jsonl, blobs/           what the run read, decided and did (trace.py)
       checkpoints.sqlite            LangGraph checkpoints, used by wf retry
+      steer/                        wf steer's messages, on their way to the process that drives the run
       nodes/<node>/<pass>/[<index>/]
         instruction.md              the rendered instruction (or command, or message)
         output.json

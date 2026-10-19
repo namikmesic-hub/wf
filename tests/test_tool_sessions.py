@@ -417,10 +417,10 @@ class _Client:
     def __init__(self, messages):
         self.messages = messages
 
-    async def query(self, text):
+    async def query(self, prompt):
         pass
 
-    async def receive_response(self):
+    async def receive_messages(self):
         for message in self.messages:
             yield message
 

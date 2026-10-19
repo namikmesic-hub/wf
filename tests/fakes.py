@@ -54,6 +54,9 @@ class _FakeSession:
     def pending_usage(self) -> Usage:
         return self.pending
 
+    async def steer(self, text: str, ident: str):
+        return None  # like Cursor: the runner sends it as the next turn
+
     async def close(self):
         self.fake.closed += 1
 
@@ -89,6 +92,18 @@ def hang(tokens=0):
     async def turn(session):
         session.pending = Usage(tokens, 0.0)
         await asyncio.sleep(60)
+    return turn
+
+
+def paused(folder: Path, name: str, *results):
+    """A turn that waits at a pause, as tests/steering.py expects, then submits each result."""
+    async def turn(session):
+        (folder / f"{name}.paused").touch()
+        while not (folder / f"{name}.go").exists():
+            await asyncio.sleep(0.05)
+        for result in results:
+            session.fake.replies.append(session.spec.tool.submit(result))
+        return TurnEnd("done", usage=Usage(10, 0.0))
     return turn
 
 

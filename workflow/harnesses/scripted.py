@@ -49,6 +49,9 @@ class ScriptedSession:
     def pending_usage(self) -> Usage:
         return Usage()
 
+    async def steer(self, text: str, ident: str) -> None:
+        return None  # a message from `wf steer` goes as the next turn, which does nothing
+
     async def send(self, text: str) -> TurnEnd:
         spec = self.spec
         transcript(spec.log, "sent", text=text)

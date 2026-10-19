@@ -19,6 +19,7 @@ For an operator that isn't at a terminal (operate.py):
     wf wait <run-id>                 block until the run needs attention
     wf answer <run-id> <file>        answer what it's waiting on, and continue
     wf status <run-id> / wf list     where runs stand (newest first), and in status, how far, as an estimate (progress.py)
+    wf steer <run-id> <node> <message>   send a message into a node's live agent session (steer.py)
     wf report <run-id>... | --workflow NAME   what runs did, per node (report.py)
     wf trace <run-id> [--node N] [--pass P] [--field F] [--var PATH]
                                      what one run read, decided and did, from its trace (trace_view.py)
@@ -40,7 +41,8 @@ Exit codes: 0 success, 1 failure (including bad arguments), 2 paused waiting
 for a person (wf run and wf retry, only with --no-input or without a
 terminal), 3 nothing new before the timeout (wf wait), 130 stopped with
 Ctrl-C. Bad arguments exit with 1, not argparse's usual 2, so a script can
-tell a pause from a typo.
+tell a pause from a typo. A message that `wf steer` finds no live session for
+fails too: exit code 1.
 """
 
 import argparse
@@ -53,7 +55,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from . import diagram, firstmate, observe, operate, progress, report, runner, runs, spec, trace_view, ui, validate, workspaces
+from . import diagram, firstmate, observe, operate, progress, report, runner, runs, spec, steer, trace_view, ui, validate, workspaces
 from .tools import keychain, signin
 from .tools.catalog import TOOLS
 
@@ -177,6 +179,16 @@ def main(argv: list[str] | None = None) -> int:
     page.add_argument("--open", action="store_true", help="open the page in the browser")
     page.add_argument("--runs-dir", **runs_dir)
     page.set_defaults(handler=_ui)
+
+    steering = commands.add_parser("steer", help="send a message into the live agent session of a running node")
+    steering.add_argument("run_id", metavar="run-id")
+    steering.add_argument("node", help="an agent node, as events name it: implement, or build[1]/implement in a sub-workflow")
+    steering.add_argument("message", nargs="?", help="what to tell the agent (or use --file)")
+    steering.add_argument("--item", type=int, metavar="INDEX", help="the item, for a for_each node")
+    steering.add_argument("--file", type=Path, metavar="FILE", help="read the message from FILE (- for stdin)")
+    steering.add_argument("--json", action="store_true")
+    steering.add_argument("--runs-dir", **runs_dir)
+    steering.set_defaults(handler=_steer)
 
     examples = commands.add_parser("examples", help="copy wf's complete example workflows into a folder")
     examples.add_argument("dir", nargs="?", type=Path, default=Path("wf-examples"))
@@ -397,6 +409,56 @@ def _ui(args) -> int:
     except OSError as error:
         print(f"wf ui: can't listen on {ui.HOST}:{args.port}: {error.strerror or error}", file=sys.stderr)
         return 1
+
+
+def _steer(args) -> int:
+    try:
+        text = _message(args)
+    except ValueError as error:
+        print(f"wf steer: {error}", file=sys.stderr)
+        return 1
+    run = _find(args.run_id, args.runs_dir)
+    if run is None:
+        return 1
+    try:
+        path = steer.target(run, args.node, args.item)
+        answer = steer.send(run, path, text)
+    except steer.SteerError as error:
+        print(f"wf steer: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f"wf steer: can't write the message into {run.dir / steer.FOLDER}: {error.strerror or error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"run": run.id, "node": path, **answer}))
+    elif answer["status"] == "none":
+        print(f"wf steer: no live session for {path}: {answer['reason']}. Nothing was sent.", file=sys.stderr)
+    else:
+        where = f"{path} (attempt {answer['attempt']} on {answer['harness']})"
+        print(f"Delivered to {where}: the agent reads it at its next step." if answer["status"] == "delivered" else
+              f"Queued for {where}: the agent gets it at its next step, or as its next turn. The run's events.jsonl "
+              f"says when it does, or why it doesn't.")
+    return 1 if answer["status"] == "none" else 0
+
+
+def _message(args) -> str:
+    """wf steer's message: the argument, or what --file holds. Raises ValueError."""
+    if (args.message is None) == (args.file is None):
+        raise ValueError("give the message, or --file, but not both")
+    if args.file is None:
+        text = args.message
+    elif str(args.file) == "-":
+        text = sys.stdin.read()
+    else:
+        try:
+            text = args.file.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ValueError(f"can't read {args.file}: {error.strerror or error}") from error
+        except UnicodeDecodeError as error:
+            raise ValueError(f"{args.file} isn't UTF-8 text") from error
+    if not text.strip():
+        raise ValueError("the message is empty")
+    return text
 
 
 def _list(args) -> int:
