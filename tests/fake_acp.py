@@ -2,8 +2,9 @@
 
     python fake_acp.py scenario.json requests.jsonl [cursor-agent arguments]
 
-scenario.json: {"models": [...], "logged_out": false, "silent": [method, ...], "turns": [[action, ...], ...]}.
-`--list-models` prints the models as cursor-agent does, or fails when "logged_out". Requests for a
+scenario.json: {"models": [...], "version": "...", "logged_out": false, "silent": [method, ...],
+"turns": [[action, ...], ...]}. `--version` prints the version, and `--list-models` the models as
+cursor-agent does, or fails when "logged_out". Requests for a
 "silent" method never get an answer. Every session is its own process, so the turns are shared
 through a counter file next to requests.jsonl: each session/prompt takes the next list of actions:
     {"text": "..."}                                    an agent_message_chunk
@@ -14,20 +15,23 @@ through a counter file next to requests.jsonl: each session/prompt takes the nex
     {"error": "Upgrade your plan to continue"}         how Cursor reports a failed request: "\n\n" + text
     {"error": ["Error: [resource", "_exhausted] ..."]}  the same, sent in several chunks
     {"stop": "cancelled"}                              the turn's stopReason (default end_turn)
+    {"rpc_error": {"code": -32000, "message": "..."}}  answer session/prompt with this error
+    {"child": true}                                    start a process that ignores SIGTERM, and log its pid
     {"hang": true}                                     wait for session/cancel
     {"exit": true}                                     die mid-turn
 Sessions are kept in CURSOR_CONFIG_DIR/acp-sessions/<id>, as Cursor keeps them, so session/load
 works across processes; it replays the history first, as Cursor does. A new or loaded session
 reports its model and parameters in configOptions: the effort in a model id only when initialize
-asked for parameterized models, as with Cursor. Every request, the arguments
-and environment each process started with, the MCP tools offered, and every answer to the fake's
-own requests are appended to requests.jsonl.
+asked for parameterized models, as with Cursor. Every request, the arguments,
+environment and cli-config.json each process started with, the MCP tools offered, and every answer
+to the fake's own requests are appended to requests.jsonl.
 """
 
 import asyncio
 import itertools
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 import uuid
@@ -122,6 +126,12 @@ async def main() -> None:
         stop = "end_turn"
         cancelled.clear()
         for action in actions:
+            if "rpc_error" in action:
+                write({"id": request_id, "error": action["rpc_error"]})
+                return
+            if "child" in action:
+                child = subprocess.Popen([sys.executable, "-c", CHILD])
+                log("child", child.pid)
             if "text" in action:
                 update(session, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": action["text"]}})
             elif "tool" in action:
@@ -191,6 +201,11 @@ async def main() -> None:
             write({"id": request_id, "error": {"code": -32601, "message": f"fake doesn't know {method}"}})
 
 
+CHILD = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nwhile True: time.sleep(0.1)"
+
+if args[-1:] == ["--version"]:
+    print(scenario.get("version", "0"))
+    sys.exit(0)
 if args[-1:] == ["--list-models"]:
     log("list-models", {"config": os.environ.get("CURSOR_CONFIG_DIR")})
     if scenario.get("logged_out"):
@@ -198,7 +213,9 @@ if args[-1:] == ["--list-models"]:
         sys.exit(1)
     print("Available models\n\n" + "\n".join(f"{model} - {model.title()}" for model in models))
     sys.exit(0)
-log("start", {"args": args, "cwd": os.getcwd(), "config": os.environ.get("CURSOR_CONFIG_DIR"),
-              "data": os.environ.get("CURSOR_DATA_DIR"), "api_key": "CURSOR_API_KEY" in os.environ,
+config = os.environ.get("CURSOR_CONFIG_DIR")
+log("start", {"args": args, "cwd": os.getcwd(), "config": config, "data": os.environ.get("CURSOR_DATA_DIR"),
+              "settings": json.loads(Path(config, "cli-config.json").read_text()),
+              "api_key": "CURSOR_API_KEY" in os.environ, "auth_token": "CURSOR_AUTH_TOKEN" in os.environ,
               "no_browser": os.environ.get("NO_OPEN_BROWSER")})
 asyncio.run(main())

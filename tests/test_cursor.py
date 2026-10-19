@@ -9,8 +9,12 @@ The opt-in test at the bottom runs the real `cursor-agent` (uses your Cursor quo
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from textwrap import dedent, indent
 
@@ -18,7 +22,7 @@ import pytest
 
 from workflow import cli, harnesses, runner, schemas
 from workflow.harnesses.base import SessionSpec
-from workflow.harnesses.cursor import Cursor
+from workflow.harnesses.cursor import TESTED, WRITES_WITHOUT_ASKING, Cursor
 from workflow.output_tool import FINISH, NEW_RESULT, REMINDER, ResultTool
 
 FAKE = Path(__file__).parent / "fake_acp.py"
@@ -33,11 +37,11 @@ def repo(tmp_path, monkeypatch):
     return tmp_path
 
 
-def cursor(monkeypatch, tmp_path: Path, *turns, models=None, logged_out=False, silent=()) -> Path:
+def cursor(monkeypatch, tmp_path: Path, *turns, models=None, logged_out=False, silent=(), version=TESTED) -> Path:
     """Use the fake for `cursor-agent`; returns its log."""
     scenario, log = tmp_path / "scenario.json", tmp_path / "requests.jsonl"
     scenario.write_text(json.dumps({"turns": list(turns), "logged_out": logged_out, "silent": list(silent),
-                                    **({"models": models} if models else {})}))
+                                    "version": version, **({"models": models} if models else {})}))
     monkeypatch.setitem(harnesses.FACTORIES, "cursor",
                         lambda: Cursor(command=[sys.executable, str(FAKE), str(scenario), str(log)], request_timeout=5))
     return log
@@ -76,6 +80,22 @@ def output() -> dict:
     return json.loads((folder / "output.json").read_text())
 
 
+def cursor_home(wf_home: Path) -> Path:
+    """The run's Cursor folders, outside the repo."""
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    return wf_home / "temp" / folder.name / "cursor-agent"
+
+
+def post(url: str) -> int:
+    request = urllib.request.Request(url, json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode(),
+                                     {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as reply:
+            return reply.status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
 def attempt_log(attempt: int = 1, pass_no: int = 1) -> list[dict]:
     (folder,) = (Path(".wf") / "runs").iterdir()
     path = folder / "nodes" / "ask" / str(pass_no) / f"attempt-{attempt}.log"
@@ -85,18 +105,19 @@ def attempt_log(attempt: int = 1, pass_no: int = 1) -> list[dict]:
 GOOD = {"tool": {"arguments": {"summary": "hi"}}}
 
 
-def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monkeypatch):
+def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monkeypatch, wf_home):
     log = cursor(monkeypatch, repo, [GOOD])
     monkeypatch.setenv("CURSOR_API_KEY", "key_from_the_dashboard")
+    monkeypatch.setenv("CURSOR_AUTH_TOKEN", "token")
     assert run() == 0
     assert output() == {"out": "hi"}
     (start,) = entries(log, "start")
     assert start["args"] == ["--model", "composer-2.5", "--sandbox", "disabled", "--disable-project-configs", "acp"]
-    assert (start["api_key"], start["no_browser"]) == (False, "1")  # the local login, never a key
+    assert (start["api_key"], start["auth_token"], start["no_browser"]) == (False, False, "1")  # the local login, never a key
     assert Path(start["cwd"]).resolve() == Path.cwd().resolve()
     config = Path(start["config"])
-    assert (config.parent.name, config.name, start["data"]) == ("cursor", "read-only", start["config"])
-    settings = json.loads((config / "cli-config.json").read_text())
+    assert (config.parent, start["data"]) == (cursor_home(wf_home), start["config"])  # outside the repo
+    settings = start["settings"]
     assert settings["permissions"] == {"allow": [], "deny": ["Write(**)"]}
     assert (settings["approvalMode"], settings["autoAcceptWebSearch"], settings["sandbox"]) == ("allowlist", False, {"mode": "disabled"})
     assert sent(log, "authenticate") == [{"methodId": "cursor_login"}]
@@ -111,7 +132,7 @@ def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monk
     assert prompt["prompt"] == [{"type": "text", "text": f"Say hi\n\n{FINISH}"}]
     assert entries(log, "tools") == [["submit_result", "git"]]  # read-only gets the runner's git tool
     assert entries(log, "reply") == [{"content": [{"type": "text", "text": "Result recorded. You're done."}], "isError": False}]
-    assert not any((config / "acp-sessions").iterdir())  # no later pass continues it, so it's gone
+    assert not config.exists()  # the folder goes with the session
 
 
 def test_the_transcript_records_the_model_and_effort_cursor_uses(repo, monkeypatch):
@@ -121,14 +142,28 @@ def test_the_transcript_records_the_model_and_effort_cursor_uses(repo, monkeypat
     assert session["effective"] == {"model": "gpt-5.6-sol", "reasoning": "max", "fast": "true"}
 
 
-@pytest.mark.parametrize("access, mode", [("edit", "agent"), ("full", "agent")])
-def test_edit_and_full_run_in_agent_mode_with_writes_allowed(repo, monkeypatch, access, mode):
+@pytest.mark.parametrize("access, mode, deny", [("edit", "agent", WRITES_WITHOUT_ASKING), ("full", "agent", [])])
+def test_edit_and_full_run_in_agent_mode_with_writes_allowed(repo, monkeypatch, access, mode, deny):
     log = cursor(monkeypatch, repo, [GOOD])
     assert run(f"access: {access}\n") == 0
     (start,) = entries(log, "start")
-    assert json.loads((Path(start["config"]) / "cli-config.json").read_text())["permissions"] == {"allow": [], "deny": []}
+    assert start["settings"]["permissions"] == {"allow": [], "deny": deny}
     assert sent(log, "session/set_mode")[0]["modeId"] == mode
     assert entries(log, "tools") == [["submit_result"]]
+
+
+def test_edit_denies_the_writes_cursor_makes_outside_the_workspace_without_asking():
+    assert WRITES_WITHOUT_ASKING == ["Write(/tmp/*)", "Write(/private/tmp/*)", "Write(/var/tmp/*)", "Write(/var/folders/*)",
+                                     "Write(/private/var/folders/*)", "Write(~/.cursor/*)"]
+
+
+def test_each_cursor_agent_gets_a_new_config_folder_and_none_is_left(repo, monkeypatch, wf_home):
+    log = cursor(monkeypatch, repo, [{"exit": True}], [GOOD])
+    assert run() == 0
+    folders = [Path(e["config"]) for e in entries(log, "start")]
+    assert len(set(folders)) == 2 and all(folder.parent == cursor_home(wf_home) for folder in folders)
+    assert not any(folder.exists() for folder in folders)
+    assert not cursor_home(wf_home).exists()  # the run succeeded: its temp folder is gone
 
 
 def permission_requests() -> list[dict]:
@@ -184,6 +219,54 @@ def test_progress_shows_tool_calls(repo, monkeypatch, capsys):
     assert "ask: submit_result" in out
 
 
+def test_closing_a_session_ends_its_mcp_url(tmp_path, monkeypatch):
+    cursor(monkeypatch, tmp_path)
+
+    async def main():
+        harness = harnesses.create("cursor")
+        await harness.open(tmp_path / "run")
+        tool = ResultTool(schemas.object_schema({"summary": {"type": "string"}}))
+        spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="composer-2.5", effort=None, tool=tool,
+                           log=tmp_path / "attempt-1.log", emit=lambda event: None)
+        try:
+            session = await harness.session(spec)
+            before = await asyncio.to_thread(post, session.url)
+            await session.close()
+            return before, await asyncio.to_thread(post, session.url)  # the server still runs: only the URL is gone
+        finally:
+            await harness.close()
+
+    assert asyncio.run(main()) == (200, 404)
+
+
+def test_a_cursor_agent_other_than_the_tested_one_gets_one_warning(repo, monkeypatch, capsys):
+    cursor(monkeypatch, repo, [{"exit": True}], [GOOD], version="2026.01.01-abcdef0")
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert out.count(f"cursor-agent 2026.01.01-abcdef0 is installed; wf is tested with {TESTED}") == 1
+
+
+def test_the_tested_cursor_agent_gets_no_warning(repo, monkeypatch, capsys):
+    cursor(monkeypatch, repo, [GOOD])
+    assert run() == 0
+    assert "is installed; wf is tested with" not in capsys.readouterr().out
+
+
+def test_closing_a_session_stops_the_commands_cursor_agent_started(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [{"child": True}, GOOD])
+    assert run() == 0
+    (child,) = entries(log, "child")  # it ignores SIGTERM, so only the process group's SIGKILL stops it
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(child, 9)
+        pytest.fail("the command cursor-agent started still runs after its session closed")
+
+
 def test_a_reminder_is_another_prompt_in_the_same_session(repo, monkeypatch):
     log = cursor(monkeypatch, repo, [{"text": "done!"}], [GOOD])
     assert run() == 0
@@ -212,7 +295,7 @@ def test_a_cursor_agent_that_is_not_logged_in_is_unavailable(repo, monkeypatch, 
 @pytest.mark.parametrize("notice", [
     "Upgrade your plan to continue",
     "Please sign in to continue",
-    "Error: [resource_exhausted] You've hit your usage limit",
+    "Error: ConnectError: [resource_exhausted] You've hit your usage limit",
     "Error: [unauthenticated] Backend rejected authentication.",
 ])
 def test_a_usage_limit_or_a_login_problem_makes_cursor_unavailable(repo, monkeypatch, capsys, notice):
@@ -230,9 +313,26 @@ def test_a_notice_sent_in_several_chunks_is_still_read(repo, monkeypatch, capsys
 
 
 def test_an_error_notice_fails_the_turn_and_other_text_does_not(repo, monkeypatch, capsys):
-    cursor(monkeypatch, repo, [{"error": "Error: [internal] the model broke"}], [GOOD, {"text": "\nError: handling is covered"}])
+    cursor(monkeypatch, repo, [{"error": "Error: ConnectError: [internal] the model broke"}], [GOOD, {"text": "\nError: handling is covered"}])
     assert run() == 0  # attempt 2's last message isn't a notice: it mentions an error in passing
-    assert "attempt 1 failed: cursor: Error: [internal] the model broke" in capsys.readouterr().out
+    assert "attempt 1 failed: cursor: Error: ConnectError: [internal] the model broke" in capsys.readouterr().out
+
+
+def test_a_paragraph_that_only_starts_with_error_is_the_agents_own_text(repo, monkeypatch, capsys):
+    log = cursor(monkeypatch, repo, [{"text": "Review done.\n\nError: no defects were found"}], [GOOD])
+    assert run() == 0
+    assert "failed" not in capsys.readouterr().out  # the reminder, in the same session, got the result
+    assert len(entries(log, "start")) == 1 and len(sent(log, "session/prompt")) == 2
+
+
+def test_an_authentication_error_in_a_turn_makes_cursor_unavailable(repo, monkeypatch, capsys):
+    from fakes import Fake, submit
+    cursor(monkeypatch, repo, [{"rpc_error": {"code": -32000, "message": "Authentication required"}}])
+    claude = Fake("claude-code", submit({"summary": "from claude"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", claude.factory)
+    assert run("harness: [cursor, claude-code]\nmodel: {cursor: composer-2.5, claude-code: opus}\n") == 0
+    assert output() == {"out": "from claude"}
+    assert "cursor is unavailable: cursor: Authentication required" in capsys.readouterr().out
 
 
 def test_a_turn_that_ends_another_way_fails(repo, monkeypatch, capsys):
@@ -267,7 +367,7 @@ def test_a_cursor_agent_that_does_not_answer_is_unavailable_not_a_node_timeout(r
 CONTINUE = "session: continue\nroutes: [{to: ask, max: 1}, {to: end}]\n"
 
 
-def test_continue_loads_the_last_passs_session(repo, monkeypatch, capsys):
+def test_continue_loads_the_last_passs_session(repo, monkeypatch, capsys, wf_home):
     log = cursor(monkeypatch, repo, [GOOD], [GOOD])
     assert run(CONTINUE) == 0
     (first,) = sent(log, "session/new")
@@ -279,16 +379,30 @@ def test_continue_loads_the_last_passs_session(repo, monkeypatch, capsys):
     assert "continuing the last pass's session" in capsys.readouterr().out
     texts = [e["text"] for e in attempt_log(pass_no=2) if e["kind"] == "text"]
     assert "an earlier answer" not in texts  # what session/load replays isn't this attempt's
-    (config,) = {e["config"] for e in entries(log, "start")}
-    assert [p.name for p in (Path(config) / "acp-sessions").iterdir()] == [session[0]]  # kept: a later pass may load it
+    assert len({e["config"] for e in entries(log, "start")}) == 2  # the session moved to the new process's folder
+    assert not cursor_home(wf_home).exists()
 
 
 def test_after_a_continued_attempt_fails_the_retry_starts_fresh(repo, monkeypatch, capsys):
-    log = cursor(monkeypatch, repo, [GOOD], [{"error": "Error: boom"}], [GOOD])
+    log = cursor(monkeypatch, repo, [GOOD], [{"error": "Error: ConnectError: [internal] boom"}], [GOOD])
     assert run(CONTINUE) == 0
     assert len(sent(log, "session/load")) == 1  # attempt 1 of pass 2
     assert len(sent(log, "session/new")) == 2  # pass 1, and the retry
     assert "starting a fresh session: the last attempt that continued this session failed" in capsys.readouterr().out
+
+
+def test_a_continued_attempt_that_times_out_after_its_result_is_not_continued_again(repo, monkeypatch, capsys):
+    log = cursor(monkeypatch, repo, [GOOD], [GOOD, {"hang": True}], [GOOD])
+    assert run(CONTINUE + "timeout: 2s\n") == 0
+    assert (len(sent(log, "session/load")), len(sent(log, "session/new"))) == (1, 2)
+    assert "starting a fresh session: the last attempt that continued this session failed" in capsys.readouterr().out
+
+
+def test_a_third_pass_continues_the_session_a_successful_second_pass_continued(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [GOOD], [GOOD], [GOOD])
+    assert run("session: continue\nroutes: [{to: ask, max: 2}, {to: end}]\n") == 0
+    assert (len(sent(log, "session/load")), len(sent(log, "session/new"))) == (2, 1)
+    assert len({p["sessionId"] for p in sent(log, "session/prompt")}) == 1
 
 
 def test_cursor_reports_no_usage(repo, monkeypatch):

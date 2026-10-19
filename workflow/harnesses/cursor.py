@@ -19,14 +19,19 @@ repo's .cursor/cli.json from changing permissions. Its process group is stopped
 with the session, so commands the agent started stop too.
 
 Configuration: Cursor saves the model it was started with into its config
-folder, and reads its permissions, MCP servers and hooks from there. So every
-process gets CURSOR_CONFIG_DIR (and CURSOR_DATA_DIR) set to
-<run folder>/cursor/<access>, which holds wf's cli-config.json (CONFIG):
-nothing runs without asking, web search isn't accepted by itself, the sandbox
-is off, and the agent doesn't credit itself in commits. Your ~/.cursor settings
-don't apply and aren't changed. Sessions are saved in that folder too, so
-`wf resume` can continue them; a session no later pass will continue is deleted
-when it closes.
+folder, with the parameters it last used for that model, and reads its
+permissions, MCP servers and hooks from there. So every process gets a new
+folder of its own as CURSOR_CONFIG_DIR (and CURSOR_DATA_DIR), in
+~/.wf/temp/<run-id>/cursor-agent/, outside the repo, because Cursor also writes
+your account's details there. It holds wf's cli-config.json (CONFIG): nothing
+runs without asking, web search isn't accepted by itself, the sandbox is off,
+the agent doesn't credit itself in commits, and DENY's rules for the access
+level. The folder goes when the session closes. Your ~/.cursor settings don't
+apply and aren't changed. A session a later pass may continue is kept in
+sessions/ next to the folders, so `wf resume` can continue it, until the run
+succeeds and wf removes its temp folder.
+The sandbox is off at every level: with it on, a command wf allows still runs
+outside it, so it would confine nothing that wf doesn't already decide.
 CURSOR_API_KEY and CURSOR_AUTH_TOKEN are removed from the environment, so the
 local login is used and the agent's commands can't read a key, and
 NO_OPEN_BROWSER keeps a logged-out cursor-agent from opening a login page.
@@ -45,6 +50,8 @@ Cursor would save.
   it gets the runner's `git` tool (git_tool.py) next to submit_result.
 - edit: agent mode. Cursor writes inside the workspace without asking; a write
   outside it is refused, commands are allowed, other MCP servers' tools refused.
+  Cursor also writes to temp folders and to Markdown files in ~/.cursor without
+  asking, so deny rules block those writes.
 - full: everything is allowed.
 Web search and fetch follow `web` at every level.
 
@@ -55,23 +62,28 @@ over. `effort` isn't used: Cursor model ids carry their own.
 How a turn ends: Cursor reports a failed request as a paragraph it adds at
 the end of the turn's last message, with stopReason end_turn, not as an error.
 The paragraph can come in several chunks, so the adapter reads the whole
-message since the last tool call. A paragraph "Error: ..." fails the turn, and
-a sign-in, plan or payment notice, or an unauthenticated or resource_exhausted
-error (a usage limit), makes it unavailable. Any stopReason but end_turn fails
-it.
+message since the last tool call. A paragraph in the form Cursor writes an
+error, "Error: [code] ..." or "Error: SomeError: ...", fails the turn, and a
+sign-in, plan or payment notice, or an unauthenticated or resource_exhausted
+error (a usage limit), makes it unavailable. Other text that starts with
+"Error:" is the agent's own. Any stopReason but end_turn fails the turn.
 
 Usage: ACP reports neither tokens nor cost, so Cursor turns count as zero.
 
 session: continue loads the previous pass's session (session/load) in a new
-process with the same model. Cursor can't fork, so the session itself carries
-on. It's marked while a continued attempt runs, and when that attempt fails,
-the next one starts fresh instead of loading the failure.
+process with the same model, after moving the saved session into its config
+folder. Cursor can't fork, so the session itself carries on. It's marked while
+a continued attempt runs, and the mark goes only when a turn of that attempt
+ends with a result. When the attempt fails, even after its result came in (a
+timeout), the next one starts fresh instead of loading the failure.
 
-What can't be switched off: the repo's rules and AGENTS.md load, and Cursor
-runs a web fetch its server marks as needing no approval, even with
-`web: false`.
+What can't be switched off: the repo's rules and AGENTS.md load, and so do your
+Cursor account's User Rules and the skills in your home folder (such as
+~/.claude/skills and ~/.agents/skills). Cursor runs a web fetch its server
+marks as needing no approval, even with `web: false`.
 
-Tested with cursor-agent 2026.10.14-0f9edde.
+wf is tested with one cursor-agent version (TESTED), because it reads the
+messages Cursor writes, and warns when the installed one differs.
 """
 
 import asyncio
@@ -82,13 +94,15 @@ import os
 import re
 import shutil
 import signal
+import uuid
 from pathlib import Path
 
-from .. import output_tool
+from .. import output_tool, workspaces
 from ..runs import write_json
 from . import git_tool, mcp_http
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
+TESTED = "2026.10.16-e3cb207"
 COMMAND = ["cursor-agent"]
 FLAGS = ["--sandbox", "disabled", "--disable-project-configs"]
 SERVER = "wf"  # the MCP server name the agent sees
@@ -100,12 +114,18 @@ CONFIG = {
     "sandbox": {"mode": "disabled"},
     "attribution": {"attributeCommitsToAgent": False, "attributePRsToAgent": False},
 }
+WRITES_WITHOUT_ASKING = [  # outside the workspace: temp folders, and Markdown files in ~/.cursor
+    "Write(/tmp/*)", "Write(/private/tmp/*)", "Write(/var/tmp/*)", "Write(/var/folders/*)",
+    "Write(/private/var/folders/*)", "Write(~/.cursor/*)",
+]
+DENY = {"read-only": ["Write(**)"], "edit": WRITES_WITHOUT_ASKING, "full": []}  # Cursor's `*` matches any text
 MODES = {"read-only": "ask", "edit": "agent", "full": "agent"}
 SECRETS = ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN")
 NOTICES = (  # Cursor's own messages when the account needs attention
     "Please sign in to continue", "Upgrade your plan to continue", "Add a payment method to continue",
     "Check your settings to continue",
 )
+ERROR = re.compile(r"\n\nError: (?:\[[a-z_]+\] |\w*Error: )")  # how Cursor reports a failed request
 UNAVAILABLE = (*NOTICES, "[unauthenticated]", "[resource_exhausted]")  # in a notice: it can't run here now
 AUTH_REQUIRED = -32000  # ACP's error code for "authenticate first"
 LABELS = {"read": "read", "edit": "edit", "delete": "delete", "move": "move", "search": "search",
@@ -118,20 +138,28 @@ class Cursor:
     def __init__(self, command: list[str] | None = None, request_timeout: float = 60):
         self.command = command or COMMAND
         self.request_timeout = request_timeout  # for starting a session; a turn has the node's timeout
-        self.home = Path()
+        self.home = Path()  # this run's Cursor folders
         self.models: set[str] = set()
         self.tools: mcp_http.Server | None = None
-        self._configured: set[str] = set()
+        self.warning: str | None = None  # shown once, with the first session
 
     async def open(self, run_dir: Path) -> None:
-        self.home = Path(run_dir).resolve() / "cursor"  # absolute: cursor-agent runs in the workspace
+        self.home = workspaces.temp_root(Path(run_dir).name) / "cursor-agent"
+        self.home.mkdir(parents=True, exist_ok=True)
         self.models = await self._list_models()
+        installed = await self._version()
+        if installed and installed != TESTED:
+            self.warning = (f"cursor-agent {installed} is installed; wf is tested with {TESTED}, "
+                            f"and reads Cursor's messages the way that version writes them")
         self.tools = mcp_http.Server()
         await self.tools.start()
 
     async def session(self, spec: SessionSpec) -> "CursorSession":
         if spec.model not in self.models:
             raise Unavailable(f"Cursor has no model `{spec.model}`; `cursor-agent --list-models` lists the ones you can use")
+        if self.warning:
+            spec.emit({"event": "warning", "message": self.warning})
+            self.warning = None
         session = CursorSession(self, spec)
         await session.start()
         return session
@@ -141,81 +169,100 @@ class Cursor:
             await self.tools.close()
             self.tools = None
 
-    def config(self, access: str) -> Path:
-        """The config folder for sessions at this access level, holding wf's cli-config.json."""
-        folder = self.home / access
-        if access not in self._configured:
-            folder.mkdir(parents=True, exist_ok=True)
-            deny = ["Write(**)"] if access == "read-only" else []
-            write_json(folder / "cli-config.json", {**CONFIG, "permissions": {"allow": [], "deny": deny}})
-            self._configured.add(access)
+    def folder(self, access: str) -> Path:
+        """A new config folder for one cursor-agent process, holding wf's cli-config.json."""
+        folder = self.home / uuid.uuid4().hex[:12]
+        folder.mkdir()
+        write_json(folder / "cli-config.json", {**CONFIG, "permissions": {"allow": [], "deny": DENY[access]}})
         return folder
 
-    def env(self, config: Path) -> dict:
+    def env(self, folder: Path) -> dict:
         kept = {name: value for name, value in os.environ.items() if name not in SECRETS}
-        return {**kept, "CURSOR_CONFIG_DIR": str(config), "CURSOR_DATA_DIR": str(config), "NO_OPEN_BROWSER": "1"}
+        return {**kept, "CURSOR_CONFIG_DIR": str(folder), "CURSOR_DATA_DIR": str(folder), "NO_OPEN_BROWSER": "1"}
 
     async def _list_models(self) -> set[str]:
         """The model ids `cursor-agent --list-models` prints, one `<id> - <name>` per line."""
-        config = self.config("read-only")
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *self.command, "--list-models", cwd=config, env=self.env(config),
-                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        except OSError as error:
-            raise Unavailable(f"cursor-agent didn't start: {error}") from error
-        try:
-            out, _ = await asyncio.wait_for(process.communicate(), self.request_timeout)
-        except BaseException as error:  # timed out or cancelled: don't leave it running
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
-            if isinstance(error, TimeoutError):
-                raise Unavailable("`cursor-agent --list-models` didn't answer") from error
-            raise
-        text = re.sub(r"\x1b\[[0-9;]*m", "", out.decode(errors="replace"))
+        code, text = await self._run("--list-models")
         models = {line.split(" - ", 1)[0].strip() for line in text.splitlines() if " - " in line}
-        if process.returncode != 0 or not models:
+        if code != 0 or not models:
             raise Unavailable(f"`cursor-agent --list-models` failed (is it logged in? `cursor-agent login`): {short(text, 300)}")
         return models
+
+    async def _version(self) -> str | None:
+        try:
+            code, text = await self._run("--version")
+        except Unavailable:
+            return None
+        return text.split()[-1] if code == 0 and text.split() else None
+
+    async def _run(self, *args: str) -> tuple[int | None, str]:
+        """Run cursor-agent with these arguments, in a config folder of its own: (exit code, output)."""
+        folder = self.folder("read-only")
+        try:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *self.command, *args, cwd=folder, env=self.env(folder),
+                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            except OSError as error:
+                raise Unavailable(f"cursor-agent didn't start: {error}") from error
+            try:
+                out, _ = await asyncio.wait_for(process.communicate(), self.request_timeout)
+            except BaseException as error:  # timed out or cancelled: don't leave it running
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
+                if isinstance(error, TimeoutError):
+                    raise Unavailable(f"`cursor-agent {' '.join(args)}` didn't answer") from error
+                raise
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+        return process.returncode, re.sub(r"\x1b\[[0-9;]*m", "", out.decode(errors="replace"))
 
 
 class CursorSession:
     def __init__(self, harness: Cursor, spec: SessionSpec):
         self.harness, self.spec = harness, spec
         self.id = ""
-        self.config = harness.config(spec.access)
+        self.folder: Path | None = None  # this process's config folder
         self.rpc: _Connection | None = None
         self.url = ""  # this session's MCP server
         self.prompt: asyncio.Future | None = None  # the running session/prompt
         self.turn = False  # updates count only while a turn runs (session/load replays history)
         self.calls: dict[str, dict] = {}  # tool calls in progress, as their updates describe them
         self.text = ""  # the agent's message since the last tool call
-        # Marks a continued session while an attempt that continued it hasn't got a result
-        self.continuing = self.config / "wf-continuing" / spec.fork_from if spec.fork_from else None
+        self.succeeded = False  # a turn ended with a result: the attempt has its result
+        # Marks a continued session while an attempt that continued it has no result
+        self.continuing = harness.home / "continuing" / spec.fork_from if spec.fork_from else None
 
     async def start(self) -> None:
         spec, harness = self.spec, self.harness
+        saved = harness.home / "sessions" / spec.fork_from if spec.fork_from else None
         if self.continuing is not None and self.continuing.exists():
             raise Unavailable("the last attempt that continued this session failed, and Cursor can't fork it")
+        if saved is not None and not saved.is_dir():
+            raise Unavailable(f"there's no saved Cursor session {spec.fork_from}")
         tools = [mcp_http.Tool(output_tool.NAME, output_tool.DESCRIPTION, spec.tool.schema, self._submit)]
         if spec.access == "read-only":
             tools.append(mcp_http.Tool(git_tool.NAME, git_tool.DESCRIPTION, git_tool.SCHEMA, self._git))
+        self.folder = harness.folder(spec.access)
         self.url = harness.tools.add(tools)
         command = [*harness.command, "--model", spec.model, *FLAGS, "acp"]
         servers = [{"type": "http", "name": SERVER, "url": self.url, "headers": []}]
         try:
-            self.rpc = await _Connection.start(command, spec.cwd, harness.env(self.config), harness.home / "cursor-agent.log",
+            if saved is not None:  # Cursor loads a session from its own config folder
+                self.id = spec.fork_from  # set first: close() puts the session back even if loading fails
+                (self.folder / "acp-sessions").mkdir()
+                saved.rename(self.folder / "acp-sessions" / self.id)
+            self.rpc = await _Connection.start(command, spec.cwd, harness.env(self.folder), harness.home / "cursor-agent.log",
                                                harness.request_timeout, self)
             await self.rpc.request("initialize", {
                 "protocolVersion": 1, "clientInfo": {"name": "wf", "version": "0.1.0"},
                 "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False,
                                        "_meta": {"parameterizedModelPicker": True}}})
             await self.rpc.request("authenticate", {"methodId": "cursor_login"})
-            if spec.fork_from:
-                result = await self.rpc.request("session/load", {"sessionId": spec.fork_from, "cwd": str(spec.cwd),
+            if saved is not None:
+                result = await self.rpc.request("session/load", {"sessionId": self.id, "cwd": str(spec.cwd),
                                                                   "mcpServers": servers})
-                self.id = spec.fork_from
                 self.continuing.parent.mkdir(exist_ok=True)
                 self.continuing.touch()
             else:
@@ -230,7 +277,7 @@ class CursorSession:
                 raise Unavailable(f"Cursor didn't start a session: {error if str(error) else 'no answer'}") from error
             raise
         transcript(spec.log, "session", id=self.id, model=spec.model, mode=MODES[spec.access],
-                   continued=bool(spec.fork_from), config=str(self.config), effective=_effective(result))
+                   continued=bool(spec.fork_from), config=str(self.folder), effective=_effective(result))
 
     def pending_usage(self) -> Usage:
         return Usage()
@@ -244,13 +291,17 @@ class CursorSession:
             self.prompt = await self.rpc.call("session/prompt", {"sessionId": self.id, "prompt": [{"type": "text", "text": text}]})
             result = await asyncio.shield(self.prompt)  # a timeout stops the wait; close() stops the turn
         except _RpcError as error:
-            if self.rpc.dead:
-                return TurnEnd("failed", f"cursor: {self.rpc.dead}")
-            return TurnEnd("unavailable" if error.code == AUTH_REQUIRED else "failed", f"cursor: {error}")
+            result = error
         finally:
             self.turn = False
             message = self.text
             self._flush()
+        # The turn ended (a timeout never gets here): the runner takes a result now
+        self.succeeded = self.succeeded or self.spec.tool.result is not None
+        if isinstance(result, _RpcError):
+            if self.rpc.dead:
+                return TurnEnd("failed", f"cursor: {self.rpc.dead}")
+            return TurnEnd("unavailable" if result.code == AUTH_REQUIRED else "failed", f"cursor: {result}")
         stop = result.get("stopReason")
         transcript(log, "turn", stop_reason=stop)
         failure = notice(message)
@@ -320,18 +371,32 @@ class CursorSession:
         finally:  # even when cancelled: the URL must stop reaching this attempt
             if self.url and self.harness.tools is not None:
                 self.harness.tools.remove(self.url)
-            if self.continuing is not None and self.spec.tool.result is not None:
+            if self.continuing is not None and self.succeeded:
                 self.continuing.unlink(missing_ok=True)
-            if self.id and not self.spec.continuable:  # no later pass will load it
-                shutil.rmtree(self.config / "acp-sessions" / self.id, ignore_errors=True)
+            if self.folder is not None:
+                self._keep_session()
+                shutil.rmtree(self.folder, ignore_errors=True)
+                self.folder = None
+
+    def _keep_session(self) -> None:
+        """Move the session out of the config folder, which goes, when a later pass may load it."""
+        store = self.folder / "acp-sessions" / self.id
+        if self.id and self.spec.continuable and store.is_dir():
+            target = self.harness.home / "sessions" / self.id
+            shutil.rmtree(target, ignore_errors=True)
+            target.parent.mkdir(exist_ok=True)
+            store.rename(target)
 
 
 def notice(message: str) -> str:
-    """Cursor's notice that a request failed: the paragraph it adds at the end of the turn's last
-    message. "" when the message doesn't end with one."""
-    start = message.rfind("\n\n")
-    paragraph = message[start + 2:].strip() if start >= 0 else ""
-    return paragraph if paragraph in NOTICES or paragraph.startswith("Error:") else ""
+    """Cursor's notice that a request failed, the paragraph it adds at the end of the turn's last
+    message: one of NOTICES, or an error in the form ERROR matches. "" when there's none."""
+    text = message.rstrip()
+    for account in NOTICES:
+        if text.endswith("\n\n" + account):
+            return account
+    starts = [match.start() for match in ERROR.finditer(text)]
+    return text[starts[-1] + 2:] if starts else ""
 
 
 def _effective(result: dict) -> dict:

@@ -155,8 +155,10 @@ Each harness needs its own login, and only the harnesses a workflow uses need to
   marked experimental.
 - **Cursor**: `cursor-agent`, signed in with `cursor-agent login`. Runs use that login, not
   an API key: the runner removes `CURSOR_API_KEY` from the environment Cursor and its agents
-  see. Each run gives Cursor its own settings folder, so your `~/.cursor` settings don't apply
-  and aren't changed.
+  see. Each cursor-agent process gets a settings folder of its own, outside the repo, so your
+  `~/.cursor` settings don't apply and aren't changed. `wf` is tested against one
+  cursor-agent version and warns when the installed one differs, because it reads the
+  messages Cursor writes.
 
 `wf init my-flow` writes:
 
@@ -334,7 +336,9 @@ as `git merge` or `git rebase`, needs `access: full`.
 Agents run with the harness's normal coding setup: its own system prompt, plus the repo's
 instruction files (`CLAUDE.md`, `AGENTS.md`). Where the harness allows it, user-level
 settings and memory aren't loaded, so a workflow behaves the same on every machine. Codex
-is the exception: it always loads your global `~/.codex/AGENTS.md`.
+and Cursor are the exceptions. Codex always loads your global `~/.codex/AGENTS.md`. Cursor
+loads your Cursor account's User Rules and the skills in your home folder, such as
+`~/.claude/skills` and `~/.agents/skills`.
 
 #### Command nodes
 
@@ -858,10 +862,10 @@ start, and sends the runner to the next harness. The attempt loop is written onc
 
 | | Claude Code | Codex | Cursor |
 |---|---|---|---|
-| Runs as | `claude-agent-sdk`: one process per session | one `codex app-server --disable hooks --disable apps` per run, JSON-RPC over stdio, one thread per session | `cursor-agent --model <model> acp`, JSON-RPC over stdio: one process per session, because the agent keeps one model per process; its settings folder is in the run folder |
+| Runs as | `claude-agent-sdk`: one process per session | one `codex app-server --disable hooks --disable apps` per run, JSON-RPC over stdio, one thread per session | `cursor-agent --model <model> acp`, JSON-RPC over stdio: one process per session, because the agent keeps one model per process, each with a settings folder of its own, outside the repo |
 | `submit_result` | SDK MCP server | dynamic tool (`experimentalApi`) | MCP server over HTTP, a URL per session |
 | `read-only` | Read, Grep, Glob, and Bash limited to read-only git commands | sandbox `read-only` | ask mode and a `Write(**)` deny rule; reads and the runner's `git` tool allowed, commands refused |
-| `edit` | Read, Edit, Write, Bash with `permission_mode="dontAsk"` | sandbox `workspace-write` | agent mode; writes inside the workspace and commands allowed |
+| `edit` | Read, Edit, Write, Bash with `permission_mode="dontAsk"` | sandbox `workspace-write` | agent mode; writes inside the workspace and commands allowed, writes to temp folders and `~/.cursor` denied |
 | `full` | `permission_mode="bypassPermissions"` | sandbox `danger-full-access` | everything allowed |
 | `web: false` | no WebSearch or WebFetch | `web_search: "disabled"` (the default is `cached`) | web search and fetch requests refused |
 | Repo instructions | `setting_sources=["project"]`, `claude_code` system prompt | `AGENTS.md`, always loaded | the repo's rules and `AGENTS.md`, but not its `.cursor/cli.json` |
@@ -881,8 +885,17 @@ Notes:
   service on someone else's ChatGPT login.
 - Cursor asks before what it may not do by itself, and the runner answers from the node's
   access level with "allow once" or "reject", never "allow always", which Cursor would save.
-- Cursor saves the model it was started with into its settings folder and reads its
-  permissions from there, so each run gives it folders of its own, one per access level.
+- Cursor saves the model it was started with, and the parameters it last used for that
+  model, into its settings folder, and reads its permissions from there. So each
+  cursor-agent process gets a new folder in `~/.wf/temp/<run-id>/cursor-agent/`. It's outside
+  the repo because Cursor also writes your account's details there. A session that a later
+  pass may continue is kept there until the run succeeds.
+- Outside the workspace, Cursor writes to temp folders and to Markdown files in `~/.cursor`
+  without asking. For `edit`, deny rules block those writes. For `read-only`, a deny rule
+  blocks every write.
+- Cursor's sandbox is off at every level. With it on, a command still asks first, and one the
+  runner allows runs outside the sandbox: in a live check it wrote outside the workspace and
+  reached the network. So the sandbox would confine nothing the runner doesn't already decide.
 - The effort in a Cursor model id applies only when the client says it takes parameterized
   models, which the adapter does. Each attempt's transcript records the model and parameters
   Cursor reports for the session.

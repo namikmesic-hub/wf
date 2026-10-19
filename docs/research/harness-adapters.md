@@ -333,40 +333,25 @@ All seven were applied to `docs/workflow-spec.md` on 2026-10-18.
 
 ## 6. Cursor through ACP
 
-Checked 2026-10-19 with `cursor-agent` 2026.10.14-0f9edde, for `workflow/harnesses/cursor.py`.
+Checked 2026-10-19 with `cursor-agent` 2026.10.14-0f9edde and 2026.10.16-e3cb207, for
+`workflow/harnesses/cursor.py`. `cursor-agent acp` speaks the Agent Client Protocol,
+JSON-RPC 2.0 over stdio, on the local Cursor login, so it needs no API key and no
+`cursor-sdk`. Each row says what Cursor does, what the adapter does about it, where, and
+which test fails when the two disagree. Tests marked `-m harness` run the real
+`cursor-agent`.
 
-`cursor-agent acp` speaks the Agent Client Protocol, JSON-RPC 2.0 over stdio, on the local
-Cursor login. It needs no API key and no `cursor-sdk` [V live].
-
-- **Login.** `initialize` offers one auth method, `cursor_login`, and says the agent takes MCP
-  servers over `http` and `sse` and can load sessions. `authenticate` with `cursor_login`
-  returns at once when the CLI is logged in. When it isn't, it starts a browser login, so the
-  adapter runs `cursor-agent --list-models` first and sets `NO_OPEN_BROWSER` [V].
-- **One model per process.** Choosing a model in one session switches every session in the
-  process, and `session/set_config_option` only takes the variants it lists. `--model <id>` at
-  start takes any id from `--list-models`, effort included, but only when `initialize` sends
-  `clientCapabilities._meta.parameterizedModelPicker: true`: then `gpt-5.6-sol-max-fast` gave
-  `reasoning: max, fast: true` [V live]. So the adapter starts one process per session.
-- **Project settings.** cursor-agent reads `.cursor/cli.json` files from the git root down to
-  its folder and merges their permissions into its own. The hidden flag
-  `--disable-project-configs` stops that: an invalid `.cursor/cli.json` stops cursor-agent at
-  start, and with the flag the session starts [V live].
-- **The model is saved.** `--model` rewrote `selectedModel` in `~/.cursor/cli-config.json`
-  during this check. `CURSOR_CONFIG_DIR` moves that file, the saved sessions, MCP servers and
-  hooks to another folder. The login is kept outside it and still works [V live].
-- **`submit_result` over MCP.** An HTTP MCP server named in `session/new` loads without
-  approval. Each call comes first as `session/request_permission` (kind `other`), then as
-  `tools/call` to the server [V live].
-- **Permissions.** With `approvalMode: allowlist` and an empty allowlist, every shell command
-  asks (kind `execute`), and so do MCP tools (`other`) and web search and fetch (`search`,
-  `fetch`), except a fetch that Cursor's server marks as needing no approval. Writes inside
-  the workspace don't ask, and a `Write(**)` deny rule makes them fail. Ask mode still offers
-  the shell, which asks [V live].
-- **No usage.** `session/prompt` returns only a `stopReason`, and no update carries tokens or
-  cost [V].
-- **Errors are text.** A failed request ends the turn with `end_turn` and a last message
-  `Error: ...`, or a notice such as `Upgrade your plan to continue` for a plan, payment or
-  sign-in problem [V].
-- **Continue.** Sessions are saved in the config folder. `session/load` replays the
-  conversation as `session/update` notifications, then answers. There's no fork [V].
-- Starting a process and a session takes 4 to 6 seconds [V live].
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| `authenticate` with `cursor_login` returns at once when the CLI is logged in [V live]. | Every session authenticates that way, with `CURSOR_API_KEY` and `CURSOR_AUTH_TOKEN` removed from cursor-agent's environment. | `cursor.py:262`, `cursor.py:123` | `test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config` |
+| When the CLI isn't logged in, `authenticate` starts a browser login and `--list-models` fails [V]. | The adapter runs `--list-models` before any session, sets `NO_OPEN_BROWSER`, and reports Cursor unavailable. | `cursor.py:188`, `cursor.py:181` | `test_a_cursor_agent_that_is_not_logged_in_is_unavailable` |
+| The agent keeps one model per process. `--model <id>` takes the effort in the id only when `initialize` sends `clientCapabilities._meta.parameterizedModelPicker: true`: then `gpt-5.6-sol-max-fast` runs with `reasoning: max, fast: true` [V live]. | One process per session, started with `--model`. `initialize` declares parameterized models, and the transcript records the model and parameters the session reports. | `cursor.py:249`, `cursor.py:261`, `cursor.py:280` | `test_a_real_cursor_session_takes_the_effort_in_the_model_id` (`-m harness`), `test_the_transcript_records_the_model_and_effort_cursor_uses` |
+| Cursor saves the model, and the parameters it last used for it, into its config folder (`CURSOR_CONFIG_DIR`), and writes the account's details there [V live]. | Each process gets a new folder in `~/.wf/temp/<run-id>/cursor-agent/`, outside the repo, and the folder goes when its session closes. | `cursor.py:172` | `test_each_cursor_agent_gets_a_new_config_folder_and_none_is_left` |
+| cursor-agent merges the permissions of `.cursor/cli.json` files from the git root down to its folder. An invalid one stops it at start, and the hidden flag `--disable-project-configs` stops the merge [V live]. | cursor-agent always starts with `--disable-project-configs`. | `cursor.py:107` | `test_a_real_cursor_session_ignores_the_repos_cursor_settings` (`-m harness`) |
+| An HTTP MCP server named in `session/new` loads without approval. Each call asks `session/request_permission` (kind `other`), then comes as `tools/call` [V live]. | `submit_result`, and `git` for read-only, are served on a URL of the session's own, which ends when the session closes. | `cursor.py:248` | `test_a_real_read_only_agent_node_on_cursor` (`-m harness`), `test_closing_a_session_ends_its_mcp_url` |
+| With `approvalMode: allowlist` and an empty allowlist, every command, MCP tool, web search and web fetch asks, and writes inside the workspace don't [V live]. | Each request is answered from the node's access level, with "allow once" or "reject". | `cursor.py:408` | `test_permission_requests_are_answered_from_the_access_level` |
+| Outside the workspace, Cursor writes to temp folders and to Markdown files in `~/.cursor` without asking. A deny rule, where `*` matches any text, blocks such a write: `Write(/private/tmp/*)` blocked one in `/private/tmp` [V live]. | `read-only` denies `Write(**)`, and `edit` denies the temp folders and `~/.cursor`. | `cursor.py:117`, `cursor.py:121` | `test_edit_and_full_run_in_agent_mode_with_writes_allowed`, `test_edit_denies_the_writes_cursor_makes_outside_the_workspace_without_asking` |
+| With the sandbox on, a command still asks, and one the client allows runs outside the sandbox: it wrote a file outside the workspace and reached the network [V live]. | `--sandbox disabled` at every level, since the sandbox confines nothing the adapter doesn't already decide. | `cursor.py:107` | `test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config` |
+| `session/prompt` returns only a `stopReason`, and no update carries tokens or cost [V]. | Cursor turns count zero tokens and zero dollars. | `cursor.py:282` | `test_cursor_reports_no_usage` |
+| A failed request ends the turn with `end_turn` and a last paragraph `Error: [code] ...`, `Error: SomeError: ...` or an account notice such as `Upgrade your plan to continue`, sent in one or more chunks [V]. | The message since the last tool call is read. A notice, `[unauthenticated]` or `[resource_exhausted]` makes Cursor unavailable, another error fails the turn, and other text is the agent's. | `cursor.py:391` | `test_a_usage_limit_or_a_login_problem_makes_cursor_unavailable`, `test_a_notice_sent_in_several_chunks_is_still_read`, `test_a_paragraph_that_only_starts_with_error_is_the_agents_own_text` |
+| Sessions are saved in the config folder. `session/load` replays the conversation as `session/update` notifications, then answers. There's no fork [V]. | The saved session moves into the new process's folder and loads there. Replayed updates are ignored, and after a continued attempt fails the retry starts fresh. | `cursor.py:255`, `cursor.py:264`, `cursor.py:381` | `test_continue_loads_the_last_passs_session`, `test_after_a_continued_attempt_fails_the_retry_starts_fresh`, `test_a_continued_attempt_that_times_out_after_its_result_is_not_continued_again` |
+| `acp` and `--disable-project-configs` aren't in `cursor-agent --help`, and the messages above can change between versions [V]. | wf is tested with one version and warns once when another is installed. | `cursor.py:105`, `cursor.py:152` | `test_a_cursor_agent_other_than_the_tested_one_gets_one_warning` |
