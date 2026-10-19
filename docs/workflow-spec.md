@@ -286,7 +286,7 @@ Fields every kind accepts:
 | `needs` | none | Nodes that must finish first. `start` is allowed. See [When a node runs](#when-a-node-runs). |
 | `routes` | none | Where to go next, by condition. See [Routes](#routes). |
 | `for_each` | none | Run once per item of a list. See [for_each](#for_each). |
-| `max_parallel` | 4 | How many items run at the same time. One cap on agent sessions across all runs is separate: see [Agent slots](#agent-slots). |
+| `max_parallel` | 4 | How many items run at the same time. One cap on agent sessions across runs is separate: see [Agent slots](#agent-slots). |
 | `max_items` | 20 | A longer list fails the node. |
 | `on_item_error` | `fail` | `fail` or `continue`. |
 | `workspace` | `repo` | Where the node runs. See [Workspaces](#workspaces). |
@@ -601,18 +601,18 @@ tests named below are in `tests/test_capacity.py`, unless another file is named.
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:380` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
-| `WF_MAX_AGENTS` is set | It wins over `max_agents` in the file. | `workflow/capacity.py:63` | `test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home` |
-| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:76`, `workflow/runner.py:69`, `workflow/runner.py:136` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
+| `WF_MAX_AGENTS` is set | It wins over `max_agents` in the file, which is still checked. | `workflow/capacity.py:64`, `workflow/capacity.py:66` | `test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home`, `test_a_bad_cap_stops_wf_run_before_the_run_exists` |
+| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:136` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
 | `config.yaml` names a setting wf doesn't know, or doesn't hold settings by name | The same. So a misspelt `max_agents` can't quietly mean no cap. | `workflow/settings.py:50` | `test_a_wrong_file_fails_every_read` in `tests/test_settings.py` |
 | An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:385`, `workflow/nodes.py:403` | `test_two_runs_in_separate_processes_share_the_cap` |
 | A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:211` | `test_a_retry_and_a_fallback_take_a_slot_again` |
 | A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:186`, `workflow/nodes.py:380` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
 | Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:393`, `workflow/nodes.py:213`, `workflow/nodes.py:214` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
 | An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:389`, `workflow/nodes.py:399`, `workflow/context.py:153`, `workflow/cli.py:277` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
-| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:115`, `workflow/nodes.py:397` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
-| A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:96` | `test_a_killed_process_frees_its_slot` |
+| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:397` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
+| A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:98` | `test_a_killed_process_frees_its_slot` |
 | A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:58` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
-| Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. Each process reads its cap when it starts. | `workflow/capacity.py:93` | `test_a_smaller_cap_uses_only_the_first_slots` |
+| Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. Each process reads its cap when it starts. | `workflow/capacity.py:95` | `test_a_smaller_cap_uses_only_the_first_slots` |
 
 The order in which waiting attempts get slots is not defined. The first one to try after a
 slot comes free gets it.

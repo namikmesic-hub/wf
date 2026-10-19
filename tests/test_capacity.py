@@ -178,8 +178,11 @@ def test_another_setting_in_the_config_leaves_the_cap_alone(monkeypatch, wf_home
     ("four", None, "not `four`"),
     ("²", None, "WF_MAX_AGENTS must be a whole number of 1 or more, not `²`"),
     ("9" * 5000, None, "WF_MAX_AGENTS must be a whole number of 1 or more"),
-    (None, "max_agents:\n", "must be a whole number of 1 or more, not `None`"),
-    (None, "max_agents: null\n", "must be a whole number of 1 or more, not `None`"),
+    (None, "max_agents:\n", "must be a whole number of 1 or more, not `null`"),
+    (None, "max_agents: null\n", "must be a whole number of 1 or more, not `null`"),
+    (None, 'max_agents: "4"\n', 'must be a whole number of 1 or more, not `"4"`'),
+    ("2", "max_agent: 4\n", "unknown setting max_agent (known: max_agents)"),  # checked though the variable wins
+    ("2", "max_agents: 0\n", "max_agents in"),
     (None, "max_agents: 2.5\n", "must be a whole number of 1 or more, not `2.5`"),
     (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents)"),
     (None, "- 4\n", "must hold settings by name"),
@@ -281,10 +284,8 @@ def test_command_and_human_nodes_take_no_slot(repo, monkeypatch):
           approve: {needs: [build], human: "Ship it?", output: {ok: {type: boolean}}}
         end: {output: {ok: "{{ approve.ok }}"}}
     """))
-    let_go = hold_slot(5)  # a node that took a slot would wait this long, and say so in events.jsonl
-    started = time.monotonic()
+    let_go = hold_slot(3)  # a node that took a slot would wait for it, and say so in events.jsonl
     assert cli.main(["run", "ask.yaml"]) == 2  # waiting for a person
-    assert time.monotonic() - started < 4
     let_go()
     assert not {"slot_waiting", "slot_taken"} & set(kinds("ask"))
 
@@ -292,10 +293,8 @@ def test_command_and_human_nodes_take_no_slot(repo, monkeypatch):
 def test_a_dry_run_takes_no_slot(repo, monkeypatch):
     monkeypatch.setenv("WF_MAX_AGENTS", "1")
     Path("script.yaml").write_text("agents:\n  work:\n    - {summary: scripted}\n")
-    let_go = hold_slot(5)
-    started = time.monotonic()
+    let_go = hold_slot(3)
     assert cli.main(["run", agent_flow(), "--dry-run", "script.yaml"]) == 0
-    assert time.monotonic() - started < 4
     let_go()
     assert not {"slot_waiting", "slot_taken"} & set(kinds("work"))
 

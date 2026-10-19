@@ -32,7 +32,7 @@ the harness or model differs from the last pass, the fork fails, or the two
 passes before it both continued.
 
 With a cap on live agent sessions (capacity.py), each agent attempt first takes
-one of the machine's agent slots, and holds it until the attempt ends. An
+one of the agent slots, and holds it until the attempt ends. An
 attempt that waits for one isn't failing: the wait uses no retry, the node's
 timeout starts once the attempt has its slot, and the wait shows in
 events.jsonl (slot_waiting, slot_taken) and in status.json (agents_waiting).

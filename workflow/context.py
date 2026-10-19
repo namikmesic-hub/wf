@@ -3,9 +3,9 @@
 LangGraph hands this object to every node as `runtime.context` (it's the
 graph's context_schema, see graph.py). Each `wf run` or `wf resume` process
 builds a fresh one: the parsed workflow, the run folder, a clock, live usage
-counters, a semaphore per node that caps parallel items, and the machine's cap
-on live agent sessions (capacity.py). None of it goes into a checkpoint, which
-is why it can hold things like asyncio.Semaphore.
+counters, a semaphore per node that caps parallel items, and the cap on live
+agent sessions across runs (capacity.py). None of it goes into a checkpoint,
+which is why it can hold things like asyncio.Semaphore.
 
 State (state.py) is the opposite: plain data that LangGraph saves after every
 step, so it survives the process.
@@ -47,7 +47,7 @@ class RunContext:
     script: object = None  # a dryrun.Script during a dry run
     limits: spec.Limits | None = None  # the run's limits, if not just the workflow file's (--limit)
     usage: dict = field(default_factory=lambda: {"cost_usd": 0.0, "tokens": 0})  # spent so far, kept live
-    max_agents: int | None = None  # the cap on live agent sessions on this machine (capacity.py), if any
+    max_agents: int | None = None  # the cap on live agent sessions across runs (capacity.py), if any
     _clock_start: float = field(default_factory=time.monotonic)
     _elapsed_before: float = 0.0
     _slots: dict = field(default_factory=dict)
