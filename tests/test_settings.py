@@ -36,3 +36,10 @@ def test_a_wrong_file_fails_every_read(wf_home, text, problem):
 def test_only_a_known_setting_can_be_read():
     with pytest.raises(ValueError):
         settings.get("max_agent")
+
+
+def test_a_setting_written_with_no_value_is_there(wf_home):
+    (wf_home / "config.yaml").write_text("max_agents:\n")
+    assert settings.get("max_agents", missing="unset") is None
+    (wf_home / "config.yaml").write_text("")
+    assert settings.get("max_agents", missing="unset") == "unset"

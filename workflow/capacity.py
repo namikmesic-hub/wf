@@ -53,20 +53,27 @@ def slots_dir() -> Path:
     return home() / "agent-slots"
 
 
+_UNSET = object()
+
+
 def configured() -> int | None:
     """The cap: WF_MAX_AGENTS, else `max_agents` in config.yaml, else None (no cap).
     Raises CapError, or settings.SettingsError when config.yaml is wrong."""
     raw = os.environ.get(ENV, "").strip()
     if raw:
-        return _at_least_one(int(raw) if raw.isdigit() else raw, ENV)
-    value = settings.get("max_agents")
-    return None if value is None else _at_least_one(value, f"max_agents in {settings.path()}")
+        try:
+            value = int(raw) if raw.isascii() and raw.isdigit() else 0
+        except ValueError:  # more digits than int() reads
+            value = 0
+        return _at_least_one(value, ENV, raw)
+    value = settings.get("max_agents", missing=_UNSET)
+    return None if value is _UNSET else _at_least_one(value, f"max_agents in {settings.path()}", value)
 
 
-def _at_least_one(value: object, where: str) -> int:
+def _at_least_one(value: object, where: str, shown: object) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
         return value
-    raise CapError(f"{where} must be a whole number of 1 or more, not `{value}`")
+    raise CapError(f"{where} must be a whole number of 1 or more, not `{shown}`")
 
 
 class Slot:

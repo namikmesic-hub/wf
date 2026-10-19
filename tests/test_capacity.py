@@ -7,6 +7,7 @@ until the test lets it go (held_agent.py), and read from the agents' marks when
 each session was live.
 """
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from textwrap import dedent
 import pytest
 
 from workflow import capacity, cli, harnesses, operate, runner, settings
+from workflow.harnesses.base import TurnEnd, Usage
 from workflow.runs import Run
 from fakes import Fake, ends, submit
 
@@ -75,6 +77,26 @@ def waiting(name: str) -> bool:
     """Does the run of workflow `name` wait for an agent slot, as its status.json says?"""
     folder = run_of(name)
     return folder is not None and bool(Run.at(folder).status().get("agents_waiting"))
+
+
+def contend_at(monkeypatch, attempt: int, seconds: float) -> list[Callable[[], None]]:
+    """Make agent attempt `attempt` find the one slot of a cap of 1 taken: the test takes it
+    the moment that attempt first asks for it, and holds it for `seconds` (hold_slot). Returns
+    a list that then holds the let_go()."""
+    real, held = capacity.take, []
+
+    def take(cap: int, holder: dict):
+        if holder.get("attempt") == attempt and not held:
+            held.append(hold_slot(seconds))
+        return real(cap, holder)
+
+    monkeypatch.setattr(capacity, "take", take)
+    return held
+
+
+def failing_flow() -> str:
+    """A run that fails at `check` until a file `ready` exists, then runs agent `work`."""
+    return agent_flow(node='check: {needs: [start], command: "test -f ready"}\n  work: {needs: [check], instruction: Work.}')
 
 
 def until(condition, seconds: float = 30) -> None:
@@ -154,6 +176,10 @@ def test_another_setting_in_the_config_leaves_the_cap_alone(monkeypatch, wf_home
 @pytest.mark.parametrize("env, config, problem", [
     ("0", None, "WF_MAX_AGENTS must be a whole number of 1 or more, not `0`"),
     ("four", None, "not `four`"),
+    ("²", None, "WF_MAX_AGENTS must be a whole number of 1 or more, not `²`"),
+    ("9" * 5000, None, "WF_MAX_AGENTS must be a whole number of 1 or more"),
+    (None, "max_agents:\n", "must be a whole number of 1 or more, not `None`"),
+    (None, "max_agents: null\n", "must be a whole number of 1 or more, not `None`"),
     (None, "max_agents: 2.5\n", "must be a whole number of 1 or more, not `2.5`"),
     (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents)"),
     (None, "- 4\n", "must hold settings by name"),
@@ -166,6 +192,33 @@ def test_a_bad_cap_stops_wf_run_before_the_run_exists(repo, monkeypatch, capsys,
     assert cli.main(["run", agent_flow()]) == 1
     assert problem in capsys.readouterr().err
     assert not Path(".wf").exists()
+
+
+@pytest.mark.parametrize("env, config, problem", [
+    ("0", None, "wf resume: WF_MAX_AGENTS must be a whole number of 1 or more, not `0`"),
+    (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents)"),
+])
+def test_a_bad_cap_stops_wf_resume(repo, monkeypatch, capsys, wf_home, env, config, problem):
+    assert cli.main(["run", failing_flow()]) == 1
+    folder = run_of("work")
+    if env is not None:
+        monkeypatch.setenv("WF_MAX_AGENTS", env)
+    if config is not None:
+        (wf_home / "config.yaml").write_text(config)
+    capsys.readouterr()
+    Path("ready").touch()
+    assert cli.main(["resume", folder.name]) == 1
+    assert problem in capsys.readouterr().err
+    assert Run.at(folder).status()["status"] == "failed"  # it didn't continue
+
+
+def test_a_smaller_cap_uses_only_the_first_slots(wf_home):
+    small = capacity.take(1, {"cap": 1})
+    big = capacity.take(2, {"cap": 2})
+    assert capacity.take(1, {"cap": 1}) is None  # a cap of 1 has slot 0 only
+    assert json.loads((wf_home / "agent-slots" / "1").read_text()) == {"cap": 2}
+    small.release()
+    big.release()
 
 
 def test_a_slot_has_one_holder_at_a_time(wf_home):
@@ -194,7 +247,13 @@ def test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slo
     # The wait (1.5s) is longer than the timeout (1s). Counted in attempt 1, it would time
     # that attempt out, and attempt 2, the one retry, would then fail on the fake's "boom"
     monkeypatch.setenv("WF_MAX_AGENTS", "1")
-    fake = Fake("claude-code", ends("failed", "boom"), submit({"summary": "done"}))
+    live = {}
+
+    async def look_then_fail(session):  # while the session is live, the wait is no longer in status.json
+        live.update(Run.at(run_of("work")).status())
+        return TurnEnd("failed", "boom", Usage())
+
+    fake = Fake("claude-code", look_then_fail, submit({"summary": "done"}))
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
     seen = {}
     let_go = hold_slot(1.5, waiter="work", seen=seen)
@@ -208,7 +267,7 @@ def test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slo
     assert [e["waited_s"] for e in events("work") if e["event"] == "slot_taken"][0] >= 1.4
     assert seen["status"] == "running"
     assert [(w["node"], w["attempt"]) for w in seen["agents_waiting"]] == [("work", 1)]
-    assert "agents_waiting" not in json.loads((run_of("work") / "status.json").read_text())
+    assert live["status"] == "running" and "agents_waiting" not in live
 
 
 def test_command_and_human_nodes_take_no_slot(repo, monkeypatch):
@@ -260,6 +319,93 @@ def test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_start
     assert "attempt_started" not in kinds("work")  # the attempt that ran is still attempt 1
 
 
+def test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused(repo, monkeypatch):
+    monkeypatch.setenv("WF_MAX_AGENTS", "1")
+    fake = Fake("claude-code", submit({"summary": "done"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    let_go = hold_slot(60)
+
+    async def wait(cap, holder, stop):  # the slot comes free after the limit, before the wait asks stop()
+        await asyncio.sleep(1.2)
+        let_go()
+        return capacity.take(cap, holder)
+
+    monkeypatch.setattr(capacity, "wait", wait)
+    assert cli.main(["run", agent_flow(top="limits: {duration: 1s}")]) == 1
+    assert Run.at(run_of("work")).status()["status"] == "limit"
+    assert fake.sent == []
+    assert "slot_taken" not in kinds("work")
+    slot = capacity.take(1, {"test": True})  # given back
+    assert slot is not None
+    slot.release()
+
+
+@pytest.mark.parametrize("node, second", [
+    ("work: {needs: [start], instruction: Work., retry: 1}", "claude-code"),
+    ("work: {needs: [start], instruction: Work., harness: [claude-code, codex]}", "codex"),
+])
+def test_a_retry_and_a_fallback_take_a_slot_again(repo, monkeypatch, node, second):
+    monkeypatch.setenv("WF_MAX_AGENTS", "1")
+    first_turn = ends("failed", "boom") if second == "claude-code" else ends("unavailable", "usage limit")
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code",
+                        Fake("claude-code", first_turn, submit({"summary": "done"})).factory)
+    monkeypatch.setitem(harnesses.FACTORIES, "codex", Fake("codex", submit({"summary": "done"})).factory)
+    held = contend_at(monkeypatch, attempt=2, seconds=1)
+    assert cli.main(["run", agent_flow(node=node)]) == 0
+    held[0]()
+    said = [(e["event"], e["attempt"], e.get("harness")) for e in events("work")
+            if e["event"] in ("slot_waiting", "slot_taken", "attempt_started")]
+    assert said == [("slot_waiting", 2, second), ("slot_taken", 2, second), ("attempt_started", 2, second)]
+    assert [e["waited_s"] for e in events("work") if e["event"] == "slot_taken"][0] >= 0.9
+
+
+def test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed(repo, monkeypatch):
+    monkeypatch.setenv("WF_MAX_AGENTS", "1")
+    fake = Fake("claude-code", ends("failed", "boom"), submit({"summary": "done"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    held = contend_at(monkeypatch, attempt=2, seconds=60)
+    node = "work: {needs: [start], instruction: Work., retry: 1}"
+    assert cli.main(["run", agent_flow(node=node, top="limits: {duration: 1s}")]) == 1
+    held[0]()
+    folder = run_of("work")
+    assert Run.at(folder).status()["status"] == "limit"
+    assert "attempt_started" not in kinds("work")
+    assert cli.main(["resume", folder.name, "--limit", "duration=1h"]) == 0
+    assert [e for e in kinds("work") if e.startswith(("slot", "attempt"))] == [
+        "attempt_failed", "slot_waiting", "attempt_started"]
+
+
+def test_an_agent_in_a_sub_workflow_waits_for_a_slot(repo, monkeypatch):
+    monkeypatch.setenv("WF_MAX_AGENTS", "1")
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", submit({"summary": "done"})).factory)
+    agent_flow("inner")
+    Path("outer.yaml").write_text(dedent("""
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          sub: {needs: [start], workflow: inner.yaml}
+        end: {output: {summary: "{{ sub.summary }}"}}
+    """))
+    seen = {}
+    let_go = hold_slot(0.5, waiter="outer", seen=seen)
+    assert cli.main(["run", "outer.yaml"]) == 0
+    let_go()
+    assert [w["node"] for w in seen["agents_waiting"]] == ["sub/work"]
+    assert [e["node"] for e in events("outer") if e["event"].startswith("slot")] == ["sub/work", "sub/work"]
+
+
+def test_a_resumed_run_waits_for_a_slot(repo, monkeypatch):
+    monkeypatch.setenv("WF_MAX_AGENTS", "1")
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", submit({"summary": "done"})).factory)
+    assert cli.main(["run", failing_flow()]) == 1
+    Path("ready").touch()
+    let_go = hold_slot(0.5, waiter="work")
+    assert cli.main(["resume", run_of("work").name]) == 0
+    let_go()
+    assert [e for e in kinds("work") if e.startswith("slot")] == ["slot_waiting", "slot_taken"]
+
+
 # ---------- across processes ----------
 
 
@@ -300,3 +446,23 @@ def test_a_killed_process_frees_its_slot(repo, monkeypatch, marks, capsys):
     assert not mark(marks, holder, "ended").exists()
     assert mark(marks, waiter, "ended").exists()
     assert kinds("two").count("slot_taken") == 1
+
+
+def test_a_killed_waiter_is_stopped_and_no_longer_waiting(repo, monkeypatch, marks):
+    monkeypatch.setenv("WF_MAX_AGENTS", "1")
+    monkeypatch.setattr(operate, "GRACE_SECONDS", 0)
+    let_go = hold_slot(60)
+    (marks / "go").touch()
+    waiter = wf_process(marks, marks / "go", "run", agent_flow())
+    try:
+        until(lambda: waiting("work"))
+        waiter.kill()
+        waiter.wait()
+    finally:
+        waiter.kill()
+        let_go()
+    folder = run_of("work")
+    assert "agents_waiting" in Run.at(folder).status()  # what the killed process left behind
+    state = operate.state(Run.at(folder))
+    assert state["status"] == "stopped"
+    assert "agents_waiting" not in state

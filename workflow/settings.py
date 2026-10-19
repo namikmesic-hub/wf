@@ -25,11 +25,12 @@ def path() -> Path:
     return home() / "config.yaml"
 
 
-def get(name: str) -> object:
-    """Setting `name`, or None when the file or the setting isn't there. Raises SettingsError."""
+def get(name: str, missing: object = None) -> object:
+    """Setting `name`, or `missing` when the file or the setting isn't there (a setting
+    written with no value is there, as None). Raises SettingsError."""
     if name not in KNOWN:
         raise ValueError(f"`{name}` isn't in settings.KNOWN")
-    return _read().get(name)
+    return _read().get(name, missing)
 
 
 def _read() -> dict:

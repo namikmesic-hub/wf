@@ -183,16 +183,16 @@ def _runner_commits(ctx: RunContext, node_id: str, workspace: dict) -> bool:
 # ---------- attempts ----------
 
 
-def _no_slot(number: int, harness: str | None) -> AbstractAsyncContextManager[bool]:
-    return nullcontext(False)
+def _no_slot(number: int, harness: str | None) -> AbstractAsyncContextManager[None]:
+    return nullcontext()
 
 
 async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str | None], Awaitable[Any]],
                     harnesses: list[str | None] = [None],
-                    slot: Callable[[int, str | None], AbstractAsyncContextManager[bool]] = _no_slot) -> tuple[Any, int]:
+                    slot: Callable[[int, str | None], AbstractAsyncContextManager[None]] = _no_slot) -> tuple[Any, int]:
     """Up to 1 + retry attempts on each harness in turn, each within the node's timeout.
-    attempt(number, harness) makes one, inside slot(number, harness), which says whether
-    it waited (_agent_slot). Returns (output, attempt number)."""
+    attempt(number, harness) makes one, inside slot(number, harness): for an agent, its
+    agent slot (_agent_slot). Returns (output, attempt number)."""
     node_id = job["node"]
     retry = ctx.workflow.setting(node_id, "retry")
     timeout = ctx.workflow.setting(node_id, "timeout")
@@ -204,16 +204,14 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
             if number > first and (reason := ctx.limit_reached()):
                 raise _limit_stop(error, number, reason)
             on = {"harness": harness} if harness else {}
-            if number > 1:
-                fallback = {"fallback": True} if position and not tries and not handed_over else {}
-                emit({"event": "attempt_started", **label, **on, **fallback, "attempt": number})
+            fallback = {"fallback": True} if position and not tries and not handed_over else {}
             handed_over = False
             deadline = None
             try:
-                async with slot(number, harness) as waited:
-                    if waited and (reason := ctx.limit_reached()):
-                        raise _limit_stop(error, number, reason)
-                    deadline = asyncio.timeout(seconds(timeout) if timeout else None)  # from now: it has its slot
+                async with slot(number, harness):  # an attempt starts once it has its slot
+                    if number > 1:
+                        emit({"event": "attempt_started", **label, **on, **fallback, "attempt": number})
+                    deadline = asyncio.timeout(seconds(timeout) if timeout else None)
                     async with deadline:
                         result = await attempt(number, harness)
                 return result, number
@@ -391,20 +389,19 @@ def _rendered_setting(job: Job, ctx: RunContext, harness: str, name: str, variab
 
 
 @asynccontextmanager
-async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str) -> AsyncIterator[bool]:
-    """Hold one of the machine's agent slots (capacity.py) for attempt `number`, waiting for one
-    if they're all taken, until a limit is reached (_LimitWhileWaiting). Yields whether it waited.
-    No cap, or a dry run: there's nothing to hold."""
+async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str) -> AsyncIterator[None]:
+    """Hold one of the agent slots (capacity.py) for attempt `number`, waiting for one if
+    they're all taken, until a limit is reached (_LimitWhileWaiting). No cap, or a dry run:
+    there's nothing to hold."""
     root = ctx.root
     if root.max_agents is None or root.script is not None:
-        yield False
+        yield
         return
     where = _path(ctx, job)
     holder = {"pid": os.getpid(), "run": root.run.id, "node": where, "attempt": number}
     slot = capacity.take(root.max_agents, holder)
-    waited = slot is None
     try:
-        if waited:
+        if slot is None:
             on = {**_label(job), "attempt": number, "harness": harness}
             emit({"event": "slot_waiting", **on, "max_agents": root.max_agents})
             began, key = time.monotonic(), f"{where}#{number}"
@@ -413,10 +410,11 @@ async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str
                 slot = await capacity.wait(root.max_agents, holder, stop=lambda: ctx.limit_reached() is not None)
             finally:
                 ctx.note_slot_wait(key, None)
-            if slot is None:
-                raise _LimitWhileWaiting(ctx.limit_reached())
+            reason = ctx.limit_reached()  # asked again: the slot may have come free just as a limit was reached
+            if slot is None or reason:
+                raise _LimitWhileWaiting(reason)
             emit({"event": "slot_taken", **on, "waited_s": round(time.monotonic() - began, 1)})
-        yield waited
+        yield
     finally:
         if slot is not None:
             slot.release()
