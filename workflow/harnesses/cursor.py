@@ -183,9 +183,12 @@ class Cursor:
         self.tools = mcp_http.Server()
         await self.tools.start()
 
+    def check_model(self, model: str | None) -> None:
+        if model not in self.models:
+            raise Unavailable(f"Cursor has no model `{model}`: `cursor-agent --list-models` lists the ones you can use")
+
     async def session(self, spec: SessionSpec) -> "CursorSession":
-        if spec.model not in self.models:
-            raise Unavailable(f"Cursor has no model `{spec.model}`; `cursor-agent --list-models` lists the ones you can use")
+        self.check_model(spec.model)
         if self.warning:
             spec.emit({"event": "warning", "message": self.warning})
             self.warning = None

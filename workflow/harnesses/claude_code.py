@@ -96,6 +96,9 @@ class ClaudeCode:
     async def open(self, run_dir) -> None:
         pass  # nothing shared: every session is its own process
 
+    def check_model(self, model: str | None) -> None:
+        pass  # Claude Code lists no models: a session with a wrong one fails
+
     async def session(self, spec: SessionSpec) -> "ClaudeSession":
         session = ClaudeSession(spec)
         await session.start()

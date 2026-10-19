@@ -132,6 +132,9 @@ class Harness(Protocol):
     async def open(self, run_dir: Path) -> None:
         """Before the first session of a stream (e.g. start an app server)."""
 
+    def check_model(self, model: str | None) -> None:
+        """After open(): raise Unavailable if the harness knows that it can't run `model`."""
+
     async def session(self, spec: SessionSpec) -> Session:
         """A new session. Raises Unavailable if the harness can't start one."""
 

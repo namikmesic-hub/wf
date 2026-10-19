@@ -42,6 +42,11 @@ results, for free. `wf --help` lists every command.
 
 `wf retry <run-id>` continues a failed or paused run, or a run that a limit stopped,
 from its last checkpoint. Steps and items that finished don't run again.
+When a model fails again and again, `--model` gives that step, or one item of it, another model for the rest of the run:
+
+```sh
+wf retry <run-id> --harness 'review[2]=claude-code' --model 'review[2]=claude-opus-5-5'
+```
 
 Steps that read Slack, Granola, Linear, Notion or Gmail list them in `tools`.
 Sign in to each once per machine:

@@ -6,6 +6,8 @@
     wf graph <file>                  print the workflow as a Mermaid diagram
     wf run <file> [name=value ...]   validate, then run it (runner.py)
     wf retry <run-id>                continue a failed or paused run from its last checkpoint
+                                     (with --model NODE=MODEL, another model for a node or for one
+                                     item NODE[INDEX]: overrides.py)
 
 Tools that agent nodes can use (`tools: [slack, ...]`; workflow/tools/):
     wf tools list                    each tool, how it signs in, and whether it's set up
@@ -124,9 +126,17 @@ def main(argv: list[str] | None = None) -> int:
     retry.add_argument("--detach", action="store_true", help="continue in the background")
     retry.add_argument("--json", action="store_true", help="with --detach: print the run id as JSON")
     retry.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
+    retry.add_argument("--model", action="append", dest="models", metavar="NODE=MODEL",
+                       help="another model for an agent node, or for one item with NODE[INDEX]=MODEL, for the rest "
+                            "of the run (repeat for several)")
+    retry.add_argument("--harness", action="append", dest="harnesses", metavar="NODE=HARNESS",
+                       help="the harness for that node or item: needed when the node names a list or a template")
+    retry.add_argument("--effort", action="append", dest="efforts", metavar="NODE=EFFORT",
+                       help="the effort for that node or item (not for cursor, whose model id carries it)")
     retry.add_argument("--runs-dir", **runs_dir)
-    retry.set_defaults(handler=lambda a: runner.retry(a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits,
-                                                      a.runs_dir))
+    retry.set_defaults(handler=lambda a: runner.retry(
+        a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits, a.runs_dir,
+        {"model": a.models or [], "harness": a.harnesses or [], "effort": a.efforts or []}))
 
     answer = commands.add_parser("answer", help="answer the questions a run waits on, and continue it")
     answer.add_argument("run_id", metavar="run-id")

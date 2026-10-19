@@ -4,13 +4,16 @@ import asyncio
 from pathlib import Path
 
 from workflow import nodes
-from workflow.harnesses.base import TurnEnd, Usage
+from workflow.harnesses.base import TurnEnd, Unavailable, Usage
 
 
 class Fake:
-    def __init__(self, name: str, *turns, fork_fails: bool = False):
+    def __init__(self, name: str, *turns, fork_fails: bool = False, models: set[str] | None = None,
+                 unavailable: str | None = None):
         self.name, self.turns, self.fork_fails = name, list(turns), fork_fails
+        self.models, self.unavailable = models, unavailable  # the models it has (None: any), and why open() fails
         self.sent, self.specs, self.replies, self.closed = [], [], [], 0
+        self.opened = 0
 
     def factory(self):
         return _FakeHarness(self)
@@ -21,12 +24,17 @@ class _FakeHarness:
         self.fake, self.name = fake, fake.name
 
     async def open(self, run_dir):
-        pass
+        if self.fake.unavailable:
+            raise Unavailable(self.fake.unavailable)
+        self.fake.opened += 1
+
+    def check_model(self, model):
+        if self.fake.models is not None and model not in self.fake.models:
+            raise Unavailable(f"{self.name} has no model `{model}`")
 
     async def session(self, spec):
         self.fake.specs.append(spec)
         if spec.fork_from and self.fake.fork_fails:
-            from workflow.harnesses import Unavailable
             raise Unavailable(f"no session {spec.fork_from}")
         return _FakeSession(self.fake, spec)
 

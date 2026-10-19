@@ -38,6 +38,11 @@ submit_result call. It starts fresh instead, with an event saying why, when
 the harness or model differs from the last pass, the fork fails, or the two
 passes before it both continued.
 
+Each agent attempt records the harness, model and effort that it runs with in
+an `agent_model` event. An override from `wf retry --model` (overrides.py)
+runs the job on the override's harness only, with the model and effort that it
+gives. Then the event also names the override.
+
 With a cap on live agent sessions (capacity.py), each agent attempt first takes
 one of the agent slots, and holds it until the attempt ends. An
 attempt that waits for one isn't failing: the wait uses no retry, the node's
@@ -400,9 +405,11 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     fresh = render(False)
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
-    harness = wf.setting(node_id, "harness")
+    target, override = ctx.override(node_id, job["index"]) or (None, {})
+    harness = override.get("harness") or wf.setting(node_id, "harness")
     names = list(harness) if isinstance(harness, list) else [ctx.trace.render(job, "harness", harness, variables).strip()]
-    chosen = {name: tuple(_rendered_setting(job, ctx, name, key, variables) for key in ("model", "effort")) for name in names}
+    chosen = {name: tuple(override.get(key) or _rendered_setting(job, ctx, name, key, variables) for key in ("model", "effort"))
+              for name in names}
     schema = schemas.node_output_schema(wf, node_id)
     listed = None if ctx.root.script else wf.setting(node_id, "tools")  # None: the node doesn't list tools
     uses = listed or ()
@@ -436,6 +443,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         """One session: the instruction, then reminders, until submit_result has a result.
         `source` is the session to continue, and `session_facts` the trace's record of it."""
         model, effort = chosen[name]
+        emit({"event": "agent_model", **_label(job), "attempt": number, "harness": name, "model": model, "effort": effort,
+              **({"override": target} if target else {})})
         if why_not:
             emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": why_not})
         spec = SessionSpec(

@@ -84,7 +84,12 @@ acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`.
   Load `diagnostic-reasoning`.
   An environment problem (missing tool, dependency, credentials) is yours to
   fix, then `wf retry <run-id> --detach`; finished steps and items are not
-  redone. A workflow-file bug, or a task that keeps failing, goes to the captain.
+  redone. A model that keeps failing, for example at a usage limit or in an
+  outage, is yours to change for the rest of the run. Run
+  `wf retry <run-id> --model <node>=<model> --detach`, with
+  `--model '<node>[<item>]=<model>'` for one item. Add `--harness` when the model
+  needs another harness. wf checks it first and changes nothing when it is
+  wrong. A workflow-file bug, or a task that keeps failing, goes to the captain.
 
 `stopped`
 : No wf process is driving the run any more (a crash, a reboot). Run

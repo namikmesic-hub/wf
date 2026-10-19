@@ -18,6 +18,7 @@ Then the runner, built on LangGraph:
                    the bookkeeping the schedule node does with it
     context.py     what nodes get that isn't saved (LangGraph's runtime context)
     limits.py      the run's limits: reaching one pauses it, `wf retry --limit` continues it
+    overrides.py   another model for a node or an item, for the rest of a run: `wf retry --model`
     settings.py    wf's own settings for the user, in ~/.wf/config.yaml
     capacity.py    the cap on live agent sessions across all runs that share a ~/.wf (WF_MAX_AGENTS)
     runs.py        the run folder on disk

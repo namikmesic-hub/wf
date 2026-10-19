@@ -20,6 +20,9 @@ Driving a run alternates between two things:
    - A limit (graph.wait_for_resume too): the run is `limit`, paused. `wf retry
      --limit NAME=VALUE` keeps the bigger limit in run.json and continues it the
      same way (limits.py); without one big enough, it says so and stays put.
+   - `wf retry --model NODE=MODEL` (with --harness and --effort) gives a node
+     or one item another model for the rest of the run (overrides.py). It keeps
+     the override in run.json only when all of the checks pass.
    - END: write output.json, or record why the run failed or hit a limit.
 
 Questions are asked between streams, not inside the event loop, so Ctrl-C
@@ -45,7 +48,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, runs, schemas, settings, spec, validate, workspaces
+from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, schemas, settings, spec, validate, workspaces
 from .context import RunContext
 
 RECURSION_LIMIT = 10_000  # LangGraph's cap on steps; each pass of a node takes two
@@ -132,11 +135,13 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
 
 
 def retry(run_id: str, no_input: bool, answers_file: Path | None = None, detach: bool = False,
-          as_json: bool = False, limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
+          as_json: bool = False, limit_pairs: list[str] | None = None, runs_dir: Path | None = None,
+          override_pairs: dict[str, list[str]] | None = None) -> int:
     """Continue a run: retry what failed, answer what's waiting (from `answers_file`, or by
     asking at a terminal), or carry on after a crash. With `detach`, check everything here,
     then let a background process do it. `limit_pairs` (--limit) set new limits for the
-    rest of the run, e.g. to continue one a limit stopped.
+    rest of the run, e.g. to continue one a limit stopped. `override_pairs` (--model,
+    --harness and --effort, by setting) give a node or an item another model.
 
     The run's lock is taken before anything is checked, so two operators answering
     at once can't both answer the same questions: the second gets RunBusy."""
@@ -146,24 +151,25 @@ def retry(run_id: str, no_input: bool, answers_file: Path | None = None, detach:
         # The copies, as they were when the run started: the workflow and its sub-workflows
         workflows = [spec.load(f) for f in validate.check(run.workflow_file).files]
         answers = json.loads(Path(answers_file).read_text(encoding="utf-8")) if answers_file else None
-        overrides = limits.parse(limit_pairs or [])
+        new_limits = limits.parse(limit_pairs or [])
+        new_models = overrides.parse(override_pairs or {})
         max_agents = capacity.configured()
-    except (OSError, spec.SpecError, ValueError, limits.LimitError, capacity.CapError,
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, overrides.OverrideError, capacity.CapError,
             settings.SettingsError) as error:  # ValueError: not JSON, or not UTF-8
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:
         with run.driving() as lock:
-            return _checked_retry(run, workflows, name, answers, no_input, detach, as_json, lock, overrides,
-                                  max_agents, runs_dir)
+            return _checked_retry(run, workflows, name, answers, no_input, detach, as_json, lock, new_limits,
+                                  new_models, max_agents, runs_dir)
     except runs.RunBusy as error:
         print(f"{name}: {error}", file=sys.stderr)
         return 1
 
 
 def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, answers: dict | None, no_input: bool,
-                   detach: bool, as_json: bool, lock: runs.Lock, overrides: dict, max_agents: int | None,
-                   runs_dir: Path | None) -> int:
+                   detach: bool, as_json: bool, lock: runs.Lock, new_limits: dict, new_models: dict,
+                   max_agents: int | None, runs_dir: Path | None) -> int:
     workflow = workflows[0]
     ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
     asking = interactive() and not no_input and not detach
@@ -174,28 +180,32 @@ def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, ans
             print(f"{name}: {error}", file=sys.stderr)
             return 1
     state = asyncio.run(_snapshot(ctx))
-    ctx.limits = limits.effective(workflow.limits, {**run.limits(), **overrides})
+    ctx.limits = limits.effective(workflow.limits, {**run.limits(), **new_limits})
     if any(i.value.get("kind") == "limit" for i in state.interrupts):  # paused at a limit: is there room now?
         still = limits.check(ctx.limits, state.values.get("usage") or {}, state.values.get("elapsed_s", 0.0))
         if still:
             print(f"{name}: run {run.id} is still over a limit ({still[1]}). "
                   f"Continue it with a bigger one: {run.command('retry', limits.hint(still[0]))}", file=sys.stderr)
             return 1
-    if overrides:
-        run.set_limits(overrides)
-        print(f"Limits for the rest of this run: {limits.describe(ctx.limits)}", file=sys.stderr if as_json else sys.stdout)
+    found, problems = _checked_overrides(run, state, workflows, new_models, ctx.script is not None)
     if answers is not None:
         asked = operate.questions(state.interrupts) if state.values else []
-        problems = operate.check_answers(asked, answers) if asked else [f"run {run.id} isn't waiting for answers"]
-        if problems:
-            for problem in problems:
-                print(f"{name}: {problem}", file=sys.stderr)
-            return 1
+        problems += operate.check_answers(asked, answers) if asked else [f"run {run.id} isn't waiting for answers"]
+    if problems:
+        for problem in problems:
+            print(f"{name}: {problem}", file=sys.stderr)
+        return 1
     if not _ended(run, state) and (problem := _signing_problem(workflows, _run_home(run, state))):
         print(f"{name}: {problem}", file=sys.stderr)
         if run.status().get("status") == "running":  # a background driver: tell `wf wait` why it stopped
             run.set_status("failed", error=problem)
         return 1
+    if new_limits:  # every check passed: only now does anything change
+        run.set_limits(new_limits)
+        print(f"Limits for the rest of this run: {limits.describe(ctx.limits)}", file=sys.stderr if as_json else sys.stdout)
+    if found:
+        _keep_overrides(run, state.values or {}, found, as_json)
+    ctx.overrides = run.overrides()
     if detach:
         args = ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)]
         if answers is not None:  # keep the answers with the run, for the background process
@@ -241,6 +251,32 @@ def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | 
         return 0 if status == "succeeded" else 1
     ctx.trace.run("retried", workflow=ctx.workflow.name, **({"answers": True} if answers is not None else {}))
     return _drive(ctx, command, asking)
+
+
+def _checked_overrides(run: runs.Run, state: StateSnapshot, workflows: list[spec.Workflow], given: dict,
+                       dry_run: bool) -> tuple[dict, list[str]]:
+    """The overrides given to `wf retry`, checked against the run, and what's wrong with them."""
+    if not given:
+        return {}, []
+    if _ended(run, state):
+        return {}, [f"run {run.id} has ended, so no node is left to run with another model"]
+    found, problems = overrides.check(given, workflows, state.values or {})
+    if not problems and not dry_run:  # a dry run plays its script on every harness
+        problems = asyncio.run(overrides.available(found, run.dir))
+    return found, problems
+
+
+def _keep_overrides(run: runs.Run, values: dict, found: dict, as_json: bool) -> None:
+    """Keep checked overrides for the rest of the run, and record each in events.jsonl with the
+    last error of its target."""
+    run.set_overrides(found)
+    for key, override in found.items():
+        node, index = overrides.split(key)
+        error = overrides.last_error(values, node, index)
+        run.add_event({"event": "override", "node": node, **({"index": index} if index is not None else {}),
+                       **override, **({"last_error": error} if error else {})})
+        print(f"Override for the rest of this run: {overrides.describe(key, override)}",
+              file=sys.stderr if as_json else sys.stdout)
 
 
 def _note_uncommitted(workflows: list[spec.Workflow], read_by_wf: list[Path]) -> None:
@@ -517,6 +553,9 @@ def describe(event: dict) -> str | None:
         return f"  {where}: starting a fresh session: {event['reason']}"
     if kind == "session_continued":
         return f"  {where}: continuing the last pass's session"
+    if kind == "agent_model" and event.get("override"):
+        model = f" {event['model']}" if event.get("model") else ""
+        return f"  {where}: attempt {event['attempt']} runs on {event['harness']}{model}, as the override for {event['override']} says"
     if kind == "slot_waiting":
         return f"  {where}: attempt {event['attempt']} waits for an agent slot ({event['max_agents']} of {event['max_agents']} in use)"
     if kind == "slot_taken":
