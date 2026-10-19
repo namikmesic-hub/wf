@@ -254,6 +254,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
     harness = wf.setting(node_id, "harness")
     names = list(harness) if isinstance(harness, list) else [templates.render(harness, variables).strip()]
+    chosen = {name: tuple(_rendered_setting(job, ctx, name, key, variables) for key in ("model", "effort")) for name in names}
     schema = schemas.node_output_schema(wf, node_id)
 
     async def attempt(number: int, name: str) -> dict:
@@ -265,7 +266,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             agent = await ctx.harness(name)
         except Unavailable as error:
             raise _Unavailable(str(error)) from error
-        model = wf.harness_setting(node_id, name, "model")
+        model, effort = chosen[name]
         source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
         if why_not:
             emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": why_not})
@@ -274,7 +275,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             access=wf.setting(node_id, "access"),
             web=wf.setting(node_id, "web"),
             model=model,
-            effort=wf.harness_setting(node_id, name, "effort"),
+            effort=effort,
             max_turns=wf.harness_setting(node_id, name, "max_turns"),
             budget_usd=wf.harness_setting(node_id, name, "budget_usd"),
             tool=output_tool.ResultTool(schema),
@@ -319,7 +320,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                                         "cost_usd": (source["cost_usd"] if source else 0.0) + usage.cost_usd - spent_before,
                                         "streak": source["streak"] + 1 if source else 0}
                     (folder / "session.json").write_text(json.dumps(extra["session"], indent=2) + "\n", encoding="utf-8")
-                    return spec.tool.result
+                    return schemas.absent_as_none(spec.tool.result, schema)
                 if end.status == "unavailable":
                     raise _Unavailable(end.message)
                 if end.status == "failed":
@@ -338,6 +339,22 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
 
 DONT_COMMIT = "Don't commit: the runner commits your changes when you're done."
+
+
+def _rendered_setting(job: Job, ctx: RunContext, harness: str, name: str, variables: dict) -> str | None:
+    """`model` or `effort` for one harness, rendered: a template like "{{ item.model }}" gives each item its own."""
+    source = ctx.workflow.harness_setting(job["node"], harness, name)
+    if source is None:
+        return None
+    try:
+        value = templates.render_value(source, variables)
+    except templates.TemplateError as error:
+        raise templates.TemplateError(f"{name}: {error}") from error
+    if not isinstance(value, str) or not value.strip():
+        shown = "none" if value is None else json.dumps(value, ensure_ascii=False, default=str)
+        raise _Failed(f"`{name}` of node `{job['node']}` renders to {shown} for {harness}, "
+                      "but it must be a non-empty string", job["attempt"])
+    return value.strip()
 
 
 async def _start_commit(ctx: RunContext, folder: Path, workspace: dict) -> tuple[str, bool]:
@@ -443,7 +460,7 @@ def _human(job: Job, ctx: RunContext, folder: Path, variables: dict) -> dict:
     problems = schemas.check(answers, schema)
     if problems:
         raise _Failed("the answers don't match the node's output: " + "; ".join(problems), job["attempt"])
-    return answers
+    return schemas.absent_as_none(answers, schema)
 
 
 # ---------- workflow nodes ----------
@@ -505,7 +522,7 @@ def _sub_inputs(sub, given: dict, attempt: int) -> dict:
     for name, field in sub.start.input.items():
         if name not in values and "default" in field:
             values[name] = field["default"]
-    problems = schemas.check(values, schemas.object_schema(sub.start.input, sub.types))
+    problems = schemas.check(values, schemas.object_schema(sub.start.input, sub.types), none_is_absent=True)
     if problems:
         raise _Failed(f"`with` doesn't fit {sub.name}'s inputs: " + "; ".join(problems), attempt)
     return values

@@ -219,6 +219,36 @@ def test_a_script_can_carry_the_inputs_of_its_path(repo):
     assert "From the command line" in (only_run() / "nodes" / "explore" / "1" / "instruction.md").read_text()
 
 
+def test_each_items_log_shows_the_harness_model_and_effort_its_templates_rendered(repo):
+    Path("seats.yaml").write_text(dedent("""
+        version: 1
+        name: seats
+        types:
+          seat:
+            harness: {enum: [claude-code, codex]}
+            model: {type: string}
+            effort: {type: string}
+        start: {input: {seats: {type: array, maxItems: 3, items: {$ref: seat}}}}
+        nodes:
+          review:
+            needs: [start]
+            for_each: start.seats
+            harness: "{{ item.harness }}"
+            model: "{{ item.model }}"
+            effort: "{{ item.effort }}"
+            instruction: review
+        end: {output: {}}
+    """))
+    seats = [{"harness": "claude-code", "model": "claude-opus-5-5", "effort": "high"},
+             {"harness": "codex", "model": "gpt-6", "effort": "low"}]
+    steps = {"inputs": {"seats": seats}, "agents": {"review": [{"summary": "a"}, {"summary": "b"}]}}
+    assert cli.main(["run", "seats.yaml", "--dry-run", script(steps)]) == 0
+    for index, seat in enumerate(seats):
+        log = only_run() / "nodes" / "review" / "1" / str(index) / "attempt-1.log"
+        (session,) = [line for line in map(json.loads, log.read_text().splitlines()) if line["kind"] == "dry_run"]
+        assert {key: session[key] for key in seat} == seat
+
+
 def test_a_fallback_after_failed_attempts_is_shown(repo, capsys):
     Path("flow.yaml").write_text(dedent("""
         version: 1

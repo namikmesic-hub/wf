@@ -281,6 +281,23 @@ def test_harness_lists_need_model_maps_and_cursor_needs_a_model(tmp_path):
     ])
 
 
+def test_templates_in_model_and_effort_are_checked_where_they_are_set(tmp_path):
+    top = "defaults:\n  harnesses:\n    codex: {model: '{{ item.model }}'}\n"
+    seats = "seats: {type: array, maxItems: 2, items: {type: object, properties: {model: {type: string}}, additionalProperties: false}}"
+    report = check(tmp_path, flow("""
+        a: {needs: [start], for_each: start.seats, instruction: x, model: "{{ item.modle }}"}
+        b: {needs: [start], instruction: x, effort: {claude-code: "{{ start.effort }}"}}
+        c: {needs: [start], instruction: x, harness: codex}
+        d: {needs: [start], for_each: start.seats, instruction: x, harness: codex}
+    """, inputs=seats, top=top).replace("defaults:\n  harness: claude-code\n", "", 1).replace(
+        "  harnesses:", "  harness: claude-code\n  harnesses:"))
+    assert_problems(report, [
+        ("error", "nodes.a.model", "`item.modle`: no field `modle` (fields: model)"),
+        ("error", "nodes.b.effort.claude-code", "`start.effort`: no field `effort`"),
+        ("error", "defaults.harnesses.codex.model", "`item` is only defined inside a for_each node"),
+    ])
+
+
 # ---------- 10. end outputs ----------
 
 

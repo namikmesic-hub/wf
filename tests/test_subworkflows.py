@@ -362,3 +362,31 @@ def test_answers_reach_the_right_question_across_separate_resumes(repo, monkeypa
     one_answer("no")
     assert cli.main(["resume", only_run().name]) == 0
     assert output() == {"ok": False}
+
+
+def test_an_optional_field_left_out_passes_through_with_and_reads_as_none_inside(repo, monkeypatch):
+    from fakes import submit
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", submit({"seat": {"name": "argon"}})).factory)
+    write("use.yaml", """
+        version: 1
+        name: use
+        types: {seat: {name: {type: string}, effort: {type: string, optional: true}}}
+        start: {input: {seat: {$ref: seat}}}
+        nodes:
+          say: {needs: [start], command: "echo {{ (start.seat.effort or 'no effort') | quote }}"}
+        end: {output: {said: "{{ say.stdout }}"}}
+    """)
+    write("main.yaml", """
+        version: 1
+        name: main
+        defaults: {harness: claude-code}
+        types: {seat: {name: {type: string}, effort: {type: string, optional: true}}}
+        start: {input: {}}
+        nodes:
+          pick: {needs: [start], instruction: pick a seat, output: {seat: {$ref: seat}}}
+          use: {needs: [pick], workflow: use.yaml, with: {seat: "{{ pick.seat }}"}}
+        end: {output: {said: "{{ use.said }}", effort: "{{ pick.seat.effort }}"}}
+    """)
+    assert cli.main(["run", "main.yaml"]) == 0
+    assert output() == {"said": "no effort\n", "effort": None}
+    assert json.loads((only_run() / "nodes" / "pick" / "1" / "output.json").read_text()) == {"seat": {"name": "argon", "effort": None}}

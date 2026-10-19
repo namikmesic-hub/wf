@@ -523,6 +523,11 @@ class _Checker:
         if "cursor" in possible and self.wf.harness_setting(node_id, "cursor", "model") is None:
             self.error(at, "this node can run on cursor, which needs a `model` (set `model` here, or defaults.harnesses.cursor.model)")
         self.harnesses |= possible
+        names = [h for h in HARNESSES if h in possible] or HARNESSES
+        settings = {self.wf.harness_setting_at(node_id, name, key) for name in names for key in ("model", "effort")}
+        for where, value in sorted(settings, key=lambda setting: setting[0] or ""):
+            if isinstance(value, str):  # model and effort are templates, like harness
+                self._template(where, value, node_id, "node")
 
     def _workspace(self, node_id: str) -> None:
         workspace = self.wf.setting(node_id, "workspace")

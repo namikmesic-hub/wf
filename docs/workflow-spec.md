@@ -217,8 +217,12 @@ becomes
 ```
 
 - Every field is required unless it has `optional: true`. That key is removed from the
-  final schema. A missing optional field reads as `none` in templates. To allow null,
-  use `type: [string, "null"]`.
+  final schema. A missing optional field reads as `none` in templates and end outputs,
+  at any depth, and a node's `output.json` records it as null. To let an agent or a
+  person give null, use `type: [string, "null"]`.
+- A value a template makes for `with` or for an end output's schema can hold that `none`.
+  There, `none` in a field the schema doesn't require counts as left out, so an output
+  with a missing optional field passes through to a sub-workflow input of the same type.
 - In `start.input`, a field can have a `default`, used when that input isn't given. A field
   with a default is optional.
 - Write `description`s. For agent nodes they're part of the `submit_result` tool, so the
@@ -296,7 +300,7 @@ Fields every kind accepts:
 | `instruction` | required | The task, as a template. Sent as the user message. |
 | `output` | `{summary: {type: string}}` | The result's field map. Becomes the `submit_result` tool. |
 | `harness` | `defaults.harness` | `claude-code`, `codex` or `cursor`, or a list to fall back through. See [Errors](#errors-retries-and-fallbacks). |
-| `model`, `effort` | `defaults.harnesses.<harness>` | A string, or a map by harness when `harness` is a list. |
+| `model`, `effort` | `defaults.harnesses.<harness>` | A string, or a map by harness when `harness` is a list. Each string is a template, so a `for_each` item can choose its own: `model: "{{ item.model }}"`. A value that renders to `none`, empty text or anything but a string fails the node (or the item) before a session starts. |
 | `access` | `read-only` | `read-only`, `edit` or `full`. |
 | `web` | `false` | Allow web search and page fetching. |
 | `session` | `fresh` | `fresh` starts a new agent session for every pass: the code carries over through the workspace, and the instruction carries the feedback. `continue` carries the conversation over too. See [Sessions](#sessions). |
@@ -440,7 +444,7 @@ different limit.
 Text is evaluated with sandboxed Jinja, in two ways:
 
 - **Templates** use `{{ }}` and `{% %}`. Fields: `instruction`, `human`, `command`, `env`,
-  `with`, `base`, `harness`, and end `value`s.
+  `with`, `base`, `harness`, `model`, `effort`, and end `value`s.
 - **Expressions** are written without braces. Fields: `when` and `for_each`.
   Example: `review.approved and tests.exit_code == 0`.
 

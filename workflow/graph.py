@@ -124,7 +124,7 @@ async def finish(state: RunState, runtime: Runtime[RunContext]) -> dict:
             output[name] = templates.render_value(raw, variables) if isinstance(raw, str) else raw
             field = {k: v for k, v in value.items() if k != "value"}
             schema = schemas.object_schema({name: field}, workflow.types)["properties"][name]
-            problems += [f"{name}: {p}" for p in schemas.check(output[name], schema)]
+            problems += [f"{name}: {p}" for p in schemas.check(output[name], schema, none_is_absent=True)]
         except templates.TemplateError as error:
             problems.append(f"{name}: {error}")
     if problems:

@@ -143,6 +143,33 @@ def test_check_reports_each_problem_with_its_field_path():
     assert schemas.check({"tasks": [], "n": 2}, schema) == []
 
 
+NOTED = {"task": {"title": {"type": "string"}, "notes": {"type": "string", "optional": True}}}
+
+
+def test_optional_fields_left_out_become_none_at_any_depth():
+    schema = schemas.object_schema(
+        {"tasks": {"type": "array", "items": {"$ref": "task"}}, "lead": {"$ref": "task", "optional": True}}, NOTED
+    )
+    value = {"tasks": [{"title": "a"}, {"title": "b", "notes": "n"}]}
+    assert schemas.absent_as_none(value, schema) == {
+        "tasks": [{"title": "a", "notes": None}, {"title": "b", "notes": "n"}], "lead": None,
+    }
+    assert value == {"tasks": [{"title": "a"}, {"title": "b", "notes": "n"}]}  # a copy: the value itself is kept
+
+
+def test_none_counts_as_left_out_only_in_fields_that_are_not_required():
+    schema = schemas.object_schema({"tasks": {"type": "array", "items": {"$ref": "task"}}}, NOTED)
+    filled = {"tasks": [{"title": "a", "notes": None}]}
+    assert schemas.check(filled, schema) == ["tasks[0].notes: None is not of type 'string'"]
+    assert schemas.check(filled, schema, none_is_absent=True) == []
+    assert schemas.check({"tasks": [{"title": None}]}, schema, none_is_absent=True) == [
+        "tasks[0].title: None is not of type 'string'",
+    ]
+    assert schemas.check({"tasks": [{"title": "a", "other": None}]}, schema, none_is_absent=True) == [
+        "tasks[0]: Additional properties are not allowed ('other' was unexpected)",
+    ]
+
+
 # ---------- looking up fields (for template checks) ----------
 
 

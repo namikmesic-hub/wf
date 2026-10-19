@@ -34,10 +34,11 @@ end:
 
 Unknown keys are errors. A **field map** (`start.input`, `output`, `types`
 entries) maps field names to JSON Schema; every field is required unless
-`optional: true`. Allowed keywords: type, properties, required,
-additionalProperties, items, enum, const, description, minimum, maximum,
-minLength, maxLength, minItems, maxItems, pattern, $ref (and `default` in
-start.input). Nested objects are full JSON Schema or `$ref: <type>`.
+`optional: true`, and a missing optional field reads as `none`. Allowed
+keywords: type, properties, required, additionalProperties, items, enum, const,
+description, minimum, maximum, minLength, maxLength, minItems, maxItems,
+pattern, $ref (and `default` in start.input). Nested objects are full JSON
+Schema or `$ref: <type>`.
 
 In flow style (`{a: b, c: d}`) a comma ends a value: quote any description or
 default with a comma or `: ` in it (`description: "The report, as written"`),
@@ -110,8 +111,9 @@ is the output it just produced. Every loop must pass through a route with `max`.
 ## Templates and expressions
 
 Sandboxed Jinja. Templates (`{{ }}`, `{% %}`): instruction, human, command, env,
-with, base, harness, end values. Expressions (no braces): `when`, `for_each`.
-A template that is exactly one `{{ ... }}` keeps its type (a list stays a list).
+with, base, harness, model, effort, end values. Expressions (no braces): `when`,
+`for_each`. A template that is exactly one `{{ ... }}` keeps its type (a list
+stays a list).
 
 | Name | Value |
 |---|---|
