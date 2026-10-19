@@ -65,9 +65,9 @@ def talk(tokens=100, cost=0.01):
     return turn
 
 
-def ends(status, message, cost=0.0):
+def ends(status, message, cost=0.0, retry_after=0):
     async def turn(session):
-        return TurnEnd(status, message, Usage(0, cost))
+        return TurnEnd(status, message, Usage(0, cost), retry_after)
     return turn
 
 
@@ -91,3 +91,17 @@ def edits(files: dict, *results, check=None):
             session.fake.replies.append(session.spec.tool.submit(result))
         return TurnEnd("done", usage=Usage(10, 0.0))
     return turn
+
+
+def skip_waits(monkeypatch, seconds: float) -> list[float]:
+    """Each asyncio.sleep(seconds), the runner's wait before a retry, is recorded and skipped."""
+    waits, real_sleep = [], asyncio.sleep
+
+    async def sleep(delay, *args, **kwargs):
+        if delay == seconds:
+            waits.append(delay)
+            delay = 0
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    return waits

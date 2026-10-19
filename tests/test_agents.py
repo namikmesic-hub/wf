@@ -14,7 +14,7 @@ from textwrap import dedent, indent
 import pytest
 
 from workflow import cli, harnesses, runner
-from fakes import Fake, ends, hang, submit, talk
+from fakes import Fake, ends, hang, skip_waits, submit, talk
 from workflow.output_tool import FINISH, REMINDER
 
 
@@ -160,6 +160,18 @@ def test_an_unavailable_harness_falls_back_to_the_next_one_at_once(repo, monkeyp
     assert codex.specs[0].model == "gpt-6-mini"
     assert codex.specs[0].log.name == "attempt-2.log"
     assert "claude-code is unavailable" in capsys.readouterr().out
+
+
+def test_a_failed_turn_can_ask_for_a_wait_before_its_retry_but_not_before_a_fallback(repo, monkeypatch):
+    waits = skip_waits(monkeypatch, 5)
+    busy = ends("failed", "the model is busy", retry_after=5)
+    claude, codex = Fake("claude-code", busy, busy), Fake("codex", submit({"steps": ["from codex"]}))
+    install(monkeypatch, claude, codex)
+    node = PLAN + "  harness: [claude-code, codex]\n  model: {claude-code: opus, codex: gpt-6-mini}\n"
+    assert cli.main(["run", flow(node)]) == 0
+    assert output()["steps"] == ["from codex"]
+    assert len(claude.specs) == 2
+    assert waits == [5]  # before claude-code's retry, and none before codex took over
 
 
 def test_a_harness_that_is_not_built_yet_counts_as_unavailable(repo, monkeypatch):
