@@ -187,24 +187,28 @@ def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, ans
             print(f"{name}: run {run.id} is still over a limit ({still[1]}). "
                   f"Continue it with a bigger one: {run.command('retry', limits.hint(still[0]))}", file=sys.stderr)
             return 1
-    found, problems = _checked_overrides(run, state, workflows, new_models, ctx.script is not None)
+    found, problems = _checked_overrides(run, state, workflows, new_models)
     if answers is not None:
         asked = operate.questions(state.interrupts) if state.values else []
         problems += operate.check_answers(asked, answers) if asked else [f"run {run.id} isn't waiting for answers"]
     if problems:
-        for problem in problems:
-            print(f"{name}: {problem}", file=sys.stderr)
-        return 1
+        return _refused(name, problems)
     if not _ended(run, state) and (problem := _signing_problem(workflows, _run_home(run, state))):
         print(f"{name}: {problem}", file=sys.stderr)
         if run.status().get("status") == "running":  # a background driver: tell `wf wait` why it stopped
             run.set_status("failed", error=problem)
         return 1
-    if new_limits:  # every check passed: only now does anything change
-        run.set_limits(new_limits)
-        print(f"Limits for the rest of this run: {limits.describe(ctx.limits)}", file=sys.stderr if as_json else sys.stdout)
-    if found:
-        _keep_overrides(run, state.values or {}, found, as_json)
+    if found and ctx.script is None and (problems := asyncio.run(overrides.available(found, workflow))):
+        return _refused(name, problems)  # the last check, as it opens harnesses (a dry run's script plays them all)
+    try:  # every check passed: only now does anything change
+        if found:
+            _keep_overrides(run, state.values or {}, found, as_json)
+        if new_limits:
+            run.set_limits(new_limits)
+            print(f"Limits for the rest of this run: {limits.describe(ctx.limits)}", file=sys.stderr if as_json else sys.stdout)
+    except OSError as error:
+        print(f"{name}: can't keep the new settings in {run.dir}: {error.strerror or error}", file=sys.stderr)
+        return 1
     ctx.overrides = run.overrides()
     if detach:
         args = ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)]
@@ -253,28 +257,34 @@ def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | 
     return _drive(ctx, command, asking)
 
 
-def _checked_overrides(run: runs.Run, state: StateSnapshot, workflows: list[spec.Workflow], given: dict,
-                       dry_run: bool) -> tuple[dict, list[str]]:
+def _checked_overrides(run: runs.Run, state: StateSnapshot, workflows: list[spec.Workflow],
+                       given: dict) -> tuple[dict, list[str]]:
     """The overrides given to `wf retry`, checked against the run, and what's wrong with them."""
     if not given:
         return {}, []
     if _ended(run, state):
         return {}, [f"run {run.id} has ended, so no node is left to run with another model"]
-    found, problems = overrides.check(given, workflows, state.values or {})
-    if not problems and not dry_run:  # a dry run plays its script on every harness
-        problems = asyncio.run(overrides.available(found, run.dir))
-    return found, problems
+    return overrides.check(given, workflows, state.values or {})
+
+
+def _refused(name: str, problems: list[str]) -> int:
+    for problem in problems:
+        print(f"{name}: {problem}", file=sys.stderr)
+    return 1
 
 
 def _keep_overrides(run: runs.Run, values: dict, found: dict, as_json: bool) -> None:
-    """Keep checked overrides for the rest of the run, and record each in events.jsonl with the
-    last error of its target."""
-    run.set_overrides(found)
+    """Record checked overrides in events.jsonl, each with the last error of its target, then keep them
+    for the rest of the run. In this order, an override never applies without its event."""
+    events = []
     for key, override in found.items():
         node, index = overrides.split(key)
         error = overrides.last_error(values, node, index)
-        run.add_event({"event": "override", "node": node, **({"index": index} if index is not None else {}),
+        events.append({"event": "override", "node": node, **({"index": index} if index is not None else {}),
                        **override, **({"last_error": error} if error else {})})
+    run.add_events(events)
+    run.set_overrides(found)
+    for key, override in found.items():
         print(f"Override for the rest of this run: {overrides.describe(key, override)}",
               file=sys.stderr if as_json else sys.stdout)
 

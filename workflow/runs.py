@@ -255,8 +255,14 @@ class Run:
         return False
 
     def add_event(self, event: dict) -> None:
+        self.add_events([event])
+
+    def add_events(self, events: list[dict]) -> None:
+        """Append events to events.jsonl together, in one write."""
+        at = now()
+        lines = "".join(json.dumps({"time": at, **event}, ensure_ascii=False, default=str) + "\n" for event in events)
         with (self.dir / "events.jsonl").open("a", encoding="utf-8") as file:
-            file.write(json.dumps({"time": now(), **event}, ensure_ascii=False, default=str) + "\n")
+            file.write(lines)
 
     def set_output(self, output: dict) -> None:
         write_json(self.dir / "output.json", output)

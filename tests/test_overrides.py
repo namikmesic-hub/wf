@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from fakes import Fake, ends, submit
-from workflow import cli, harnesses, overrides, runner
+from workflow import cli, harnesses, overrides, runner, runs, workspaces
 
 
 @pytest.fixture
@@ -59,8 +59,10 @@ def given(log: Path) -> tuple:
 
 
 def record() -> dict:
-    """What a refused override must leave as it was."""
-    return {name: (only_run() / name).read_text() for name in ("run.json", "events.jsonl", "status.json")}
+    """What a refused override must leave as it was: each file of the run folder. The lock is left out,
+    because each command that drives the run writes its pid there."""
+    return {str(path.relative_to(only_run())): path.read_bytes() for path in sorted(only_run().rglob("*"))
+            if path.is_file() and path.name != "lock"}
 
 
 FAN = """
@@ -106,6 +108,37 @@ def test_a_failed_item_runs_again_with_the_model_it_is_given_and_the_others_stay
     assert kept == {"review[1]": {"harness": "claude-code", "model": "sonnet", "effort": "max"}}
 
 
+def test_an_item_keeps_the_harness_that_its_template_gives_it(repo, no_real_harness, capsys):
+    write("fan.yaml", FAN)
+    steps = {"agents": {"review[0]": [{"summary": "a"}], "review[1]": [{"_unavailable": "resource_exhausted"}, {"summary": "b"}],
+                        "review[2]": [{"summary": "c"}]}}
+    assert cli.main(["run", "fan.yaml", "--dry-run", script(steps)]) == 1
+    before = record()
+    capsys.readouterr()
+    assert cli.main(["retry", only_run().name, "--model", "review=argon"]) == 1  # the items' harnesses differ
+    assert "review: `review` picks its harness with a template, so name one: --harness review=NAME" in capsys.readouterr().err
+    assert record() == before
+    assert cli.main(["retry", only_run().name, "--model", "review[1]=argon"]) == 0
+    assert given(only_run() / "nodes" / "review" / "1" / "1" / "attempt-2.log") == ("cursor", "argon", None)
+    assert json.loads((only_run() / "run.json").read_text())["overrides"] == {
+        "review[1]": {"harness": "cursor", "model": "argon", "effort": None}}
+
+
+def test_an_item_that_the_node_went_on_without_can_get_another_model(repo, no_real_harness, capsys):
+    write("fan.yaml", FAN.replace("    instruction: Review the change\n", "    instruction: Review the change\n"
+                                  "    on_item_error: continue\n  after: {needs: [review], instruction: Sum up}\n"))
+    steps = {"agents": {"review[0]": [{"summary": "a"}], "review[1]": [{"_unavailable": "resource_exhausted"}],
+                        "review[2]": [{"summary": "c"}], "after": [{"_unavailable": "out"}, {"summary": "summed"}]}}
+    assert cli.main(["run", "fan.yaml", "--dry-run", script(steps)]) == 1  # review went on without item 1
+    before = record()
+    assert cli.main(["retry", only_run().name, "--model", "review[3]=argon"]) == 1  # its last pass had 3 items
+    assert "review[3]: `review` has only items 0 to 2" in capsys.readouterr().err
+    assert record() == before
+    assert cli.main(["retry", only_run().name, "--harness", "review[1]=claude-code", "--model", "review[1]=sonnet"]) == 0
+    assert events("override")[0]["last_error"] == "cursor is unavailable: dry run: resource_exhausted"
+    assert not (only_run() / "nodes" / "review" / "1" / "1" / "attempt-2.log").exists()  # finished: it doesn't run again
+
+
 LOOP = """
 version: 1
 name: loop
@@ -141,6 +174,60 @@ def test_an_override_holds_for_later_retries_and_later_passes(repo, no_real_harn
     assert len(events("override")) == 1
 
 
+def test_a_later_override_replaces_the_earlier_one(repo, no_real_harness, capsys):
+    write("loop.yaml", LOOP)
+    steps = {"agents": {"write": [{"_unavailable": "out"}, {"_unavailable": "out again"}, {"summary": "done"}]}}
+    assert cli.main(["run", "loop.yaml", "--dry-run", script(steps)]) == 1
+    assert cli.main(["retry", only_run().name, "--harness", "write=codex", "--model", "write=gpt-6"]) == 1
+    assert cli.main(["retry", only_run().name, "--model", "write=sonnet"]) == 0  # back on the node's own harness
+    assert json.loads((only_run() / "run.json").read_text())["overrides"] == {
+        "write": {"harness": "claude-code", "model": "sonnet", "effort": None}}
+    passes = only_run() / "nodes" / "write" / "1"
+    assert [given(passes / f"attempt-{n}.log") for n in (2, 3)] == [("codex", "gpt-6", None), ("claude-code", "sonnet", "high")]
+    assert [(e["harness"], e["model"], e["last_error"]) for e in events("override")] == [
+        ("codex", "gpt-6", "claude-code is unavailable: dry run: out"), ("claude-code", "sonnet", "codex is unavailable: dry run: out again")]
+
+
+def test_a_node_that_a_limit_stopped_gives_its_override_its_last_error(repo, no_real_harness):
+    write("flaky.yaml", """
+        version: 1
+        name: flaky
+        defaults: {harness: claude-code}
+        limits: {tokens: 1000}
+        start: {input: {}}
+        nodes:
+          a: {needs: [start], instruction: x, retry: 2}
+        end: {output: {said: "{{ a.summary }}"}}
+    """)
+    steps = {"agents": {"a": [{"_fail": "crashed", "_tokens": 5000}, {"summary": "second try"}]}}
+    assert cli.main(["run", "flaky.yaml", "--dry-run", script(steps)]) == 1  # paused: the run has no failure
+    assert cli.main(["retry", only_run().name, "--limit", "tokens=100000", "--model", "a=sonnet"]) == 0
+    assert events("override")[0]["last_error"].startswith("dry run: crashed; no new attempt because a limit was reached")
+
+
+def test_a_report_leaves_overrides_out(repo, no_real_harness, capsys):
+    write("skip.yaml", """
+        version: 1
+        name: skip
+        defaults: {harness: claude-code}
+        start: {input: {}}
+        nodes:
+          a:
+            needs: [start]
+            instruction: x
+            routes: [{when: "a.summary == 'more'", to: b}, {to: end}]
+          b: {instruction: y}
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "skip.yaml", "--dry-run", script({"agents": {"a": [{"_unavailable": "out"}, {"summary": "done"}]}})]) == 1
+    assert cli.main(["retry", only_run().name, "--model", "a=sonnet", "--model", "b=sonnet"]) == 0
+    capsys.readouterr()
+    assert cli.main(["report", only_run().name, "--json"]) == 0
+    nodes = json.loads(capsys.readouterr().out)["nodes"]
+    assert list(nodes) == ["a"]  # b never ran, though it has an override
+    assert nodes["a"]["runs"] == 1
+
+
 MIXED = """
 version: 1
 name: mixed
@@ -169,6 +256,7 @@ nodes:
     tools: [slack]
     instruction: Read the notes
   sub: {needs: [review], workflow: inner.yaml}
+  own: {needs: [review], model: opus, instruction: Use your own model}
 end: {output: {}}
 """
 
@@ -197,6 +285,8 @@ end: {output: {}}
     (["--harness", "review=cursor"], "review: cursor needs a model"),
     (["--harness", "review=cursor", "--model", "review=grok", "--effort", "review=max"], "review: cursor has no effort setting"),
     (["--harness", "notes=claude-code"], "notes: `notes` has tools, and on claude-code at `edit` access its commands"),
+    (["--harness", "own=codex"], "own: the workflow gives `own` the model `opus` for its own harness, and none for codex: "
+                                 "add --model own=ID"),
     (["--model", "review"], "--model: expected NODE=VALUE"),
     (["--model", "review[x]=m"], "--model: `review[x]` isn't a node or an item"),
     (["--model", "review=a", "--model", "review=b"], "--model names review twice"),
@@ -324,6 +414,88 @@ def test_a_harness_that_can_run_here_takes_the_failed_node(repo, monkeypatch):
     assert [(e["attempt"], e["harness"], e.get("override")) for e in events("agent_model")] == [
         (1, "claude-code", None), (2, "claude-code", None), (3, "codex", "plan")]
     assert events("override")[0]["last_error"] == "overloaded"
+
+
+def test_a_new_harness_takes_the_workflows_model_for_it_and_cursor_gets_no_effort(repo, monkeypatch):
+    cursor = Fake("cursor", submit({"summary": "planned"}), models={"grok"})
+    claude = Fake("claude-code", ends("failed", "overloaded"), ends("failed", "overloaded"))
+    for fake in (claude, cursor):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    write("one.yaml", ONE.replace("codex: {model: gpt-6}}", "cursor: {model: grok}}, effort: high"))
+    assert cli.main(["run", "one.yaml"]) == 1
+    assert cli.main(["retry", only_run().name, "--harness", "plan=cursor"]) == 0
+    assert [(spec.model, spec.effort) for spec in cursor.specs] == [("grok", None)]
+    assert events("agent_model")[-1]["effort"] is None
+
+
+def test_a_model_that_the_workflow_gives_for_the_new_harness_is_checked_too(repo, monkeypatch, capsys):
+    cursor = Fake("cursor", models={"grok"})
+    claude = Fake("claude-code", ends("failed", "overloaded"), ends("failed", "overloaded"))
+    for fake in (claude, cursor):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    write("one.yaml", ONE.replace("codex: {model: gpt-6}", "cursor: {model: gone}"))
+    assert cli.main(["run", "one.yaml"]) == 1
+    before = record()
+    capsys.readouterr()
+    assert cli.main(["retry", only_run().name, "--harness", "plan=cursor"]) == 1
+    assert "plan: cursor has no model `gone`" in capsys.readouterr().err
+    assert record() == before
+
+
+def test_the_harness_check_comes_last_and_opens_the_harness_outside_the_run(repo, monkeypatch, capsys):
+    """A harness can write as it opens, as Codex writes its app server's log. The check opens it only
+    when every other check passed, in a folder of its own that it removes."""
+    folders = []
+    codex = Fake("codex", submit({"summary": "planned"}), models={"gpt-6"})
+
+    def writing():
+        harness = codex.factory()
+        opened = harness.open
+
+        async def open(run_dir):
+            folders.append(Path(run_dir))
+            (Path(run_dir) / "codex-app-server.log").write_text("started\n")
+            workspaces.temp_root(Path(run_dir).name).mkdir(parents=True, exist_ok=True)  # as Cursor makes its folder
+            await opened(run_dir)
+        harness.open = open
+        return harness
+
+    monkeypatch.setitem(harnesses.FACTORIES, "codex", writing)
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code").factory)
+    write("ask.yaml", ONE.replace("  plan: {needs: [start], instruction: Plan it}",
+                                  '  ok: {needs: [start], human: "Go on?", output: {go: {type: boolean}}}\n'
+                                  "  plan: {needs: [ok], instruction: Plan it}"))
+    assert cli.main(["run", "ask.yaml"]) == 2
+    key = json.loads((only_run() / "status.json").read_text())["questions"][0]["key"]
+    before = record()
+    capsys.readouterr()
+    Path("wrong.json").write_text(json.dumps({key: {"go": "yes"}}))
+    assert cli.main(["retry", only_run().name, "--answers", "wrong.json", "--harness", "plan=codex"]) == 1
+    assert folders == []  # the answers were wrong: no harness opened
+    assert cli.main(["retry", only_run().name, "--harness", "plan=codex", "--model", "plan=gpt-7"]) == 1
+    assert "plan: codex has no model `gpt-7`" in capsys.readouterr().err
+    assert record() == before
+    (checked,) = folders
+    assert not checked.is_relative_to(only_run()) and not checked.exists()
+    assert not workspaces.temp_root(checked.name).exists()
+    Path("right.json").write_text(json.dumps({key: {"go": True}}))
+    assert cli.main(["retry", only_run().name, "--answers", "right.json", "--harness", "plan=codex"]) == 0
+    assert folders[-1] == only_run().resolve()  # the run itself opens it in its own folder, as before
+
+
+def test_an_override_never_applies_without_its_event(repo, no_real_harness, monkeypatch, capsys):
+    write("loop.yaml", LOOP)
+    assert cli.main(["run", "loop.yaml", "--dry-run", script({"agents": {"write": [{"_unavailable": "out"}, {"summary": "done"}]}})]) == 1
+    before = record()
+
+    def full_disk(self, events):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(runs.Run, "add_events", full_disk)
+    capsys.readouterr()
+    assert cli.main(["retry", only_run().name, "--model", "write=sonnet"]) == 1
+    assert "can't keep the new settings in" in capsys.readouterr().err
+    assert record() == before
 
 
 def test_a_detached_retry_hands_the_override_to_its_background_process(repo, capsys):

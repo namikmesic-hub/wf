@@ -88,8 +88,9 @@ acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`.
   outage, is yours to change for the rest of the run. Run
   `wf retry <run-id> --model <node>=<model> --detach`, with
   `--model '<node>[<item>]=<model>'` for one item. Add `--harness` when the model
-  needs another harness. wf checks it first and changes nothing when it is
-  wrong. A workflow-file bug, or a task that keeps failing, goes to the captain.
+  needs another harness, or when wf asks for it. wf checks it first and changes
+  nothing when it is wrong. A workflow-file bug, or a task that keeps failing,
+  goes to the captain.
 
 `stopped`
 : No wf process is driving the run any more (a crash, a reboot). Run

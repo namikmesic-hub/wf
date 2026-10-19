@@ -3,6 +3,7 @@
 The real run costs a little quota. Run it with:  uv run pytest -m harness
 """
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -10,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from workflow import cli, schemas
-from workflow.harnesses.base import SessionSpec
-from workflow.harnesses.claude_code import GIT, TOOL, options
+from workflow.harnesses.base import SessionSpec, Unavailable
+from workflow.harnesses.claude_code import GIT, TOOL, ClaudeCode, options
 from workflow.output_tool import ResultTool
 
 
@@ -69,6 +70,21 @@ def test_without_project_instructions_no_setting_source_loads(tmp_path):
 def test_api_key_auth_can_be_chosen(tmp_path, monkeypatch):
     monkeypatch.setenv("WF_CLAUDE_AUTH", "api-key")
     assert options(spec(tmp_path)).env == {}
+
+
+def test_opening_finds_the_claude_code_program_as_the_sdk_does(tmp_path, monkeypatch):
+    from claude_agent_sdk import CLINotFoundError
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    assert callable(SubprocessCLITransport._find_cli)  # the SDK still has the lookup that open() uses
+    asyncio.run(ClaudeCode().open(tmp_path))  # this SDK brings its own copy of the program
+
+    def not_found(self):
+        raise CLINotFoundError("Claude Code not found. Install with:\n  npm install -g @anthropic-ai/claude-code")
+
+    monkeypatch.setattr(SubprocessCLITransport, "_find_cli", not_found)
+    with pytest.raises(Unavailable, match="Claude Code isn't installed: Claude Code not found. Install with:$"):
+        asyncio.run(ClaudeCode().open(tmp_path))
 
 
 @pytest.mark.harness

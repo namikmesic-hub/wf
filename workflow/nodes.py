@@ -408,8 +408,16 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     target, override = ctx.override(node_id, job["index"]) or (None, {})
     harness = override.get("harness") or wf.setting(node_id, "harness")
     names = list(harness) if isinstance(harness, list) else [ctx.trace.render(job, "harness", harness, variables).strip()]
-    chosen = {name: tuple(override.get(key) or _rendered_setting(job, ctx, name, key, variables) for key in ("model", "effort"))
-              for name in names}
+
+    def settings_for(name: str) -> tuple[str | None, str | None]:
+        """The model and effort on one harness: the override's, else the workflow's. A Cursor model
+        id carries its effort, so a Cursor session gets none."""
+        model = override.get("model") or _rendered_setting(job, ctx, name, "model", variables)
+        if name == "cursor":
+            return model, None
+        return model, override.get("effort") or _rendered_setting(job, ctx, name, "effort", variables)
+
+    chosen = {name: settings_for(name) for name in names}
     schema = schemas.node_output_schema(wf, node_id)
     listed = None if ctx.root.script else wf.setting(node_id, "tools")  # None: the node doesn't list tools
     uses = listed or ()

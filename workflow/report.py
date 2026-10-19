@@ -51,7 +51,7 @@ def build(runs: list[Run]) -> dict:
         taken_here: Counter = Counter()  # by the route's key and the exact place (build[2]/review)
         for event in logged:
             kind, name = event.get("event"), _name(event.get("node") or "")
-            if not name:  # run-level events (limit, warnings) belong to no node
+            if not name or kind == "override":  # run-level events (limit, warnings), and what an operator gave `wf retry`
                 continue
             node = nodes[name]
             raw = event.get("node")
