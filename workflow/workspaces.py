@@ -18,8 +18,14 @@ keeps .git read-only. After an `edit` or `full` agent finishes in a worktree
 the runner made, anything left uncommitted becomes the commit
 "wf: <node> (<run-id>)". Before a retry, the worktree goes back to the commit
 the job started from, so a retry is the same instruction on the same commit.
-The runner never commits, or resets, your own checkout. Commits skip hooks and
-signing, and git never waits for input: nobody is at a terminal to answer.
+The runner never commits, or resets, your own checkout. Commits skip hooks, so
+the message is only that line. They are signed when your git config says so
+(commit.gpgsign), with your key.
+
+git never waits for input: nobody is at a terminal to answer. It runs without
+one, so a key that asks for a passphrase or a PIN fails at once, and a commit
+that isn't signed within SIGNING_TIMEOUT (a key waiting for a touch) is
+stopped. Either way the error says signing failed.
 
 When a run succeeds its worktrees are removed and its branches kept; a failed
 run keeps them for `wf resume`.
@@ -29,10 +35,14 @@ in a thread, one at a time per run, because parallel `git worktree add`
 calls in one repo fight over git's lock files.
 """
 
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
+
+SIGNING_TIMEOUT = 30  # seconds: signing takes a moment, unless the key waits for a touch
 
 
 class WorkspaceError(Exception):
@@ -95,8 +105,16 @@ def commit_all(path: str | Path, message: str) -> str | None:
         return None  # e.g. only a submodule's own files changed: nothing to commit here
     named = _git(path, "config", "user.email", check=False) and _git(path, "config", "user.name", check=False)
     identity = [] if named else ["-c", "user.name=wf", "-c", "user.email=wf@localhost"]
-    # No hooks and no signing: nobody is at a terminal to type a passphrase
-    _git(path, *identity, "commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", message)
+    # No hooks, not even prepare-commit-msg, which --no-verify still runs: one could add a trailer
+    commit = [*identity, "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", message]
+    if _git(path, "config", "--type=bool", "commit.gpgsign", check=False) != "true":
+        _git(path, *commit)
+        return head(path)
+    try:
+        _git(path, *commit, timeout=SIGNING_TIMEOUT)
+    except WorkspaceError as error:
+        key = _git(path, "config", "user.signingkey", check=False) or "your default key"
+        raise WorkspaceError(f"can't sign the commit with {key} (commit.gpgsign is on): {error}") from error
     return head(path)
 
 
@@ -150,19 +168,27 @@ def git_env(**extra: str) -> dict:
     return {**{k: v for k, v in os.environ.items() if k not in REPO_ENV}, **extra}
 
 
-def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True) -> str:
+def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, timeout: int = 600) -> str:
+    # A session of its own: no terminal for a signing program to ask on, and one process
+    # group, so a timeout stops the signing program too, not only git
     try:
-        result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=600,
-                                stdin=subprocess.DEVNULL, env=git_env(GIT_TERMINAL_PROMPT="0"))
-    except subprocess.TimeoutExpired as error:
-        raise WorkspaceError(f"git {_what(args)} took longer than 10 minutes") from error
+        process = subprocess.Popen(["git", *args], cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                   env=git_env(GIT_TERMINAL_PROMPT="0"))
     except OSError as error:
         raise WorkspaceError(f"can't run git: {error}") from error
-    if result.returncode != 0:
+    with process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            with contextlib.suppress(ProcessLookupError):  # it may have ended just now
+                os.killpg(process.pid, signal.SIGKILL)
+            raise WorkspaceError(f"git {_what(args)} took longer than {timeout} seconds") from error
+    if process.returncode != 0:
         if check:
-            raise WorkspaceError(f"git {_what(args)} failed: {result.stderr.strip() or result.stdout.strip()}")
+            raise WorkspaceError(f"git {_what(args)} failed: {stderr.strip() or stdout.strip()}")
         return ""
-    return result.stdout.strip() if strip else result.stdout  # strip=False: column 1 of porcelain matters
+    return stdout.strip() if strip else stdout  # strip=False: column 1 of porcelain matters
 
 
 def _what(args: tuple[str, ...]) -> str:

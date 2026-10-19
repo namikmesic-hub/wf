@@ -632,6 +632,11 @@ the context to fix them.
   commits anything left uncommitted (`wf: <node> (<run-id>)`). It never commits in your own
   checkout. The runner tells `edit` agents not to commit, because some harness sandboxes
   keep `.git` read-only.
+- The commit skips git hooks, so its message is only that line, with no trailers. It is
+  signed when your git config signs commits (`commit.gpgsign`), with your signing key.
+  Nobody is at a terminal to unlock that key, so use one that needs no passphrase, PIN or
+  touch, for example a key file set as the repo's `user.signingkey`. A commit that can't be
+  signed, or isn't signed within 30 seconds, fails the node with an error that says so.
 - When a run succeeds, its worktrees are removed and its branches are kept. A failed run
   keeps its worktrees for `wf resume`.
 - `wf validate` warns when two `edit` nodes could run at the same time in the same workspace.
