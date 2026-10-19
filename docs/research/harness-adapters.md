@@ -344,8 +344,13 @@ Cursor login. It needs no API key and no `cursor-sdk` [V live].
   adapter runs `cursor-agent --list-models` first and sets `NO_OPEN_BROWSER` [V].
 - **One model per process.** Choosing a model in one session switches every session in the
   process, and `session/set_config_option` only takes the variants it lists. `--model <id>` at
-  start takes any id from `--list-models`, effort included: `gemini-4-argon-high` gave
-  `reasoning_effort: high` [V live]. So the adapter starts one process per session.
+  start takes any id from `--list-models`, effort included, but only when `initialize` sends
+  `clientCapabilities._meta.parameterizedModelPicker: true`: then `gpt-5.6-sol-max-fast` gave
+  `reasoning: max, fast: true` [V live]. So the adapter starts one process per session.
+- **Project settings.** cursor-agent reads `.cursor/cli.json` files from the git root down to
+  its folder and merges their permissions into its own. The hidden flag
+  `--disable-project-configs` stops that: an invalid `.cursor/cli.json` stops cursor-agent at
+  start, and with the flag the session starts [V live].
 - **The model is saved.** `--model` rewrote `selectedModel` in `~/.cursor/cli-config.json`
   during this check. `CURSOR_CONFIG_DIR` moves that file, the saved sessions, MCP servers and
   hooks to another folder. The login is kept outside it and still works [V live].

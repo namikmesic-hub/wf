@@ -12,11 +12,14 @@ through a counter file next to requests.jsonl: each session/prompt takes the nex
                                                        request, then tools/call over HTTP if allowed
     {"permission": {"kind": "execute", "title": "`ls`", ...}}  ask for permission, record the answer
     {"error": "Upgrade your plan to continue"}         how Cursor reports a failed request: "\n\n" + text
+    {"error": ["Error: [resource", "_exhausted] ..."]}  the same, sent in several chunks
     {"stop": "cancelled"}                              the turn's stopReason (default end_turn)
     {"hang": true}                                     wait for session/cancel
     {"exit": true}                                     die mid-turn
 Sessions are kept in CURSOR_CONFIG_DIR/acp-sessions/<id>, as Cursor keeps them, so session/load
-works across processes; it replays the history first, as Cursor does. Every request, the arguments
+works across processes; it replays the history first, as Cursor does. A new or loaded session
+reports its model and parameters in configOptions: the effort in a model id only when initialize
+asked for parameterized models, as with Cursor. Every request, the arguments
 and environment each process started with, the MCP tools offered, and every answer to the fake's
 own requests are appended to requests.jsonl.
 """
@@ -34,6 +37,15 @@ scenario = json.load(open(sys.argv[1]))
 log_path = Path(sys.argv[2])
 args = sys.argv[3:]
 models = scenario.get("models") or ["composer-2.5", "gpt-5.6-sol-max-fast"]
+EFFORT = {"gpt-5.6-sol-max-fast": ("gpt-5.6-sol", {"reasoning": "max", "fast": "true"})}
+
+
+def config_options(model: str, parameterized: bool) -> list[dict]:
+    name, parameters = EFFORT.get(model, (model, {}))
+    if not parameterized and parameters:
+        parameters = {"reasoning": "medium", "fast": "false"}  # the model's defaults, not the id's
+    return [{"id": "mode", "currentValue": "agent"}, {"id": "model", "currentValue": name},
+            *({"id": key, "currentValue": value} for key, value in parameters.items())]
 
 
 def log(kind: str, data) -> None:
@@ -70,7 +82,8 @@ async def main() -> None:
     pending: dict[int, asyncio.Future] = {}
     cancelled = asyncio.Event()
     sessions = Path(os.environ["CURSOR_CONFIG_DIR"]) / "acp-sessions"
-    state = {"url": None, "mcp": False}
+    state = {"url": None, "mcp": False, "parameterized": False}
+    model = args[args.index("--model") + 1] if "--model" in args else "default"
 
     async def ask(method: str, params: dict):
         request_id = next(ids)
@@ -126,7 +139,10 @@ async def main() -> None:
                     "sessionId": session, "toolCall": {"toolCallId": call, "status": "pending", **asked}, "options": options})
                 log("permission", answer)
             elif "error" in action:
-                update(session, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "\n\n" + action["error"]}})
+                chunks = action["error"] if isinstance(action["error"], list) else [action["error"]]
+                for index, chunk in enumerate(chunks):
+                    update(session, {"sessionUpdate": "agent_message_chunk",
+                                     "content": {"type": "text", "text": ("\n\n" if index == 0 else "") + chunk}})
             elif "stop" in action:
                 stop = action["stop"]
             elif "hang" in action:
@@ -147,6 +163,7 @@ async def main() -> None:
         if method in scenario.get("silent", []):
             continue
         if method == "initialize":
+            state["parameterized"] = bool((params.get("clientCapabilities") or {}).get("_meta", {}).get("parameterizedModelPicker"))
             write({"id": request_id, "result": {"protocolVersion": 1, "authMethods": [{"id": "cursor_login", "name": "Cursor Login"}],
                                                 "agentCapabilities": {"loadSession": True, "mcpCapabilities": {"http": True, "sse": True}}}})
         elif method == "authenticate":
@@ -162,7 +179,8 @@ async def main() -> None:
             if method == "session/load":  # Cursor replays the conversation before it answers
                 update(session, {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "an earlier instruction"}})
                 update(session, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "an earlier answer"}})
-            write({"id": request_id, "result": {"sessionId": session} if method == "session/new" else {}})
+            options = {"configOptions": config_options(model, state["parameterized"])}
+            write({"id": request_id, "result": {"sessionId": session, **options} if method == "session/new" else options})
         elif method == "session/set_mode":
             write({"id": request_id, "result": {}})
         elif method == "session/prompt":

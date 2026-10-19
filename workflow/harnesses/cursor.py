@@ -8,12 +8,15 @@ per turn. While a turn runs, the agent sends session/update notifications
 anything it may not do by itself. The reply to session/prompt, {stopReason},
 ends the turn. A reminder is another session/prompt.
 
-Each session is its own `cursor-agent --model <model> --sandbox disabled acp`
-process, which takes a few seconds to start. The agent keeps one model per
-process (choosing one in a session switches every session in the process), and
-`--model` is what takes a Cursor model id with its effort in it, such as
-gpt-5.6-sol-max-fast. Its process group is stopped with the session, so
-commands the agent started stop too.
+Each session is its own `cursor-agent --model <model> acp` process, which
+takes a few seconds to start. The agent keeps one model per process (choosing
+one in a session switches every session in the process), and `--model` is what
+takes a Cursor model id with its effort in it, such as gpt-5.6-sol-max-fast.
+The effort only applies when initialize says the client takes parameterized
+models (`parameterizedModelPicker`); the session's transcript records the model
+and parameters Cursor reports it uses. `--disable-project-configs` keeps the
+repo's .cursor/cli.json from changing permissions. Its process group is stopped
+with the session, so commands the agent started stop too.
 
 Configuration: Cursor saves the model it was started with into its config
 folder, and reads its permissions, MCP servers and hooks from there. So every
@@ -49,11 +52,13 @@ The model must be one `cursor-agent --list-models` lists (read when the harness
 opens); any other makes the session unavailable, so a fallback harness takes
 over. `effort` isn't used: Cursor model ids carry their own.
 
-How a turn ends: Cursor reports a failed request as the turn's last message,
-with stopReason end_turn, not as an error. So a last message "Error: ..."
-fails the turn, and a sign-in, plan or payment notice, or an unauthenticated
-or resource_exhausted error (a usage limit), makes it unavailable. Any
-stopReason but end_turn fails it.
+How a turn ends: Cursor reports a failed request as a paragraph it adds at
+the end of the turn's last message, with stopReason end_turn, not as an error.
+The paragraph can come in several chunks, so the adapter reads the whole
+message since the last tool call. A paragraph "Error: ..." fails the turn, and
+a sign-in, plan or payment notice, or an unauthenticated or resource_exhausted
+error (a usage limit), makes it unavailable. Any stopReason but end_turn fails
+it.
 
 Usage: ACP reports neither tokens nor cost, so Cursor turns count as zero.
 
@@ -62,9 +67,8 @@ process with the same model. Cursor can't fork, so the session itself carries
 on. It's marked while a continued attempt runs, and when that attempt fails,
 the next one starts fresh instead of loading the failure.
 
-What can't be switched off: the repo's own Cursor settings apply
-(.cursor/cli.json can allow commands, and rules and AGENTS.md load), and
-Cursor runs a web fetch its server marks as needing no approval, even with
+What can't be switched off: the repo's rules and AGENTS.md load, and Cursor
+runs a web fetch its server marks as needing no approval, even with
 `web: false`.
 
 Tested with cursor-agent 2026.10.14-0f9edde.
@@ -86,6 +90,7 @@ from . import git_tool, mcp_http
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
 COMMAND = ["cursor-agent"]
+FLAGS = ["--sandbox", "disabled", "--disable-project-configs"]
 SERVER = "wf"  # the MCP server name the agent sees
 CONFIG = {
     "version": 1,
@@ -97,10 +102,11 @@ CONFIG = {
 }
 MODES = {"read-only": "ask", "edit": "agent", "full": "agent"}
 SECRETS = ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN")
-UNAVAILABLE = (  # in Cursor's last message: it can't run here now
+NOTICES = (  # Cursor's own messages when the account needs attention
     "Please sign in to continue", "Upgrade your plan to continue", "Add a payment method to continue",
-    "Check your settings to continue", "[unauthenticated]", "[resource_exhausted]",
+    "Check your settings to continue",
 )
+UNAVAILABLE = (*NOTICES, "[unauthenticated]", "[resource_exhausted]")  # in a notice: it can't run here now
 AUTH_REQUIRED = -32000  # ACP's error code for "authenticate first"
 LABELS = {"read": "read", "edit": "edit", "delete": "delete", "move": "move", "search": "search",
           "execute": "command", "fetch": "web fetch"}
@@ -184,8 +190,7 @@ class CursorSession:
         self.prompt: asyncio.Future | None = None  # the running session/prompt
         self.turn = False  # updates count only while a turn runs (session/load replays history)
         self.calls: dict[str, dict] = {}  # tool calls in progress, as their updates describe them
-        self.text = ""  # the agent's message so far, for the transcript
-        self.last_chunk = ""  # the turn's last message chunk, unless a tool call came after it
+        self.text = ""  # the agent's message since the last tool call
         # Marks a continued session while an attempt that continued it hasn't got a result
         self.continuing = self.config / "wf-continuing" / spec.fork_from if spec.fork_from else None
 
@@ -197,17 +202,19 @@ class CursorSession:
         if spec.access == "read-only":
             tools.append(mcp_http.Tool(git_tool.NAME, git_tool.DESCRIPTION, git_tool.SCHEMA, self._git))
         self.url = harness.tools.add(tools)
-        command = [*harness.command, "--model", spec.model, "--sandbox", "disabled", "acp"]
+        command = [*harness.command, "--model", spec.model, *FLAGS, "acp"]
         servers = [{"type": "http", "name": SERVER, "url": self.url, "headers": []}]
         try:
             self.rpc = await _Connection.start(command, spec.cwd, harness.env(self.config), harness.home / "cursor-agent.log",
                                                harness.request_timeout, self)
             await self.rpc.request("initialize", {
                 "protocolVersion": 1, "clientInfo": {"name": "wf", "version": "0.1.0"},
-                "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}})
+                "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False,
+                                       "_meta": {"parameterizedModelPicker": True}}})
             await self.rpc.request("authenticate", {"methodId": "cursor_login"})
             if spec.fork_from:
-                await self.rpc.request("session/load", {"sessionId": spec.fork_from, "cwd": str(spec.cwd), "mcpServers": servers})
+                result = await self.rpc.request("session/load", {"sessionId": spec.fork_from, "cwd": str(spec.cwd),
+                                                                  "mcpServers": servers})
                 self.id = spec.fork_from
                 self.continuing.parent.mkdir(exist_ok=True)
                 self.continuing.touch()
@@ -223,7 +230,7 @@ class CursorSession:
                 raise Unavailable(f"Cursor didn't start a session: {error if str(error) else 'no answer'}") from error
             raise
         transcript(spec.log, "session", id=self.id, model=spec.model, mode=MODES[spec.access],
-                   continued=bool(spec.fork_from), config=str(self.config))
+                   continued=bool(spec.fork_from), config=str(self.config), effective=_effective(result))
 
     def pending_usage(self) -> Usage:
         return Usage()
@@ -231,7 +238,7 @@ class CursorSession:
     async def send(self, text: str) -> TurnEnd:
         log = self.spec.log
         transcript(log, "sent", text=text)
-        self.text = self.last_chunk = ""
+        self.text = ""
         self.turn = True  # before the request goes out: its updates can arrive before call() returns
         try:
             self.prompt = await self.rpc.call("session/prompt", {"sessionId": self.id, "prompt": [{"type": "text", "text": text}]})
@@ -242,14 +249,15 @@ class CursorSession:
             return TurnEnd("unavailable" if error.code == AUTH_REQUIRED else "failed", f"cursor: {error}")
         finally:
             self.turn = False
+            message = self.text
             self._flush()
         stop = result.get("stopReason")
         transcript(log, "turn", stop_reason=stop)
-        notice = self.last_chunk.strip() if self.last_chunk.startswith("\n\n") else ""
-        if any(sign in notice for sign in UNAVAILABLE):
-            return TurnEnd("unavailable", f"cursor: {notice}")
-        if notice.startswith("Error:"):
-            return TurnEnd("failed", f"cursor: {notice}")
+        failure = notice(message)
+        if any(sign in failure for sign in UNAVAILABLE):
+            return TurnEnd("unavailable", f"cursor: {failure}")
+        if failure:
+            return TurnEnd("failed", f"cursor: {failure}")
         if stop != "end_turn":
             return TurnEnd("failed", f"cursor: the turn ended with stopReason {stop}")
         return TurnEnd("done")
@@ -261,12 +269,9 @@ class CursorSession:
         if not self.turn:
             return
         if kind == "agent_message_chunk":
-            chunk = (update.get("content") or {}).get("text") or ""
-            self.text += chunk
-            self.last_chunk = chunk
+            self.text += (update.get("content") or {}).get("text") or ""
         elif kind in ("tool_call", "tool_call_update"):
             self._flush()
-            self.last_chunk = ""
             self._tool_call(update)
 
     def permit(self, params: dict) -> dict:
@@ -319,6 +324,20 @@ class CursorSession:
                 self.continuing.unlink(missing_ok=True)
             if self.id and not self.spec.continuable:  # no later pass will load it
                 shutil.rmtree(self.config / "acp-sessions" / self.id, ignore_errors=True)
+
+
+def notice(message: str) -> str:
+    """Cursor's notice that a request failed: the paragraph it adds at the end of the turn's last
+    message. "" when the message doesn't end with one."""
+    start = message.rfind("\n\n")
+    paragraph = message[start + 2:].strip() if start >= 0 else ""
+    return paragraph if paragraph in NOTICES or paragraph.startswith("Error:") else ""
+
+
+def _effective(result: dict) -> dict:
+    """The model and model parameters a new or loaded session reports it uses."""
+    options = result.get("configOptions") if isinstance(result, dict) else None
+    return {o.get("id"): o.get("currentValue") for o in options or [] if isinstance(o, dict) and o.get("id") != "mode"}
 
 
 def allows(access: str, web: bool, cwd: Path, call: dict) -> bool:

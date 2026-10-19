@@ -7,6 +7,7 @@ The opt-in test at the bottom runs the real `cursor-agent` (uses your Cursor quo
     uv run pytest -m harness tests/test_cursor.py
 """
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -15,9 +16,10 @@ from textwrap import dedent, indent
 
 import pytest
 
-from workflow import cli, harnesses, runner
+from workflow import cli, harnesses, runner, schemas
+from workflow.harnesses.base import SessionSpec
 from workflow.harnesses.cursor import Cursor
-from workflow.output_tool import FINISH, NEW_RESULT, REMINDER
+from workflow.output_tool import FINISH, NEW_RESULT, REMINDER, ResultTool
 
 FAKE = Path(__file__).parent / "fake_acp.py"
 
@@ -89,7 +91,7 @@ def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monk
     assert run() == 0
     assert output() == {"out": "hi"}
     (start,) = entries(log, "start")
-    assert start["args"] == ["--model", "composer-2.5", "--sandbox", "disabled", "acp"]
+    assert start["args"] == ["--model", "composer-2.5", "--sandbox", "disabled", "--disable-project-configs", "acp"]
     assert (start["api_key"], start["no_browser"]) == (False, "1")  # the local login, never a key
     assert Path(start["cwd"]).resolve() == Path.cwd().resolve()
     config = Path(start["config"])
@@ -98,7 +100,8 @@ def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monk
     assert settings["permissions"] == {"allow": [], "deny": ["Write(**)"]}
     assert (settings["approvalMode"], settings["autoAcceptWebSearch"], settings["sandbox"]) == ("allowlist", False, {"mode": "disabled"})
     assert sent(log, "authenticate") == [{"methodId": "cursor_login"}]
-    assert sent(log, "initialize")[0]["clientCapabilities"] == {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}
+    assert sent(log, "initialize")[0]["clientCapabilities"] == {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False,
+                                                                "_meta": {"parameterizedModelPicker": True}}
     (new,) = sent(log, "session/new")
     (server,) = new["mcpServers"]
     assert (server["type"], server["name"]) == ("http", "wf") and server["url"].startswith("http://127.0.0.1:")
@@ -109,6 +112,13 @@ def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monk
     assert entries(log, "tools") == [["submit_result", "git"]]  # read-only gets the runner's git tool
     assert entries(log, "reply") == [{"content": [{"type": "text", "text": "Result recorded. You're done."}], "isError": False}]
     assert not any((config / "acp-sessions").iterdir())  # no later pass continues it, so it's gone
+
+
+def test_the_transcript_records_the_model_and_effort_cursor_uses(repo, monkeypatch):
+    cursor(monkeypatch, repo, [GOOD])
+    assert run("model: gpt-5.6-sol-max-fast\n") == 0
+    (session,) = [e for e in attempt_log() if e["kind"] == "session"]
+    assert session["effective"] == {"model": "gpt-5.6-sol", "reasoning": "max", "fast": "true"}
 
 
 @pytest.mark.parametrize("access, mode", [("edit", "agent"), ("full", "agent")])
@@ -211,6 +221,12 @@ def test_a_usage_limit_or_a_login_problem_makes_cursor_unavailable(repo, monkeyp
     out = capsys.readouterr().out
     assert f"cursor is unavailable: cursor: {notice}" in out
     assert "attempt 2" not in out  # no retry on the same harness
+
+
+def test_a_notice_sent_in_several_chunks_is_still_read(repo, monkeypatch, capsys):
+    cursor(monkeypatch, repo, [{"text": "Working on it"}, {"error": ["Error: [resource_exhausted] ", "You've hit your usage limit"]}])
+    assert run() == 1
+    assert "cursor is unavailable: cursor: Error: [resource_exhausted] You've hit your usage limit" in capsys.readouterr().out
 
 
 def test_an_error_notice_fails_the_turn_and_other_text_does_not(repo, monkeypatch, capsys):
@@ -320,3 +336,35 @@ end:
     assert [e for e in log if e["kind"] == "tool_result"][-1] == {
         "kind": "tool_result", "tool": "submit_result", "is_error": False, "content": "Result recorded. You're done."}
     assert Path("notes.txt").read_text() == "The secret word is: quince\n"  # and changed nothing
+
+
+def started(tmp_path: Path, model: str, workspace: Path) -> dict:
+    """Start one real Cursor session, send it nothing (so it costs no quota), and return the
+    session entry of its transcript."""
+    async def main():
+        harness = Cursor()
+        await harness.open(tmp_path / "run")
+        tool = ResultTool(schemas.object_schema({"summary": {"type": "string"}}))
+        spec = SessionSpec(cwd=workspace, access="read-only", web=False, model=model, effort=None, tool=tool,
+                           log=tmp_path / "attempt-1.log", emit=lambda event: None)
+        try:
+            await (await harness.session(spec)).close()
+        finally:
+            await harness.close()
+    asyncio.run(main())
+    return next(e for e in map(json.loads, (tmp_path / "attempt-1.log").read_text().splitlines()) if e["kind"] == "session")
+
+
+@pytest.mark.harness
+def test_a_real_cursor_session_takes_the_effort_in_the_model_id(tmp_path):
+    session = started(tmp_path, "gpt-5.6-sol-max-fast", tmp_path)
+    assert (session["effective"]["model"], session["effective"]["reasoning"], session["effective"]["fast"]) == ("gpt-5.6-sol", "max", "true")
+
+
+@pytest.mark.harness
+def test_a_real_cursor_session_ignores_the_repos_cursor_settings(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".cursor").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".cursor" / "cli.json").write_text('{"permissions": 5}')  # cursor-agent exits at once when it reads this
+    assert started(tmp_path, "composer-2.5", repo)["id"]

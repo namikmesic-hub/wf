@@ -864,7 +864,7 @@ start, and sends the runner to the next harness. The attempt loop is written onc
 | `edit` | Read, Edit, Write, Bash with `permission_mode="dontAsk"` | sandbox `workspace-write` | agent mode; writes inside the workspace and commands allowed |
 | `full` | `permission_mode="bypassPermissions"` | sandbox `danger-full-access` | everything allowed |
 | `web: false` | no WebSearch or WebFetch | `web_search: "disabled"` (the default is `cached`) | web search and fetch requests refused |
-| Repo instructions | `setting_sources=["project"]`, `claude_code` system prompt | `AGENTS.md`, always loaded | the repo's rules and `AGENTS.md`, and its `.cursor/cli.json` |
+| Repo instructions | `setting_sources=["project"]`, `claude_code` system prompt | `AGENTS.md`, always loaded | the repo's rules and `AGENTS.md`, but not its `.cursor/cli.json` |
 | Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | the turn's last message: a sign-in, plan or payment notice, or `[resource_exhausted]` |
 | Usage | tokens and dollars | tokens | none |
 | `session: continue` | fork with `fork_session` | fork with `thread/fork` | `session/load` (no fork) |
@@ -883,10 +883,16 @@ Notes:
   access level with "allow once" or "reject", never "allow always", which Cursor would save.
 - Cursor saves the model it was started with into its settings folder and reads its
   permissions from there, so each run gives it folders of its own, one per access level.
-- Cursor reports a failed request as the turn's last message, not as an error, so the adapter
-  reads that message to tell a usage limit or a login problem from other failures.
-- What Cursor can't switch off: the repo's own `.cursor/cli.json` can allow commands, and a
-  web fetch that Cursor's server marks as needing no approval runs even with `web: false`.
+- The effort in a Cursor model id applies only when the client says it takes parameterized
+  models, which the adapter does. Each attempt's transcript records the model and parameters
+  Cursor reports for the session.
+- `--disable-project-configs` keeps the repo's `.cursor/cli.json` from changing Cursor's
+  permissions.
+- Cursor reports a failed request as a paragraph at the end of the turn's last message, not
+  as an error, so the adapter reads that message to tell a usage limit or a login problem
+  from other failures.
+- What Cursor can't switch off: a web fetch that Cursor's server marks as needing no approval
+  runs even with `web: false`.
 
 How it maps onto LangGraph:
 - **It's not one LangGraph node per YAML node.** The settle rule needs to know what's
