@@ -10,9 +10,11 @@ the loops come from the graph (shape.py).
 The run's events give its open nodes: the nodes that run, wait to start,
 failed, or finished and wait for their route to be chosen. The rest of this
 lap is the heaviest path from an open node to end, with what is left of that
-node. The open node with the most left decides how far the lap is. So a branch
-that a route left out counts no more, and a slow parallel step holds the
-estimate back.
+node. The open node with the most left decides how far the lap is. Of open
+nodes with as much left, the one with the least done decides, then file order.
+So a slow parallel step holds the estimate back. A step that a route left out
+weighs nothing, also on a path that leads back into the branch that the route
+chose. So it counts no more, in the steps or in the percentage.
 
     done    = each loop's lap, times the times the run went back,
               plus the part of this lap before the open node that decides it
@@ -32,8 +34,8 @@ went back on average. `left` is then in seconds: the time left.
 
 A step in progress counts in part: the share of its items that finished, or
 the share of its sub-workflow that is done. With earlier runs, a step with no
-items and no sub-workflow counts its time so far against its mean time. While
-the run does not move, that time stops at its last event.
+items and no sub-workflow counts its time so far against its weight. While the
+run does not move, that time stops at its last event.
 """
 
 import hashlib
@@ -68,13 +70,15 @@ class _Trace:
     ran: set[str]  # finished at least once
     passes: dict[str, int]
     items: dict[str, int | None]
-    taken: dict[tuple[str, int], int]
+    taken: dict[tuple[str, int], int]  # (node, route index) -> times taken
+    back: dict[tuple[str, str], int]  # (node, the node that needs it) -> times a needs edge went back
 
 
 def _trace(shape: Shape, events: list[dict]) -> _Trace:
     """Play the run's events for this workflow's own nodes: what is open, and what is done."""
     topo = shape.topo
-    found = _Trace(set(triggered(topo, START, None)), {}, {}, {}, set(), set(), set(), set(), {}, {}, {})
+    needs_back = {(loop.last, loop.first) for loop in shape.loops if loop.route is None}
+    found = _Trace(set(triggered(topo, START, None)), {}, {}, {}, set(), set(), set(), set(), {}, {}, {}, {})
     for number, event in enumerate(events):
         kind, node = event.get("event"), event.get("node")
         if not isinstance(node, str) or node not in topo.needs:  # run-level events, and nodes in sub-workflows (build[2]/x)
@@ -94,6 +98,9 @@ def _trace(shape: Shape, events: list[dict]) -> _Trace:
                 found.routing.add(node)  # the route event follows
             else:
                 found.pending.update(topo.dependents.get(node, ()))
+                for target in (t for t in topo.dependents.get(node, ()) if (node, t) in needs_back):
+                    found.back[(node, target)] = found.back.get((node, target), 0) + 1
+                    found.done -= shape.after(target)  # a loop: its steps are ahead again
         elif kind == "node_failed":
             found.running.pop(node, None)
             found.failed.add(node)
@@ -215,17 +222,21 @@ def estimate(workflow: spec.Workflow, events: list[dict], status: str | None, le
         now = _seconds(events[-1].get("time")) if events and not moving else time.time()
     shape = Shape(workflow)
     trace = _trace(shape, events)
+    open_nodes = trace.pending | set(trace.running) | trace.failed | trace.routing if status != "succeeded" else set()
+    ahead = shape.topo.reachable(open_nodes)
+    states = {node: _state(node, trace, ahead, moving) for node in shape.order}
     known = [learnt.mean[n] for n in shape.order if learnt and n in learnt.mean]
     timed = any(known)
     typical = sum(known) / len(known) if timed else 1.0
-    weight = {n: learnt.mean.get(n, typical) if timed else 1.0 for n in shape.order}
+    # A step that a route left out weighs nothing, also on a path that comes back into the chosen branch
+    weight = {n: 0.0 if states[n] == "skipped" else learnt.mean.get(n, typical) if timed else 1.0 for n in shape.order}
+    unit = {n: 0.0 if states[n] == "skipped" else 1.0 for n in shape.order}
     depths, tails = shape.depth(weight), shape.tail(weight)
-    open_nodes = trace.pending | set(trace.running) | trace.failed | trace.routing if status != "succeeded" else set()
-    ahead = shape.topo.reachable(open_nodes)
+    step_of, steps_after = shape.depth(unit), shape.tail(unit)
 
     nodes = {}
     for node in shape.order:
-        info = {"state": _state(node, trace, ahead, moving), "step": shape.step[node], "passes": trace.passes.get(node, 0)}
+        info = {"state": states[node], "step": shape.step[node], "passes": trace.passes.get(node, 0)}
         if trace.items.get(node) is not None:
             info["items"] = trace.items[node]
             if folder is not None and node in trace.running:
@@ -249,26 +260,27 @@ def estimate(workflow: spec.Workflow, events: list[dict], status: str | None, le
             share = info.get("items_done", 0) / info["items"]
         elif info.get("inner"):
             share = info["inner"]["percent"] / 100
-        elif timed and learnt.mean.get(node):
-            share = (now - _seconds(trace.running[node])) / learnt.mean[node]
+        elif timed and weight[node]:  # its own mean time, or the mean of the steps for a step that no earlier run ran
+            share = (now - _seconds(trace.running[node])) / weight[node]
         else:
             share = 0.0
         return weight[node] * (1 - min(max(share, 0.0), 1.0))
 
-    if open_nodes:
-        deciding = max(open_nodes, key=lambda n: (left_of(n) + tails[n], depths[n]))
+    if open_nodes:  # of nodes with as much left, the one with the least done decides, then file order
+        deciding = max(sorted(open_nodes, key=shape.order.index),
+                       key=lambda n: (left_of(n) + tails[n], left_of(n) - depths[n]))
         lap_done, lap_left = depths[deciding] - left_of(deciding), left_of(deciding) + tails[deciding]
-        steps = max(shape.step[n] + shape.steps_after[n] for n in open_nodes)
+        steps = max(step_of[n] + steps_after[n] for n in open_nodes)
     else:
         lap_done, lap_left = max((depths[n] for n in trace.done), default=0.0), 0.0
-        steps = shape.steps
+        steps = max(step_of.values(), default=0.0)
     laps = still = 0.0
     loops = []
     for loop in shape.loops:
         if loop.route is not None:
             taken = trace.taken.get((loop.last, loop.route), 0)
-        else:  # a needs edge goes back: count the laps by the passes of its first step
-            taken = max(trace.passes.get(loop.first, 0) - 1, 0)
+        else:  # a needs edge goes back
+            taken = trace.back.get((loop.last, loop.first), 0)
         size = shape.span(loop, weight)
         expected = learnt.taken.get((loop.last, loop.route)) if learnt and loop.route is not None else None
         laps += taken * size
@@ -281,12 +293,12 @@ def estimate(workflow: spec.Workflow, events: list[dict], status: str | None, le
 
     at = [n for n in shape.order if n in trace.running or n in trace.failed]
     if status == "succeeded":
-        step, steps, percent, left = shape.steps, shape.steps, 100, 0.0
+        step, percent, left = steps, 100, 0.0
     else:  # between steps: the step that starts next
-        step = max((shape.step[n] for n in at or trace.pending or trace.done), default=0)
+        step = max((step_of[n] for n in at or trace.pending or trace.done), default=0.0)
         percent = min(round(100 * done / (done + left)), 99) if done + left else 0
-    at.sort(key=lambda n: (-shape.step[n], shape.order.index(n)))
-    return {"step": step, "steps": max(steps, step), "at": at, "percent": percent,
+    at.sort(key=lambda n: (-step_of[n], shape.order.index(n)))
+    return {"step": round(step), "steps": round(max(steps, step)), "at": at, "percent": percent,
             "estimate": "earlier runs" if timed else "steps", "earlier_runs": learnt.runs if learnt else 0,
             "left_s": round(left) if timed else None, "loops": loops, "nodes": nodes}
 

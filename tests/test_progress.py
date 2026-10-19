@@ -242,6 +242,67 @@ def test_a_failed_step_is_failed_until_wf_retry_reruns_it():
     assert progress.estimate(workflow, retried, "running")["nodes"]["quick"]["state"] == "running"
 
 
+def test_a_branch_left_out_that_leads_back_into_the_chosen_one_counts_no_more():
+    workflow = parse("""
+        version: 1
+        name: reconverge
+        start: {input: {small: {type: boolean, default: true}}}
+        nodes:
+          pick:
+            needs: [start]
+            command: "true"
+            routes: [{when: start.small, to: quick}, {to: heavy}]
+          heavy: {command: "true"}
+          quick: {needs: [heavy], command: "true"}
+        end: {output: {}}
+    """)
+    assert Shape(workflow).step["quick"] == 3  # through heavy, in the graph
+    events = lap("pick") + [route("pick", 0, "quick"), started("quick")]
+    found = progress.estimate(workflow, events, "running")
+    assert found["nodes"]["heavy"]["state"] == "skipped"
+    assert progress.describe(found) == "step 2 of 2 (quick), about 50%"  # the run's own path: pick, quick
+
+
+def test_a_loop_that_a_needs_edge_closes_counts_its_lap_when_it_goes_back():
+    workflow = parse("""
+        version: 1
+        name: needs-loop
+        start: {input: {}}
+        nodes:
+          a:
+            needs: [start, b]
+            command: "true"
+            routes: [{when: "a.exit_code == 0", to: b, max: 2}, {to: end}]
+          b: {command: "true"}
+        end: {output: {}}
+    """)
+    (loop,) = Shape(workflow).loops
+    assert (loop.last, loop.first, loop.route, loop.max) == ("b", "a", None, 2)
+    events = lap("a") + [route("a", 0, "b")] + lap("b") + [started("a", 2)]
+    taken = [progress.estimate(workflow, events[:n], "running")["loops"][0]["taken"] for n in range(len(events) + 1)]
+    assert taken == [0, 0, 0, 0, 0, 1, 1]  # b's end takes the needs edge back to a
+    assert percents(workflow, events) == [0, 0, 17, 17, 17, 33, 33]
+
+
+@pytest.mark.parametrize("first, second", [("a", "b"), ("b", "a")])
+def test_open_steps_with_as_much_left_are_told_apart_by_the_least_done_not_by_chance(tmp_path, first, second):
+    steps = {"a": '{needs: [start], for_each: "[1, 2, 3, 4]", command: "true"}',
+             "b": '{needs: [start], for_each: "[1, 2, 3, 4]", command: "true"}'}
+    workflow = parse(f"""
+        version: 1
+        name: tie
+        start: {{input: {{}}}}
+        nodes:
+          {first}: {steps[first]}
+          {second}: {steps[second]}
+          c: {{needs: [b], command: "true"}}
+        end: {{output: {{}}}}
+    """)
+    written(tmp_path / "nodes" / "b" / "1", 0, 1, 2, 3)  # b has all its items, a none: each has 1 step left
+    found = progress.estimate(workflow, [started("a", items=4), started("b", items=4)], "running", folder=tmp_path)
+    assert found["percent"] == 0  # a decides: nothing of its way is done
+
+
 def test_a_slow_parallel_step_holds_the_estimate_back(tmp_path):
     workflow = parse("""
         version: 1
@@ -317,6 +378,8 @@ end: {output: {}}""").replace("to: end}\n      - {to: implement", "to: publish}\
     events = lap("explore", "implement", "tests", "review") + [route("review", 0, "publish"), started("publish")]
     found = progress.estimate(workflow, events, "running", learnt, now=progress._seconds(T0))
     assert found["left_s"] == 40 and found["percent"] == 80  # publish weighs (10 + 100 + 20 + 30) / 4
+    later = progress.estimate(workflow, events, "running", learnt, now=progress._seconds(T0) + 20)
+    assert later["left_s"] == 20 and later["percent"] == 90  # half of that mean has passed
 
 
 def test_a_sub_workflow_in_progress_counts_its_own_steps_and_items(tmp_path):

@@ -981,7 +981,10 @@ It counts like this:
 - The run's open nodes are the nodes that run, wait to start, failed, or finished and wait for their route.
   The rest of the way is the longest path from an open node to `end`, with what is left of that node.
   The open node with the most left decides how far the run is.
-  So a branch that a route left out counts no more, and a slow parallel step holds the estimate back.
+  Of open nodes with as much left, the one with the least done decides.
+  So a slow parallel step holds the estimate back.
+- A step that a route left out weighs nothing, also on a path that leads back into the branch that the route chose.
+  So it counts no more, in the steps or in the percentage.
 - A loop counts once for each time that the run went back along it.
   A lap is the longest path from the step that the loop goes back to, to the step that goes back.
 - Each step weighs 1, and each loop counts as if the run goes back up to its `max`.
@@ -996,7 +999,7 @@ It counts like this:
 - A step in progress counts in part.
   For a `for_each` step, that part is the share of its items that finished.
   For a workflow node, it is the share of its sub-workflow that is done, with the items of its steps.
-  With earlier runs, another step counts its time so far against its mean time.
+  With earlier runs, another step counts its time so far against its mean time, or against the mean of the other steps.
   While the run doesn't move, that time stops at the run's last event.
 
 ### Agent sessions and events
@@ -1043,17 +1046,19 @@ It is three plain files in `workflow/ui/`, with no build step and nothing from a
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| A run of a workflow with a loop, and no earlier runs that succeeded | Each step weighs 1, and the loop counts up to its `max`. Event by event, the percentage goes up and never down. That holds also between a node's end and its route. | `workflow/progress.py:221`, `workflow/progress.py:94` | `test_without_earlier_runs_each_step_weighs_one_and_each_loop_counts_to_its_max`, `test_the_percentage_never_goes_down_event_by_event_even_before_a_route_is_chosen` |
-| A loop's way back has no `max` | The smallest `max` of another route in the loop bounds it. Only the way back counts its laps. | `workflow/shape.py:111`, `workflow/progress.py:269` | `test_a_loop_whose_way_back_has_no_max_is_bounded_by_the_route_that_has_one_and_counted_by_its_own` |
+| A run of a workflow with a loop, and no earlier runs that succeeded | Each step weighs 1, and the loop counts up to its `max`. Event by event, the percentage goes up and never down. That holds also between a node's end and its route. | `workflow/progress.py:232`, `workflow/progress.py:98` | `test_without_earlier_runs_each_step_weighs_one_and_each_loop_counts_to_its_max`, `test_the_percentage_never_goes_down_event_by_event_even_before_a_route_is_chosen` |
+| A loop's way back has no `max` | The smallest `max` of another route in the loop bounds it. Only the way back counts its laps. | `workflow/shape.py:111`, `workflow/progress.py:281` | `test_a_loop_whose_way_back_has_no_max_is_bounded_by_the_route_that_has_one_and_counted_by_its_own` |
 | A heavier path leads into a loop | A lap counts only the loop's own path. | `workflow/shape.py:88` | `test_a_lap_is_the_loop_s_own_path_not_a_heavier_one_into_it` |
-| The runs folder holds earlier runs of the workflow that succeeded | Steps weigh their mean time and loops their mean count, from `wf report`. `left_s` gives the time left. A dry run counts only for a dry run. The numbers belong to the version of the workflow that asks for them. | `workflow/progress.py:152`, `workflow/progress.py:168` | `test_with_earlier_runs_steps_weigh_their_time_and_loops_their_mean_count`, `test_wf_status_says_how_far_a_run_is_and_learns_from_earlier_real_runs` |
-| A step that no earlier run ran | It weighs the mean of the other steps. | `workflow/progress.py:220` | `test_a_step_that_no_earlier_run_ran_weighs_the_mean_of_the_others` |
-| The run has gone past a loop | The loop counts no more. | `workflow/progress.py:275` | `test_a_loop_the_run_has_left_counts_no_more` |
-| A route leaves out a branch | The nodes on it are `skipped`. The steps, the percentage and the time left leave them out. | `workflow/progress.py:259`, `workflow/progress.py:303` | `test_a_branch_a_route_left_out_is_skipped_and_counts_no_more` |
-| Parallel steps are in progress | The step with the most left decides the estimate. | `workflow/progress.py:259` | `test_a_slow_parallel_step_holds_the_estimate_back` |
-| A run waits for a person, is at a limit, or stopped | Its steps in progress are `paused`, and the time of each step stops at the run's last event. | `workflow/progress.py:296`, `workflow/progress.py:215` | `test_a_step_in_progress_of_a_run_that_does_not_move_is_paused`, `test_a_run_that_does_not_move_stops_its_clock_at_its_last_event` |
-| A `for_each` step, or a sub-workflow, is in progress | Its items that finished, or its sub-workflow's own estimate, count for it in part, before its time does. | `workflow/progress.py:248`, `workflow/progress.py:234` | `test_the_items_that_finished_beat_the_time_a_step_took`, `test_a_sub_workflow_in_progress_counts_its_own_steps_and_items` |
-| A run's files go while `wf status` reads them | It says where the run stands, with no estimate. | `workflow/progress.py:204`, `workflow/report.py:260` | `test_wf_status_still_says_where_a_run_stands_when_its_files_change_meanwhile` |
+| A needs edge closes a loop | The lap counts when the step that the edge leaves finishes. | `workflow/progress.py:102`, `workflow/progress.py:283` | `test_a_loop_that_a_needs_edge_closes_counts_its_lap_when_it_goes_back` |
+| The runs folder holds earlier runs of the workflow that succeeded | Steps weigh their mean time and loops their mean count, from `wf report`. `left_s` gives the time left. A dry run counts only for a dry run. The numbers belong to the version of the workflow that asks for them. | `workflow/progress.py:159`, `workflow/progress.py:175` | `test_with_earlier_runs_steps_weigh_their_time_and_loops_their_mean_count`, `test_wf_status_says_how_far_a_run_is_and_learns_from_earlier_real_runs` |
+| A step that no earlier run ran | It weighs the mean of the other steps, and its time so far counts against that mean. | `workflow/progress.py:230`, `workflow/progress.py:264` | `test_a_step_that_no_earlier_run_ran_weighs_the_mean_of_the_others` |
+| The run has gone past a loop | The loop counts no more. | `workflow/progress.py:287` | `test_a_loop_the_run_has_left_counts_no_more` |
+| A route leaves out a branch | The nodes on it are `skipped`. The steps, the percentage and the time left leave them out. | `workflow/progress.py:270`, `workflow/progress.py:315` | `test_a_branch_a_route_left_out_is_skipped_and_counts_no_more` |
+| A branch that a route left out leads back into the chosen branch | Its steps weigh nothing, in the time and in the step count. | `workflow/progress.py:232`, `workflow/progress.py:233` | `test_a_branch_left_out_that_leads_back_into_the_chosen_one_counts_no_more` |
+| Parallel steps are in progress | The step with the most left decides the estimate. Of steps with as much left, the one with the least done decides, whatever the order of the steps. | `workflow/progress.py:270` | `test_a_slow_parallel_step_holds_the_estimate_back`, `test_open_steps_with_as_much_left_are_told_apart_by_the_least_done_not_by_chance` |
+| A run waits for a person, is at a limit, or stopped | Its steps in progress are `paused`, and the time of each step stops at the run's last event. | `workflow/progress.py:308`, `workflow/progress.py:222` | `test_a_step_in_progress_of_a_run_that_does_not_move_is_paused`, `test_a_run_that_does_not_move_stops_its_clock_at_its_last_event` |
+| A `for_each` step, or a sub-workflow, is in progress | Its items that finished, or its sub-workflow's own estimate, count for it in part, before its time does. | `workflow/progress.py:259`, `workflow/progress.py:245` | `test_the_items_that_finished_beat_the_time_a_step_took`, `test_a_sub_workflow_in_progress_counts_its_own_steps_and_items` |
+| A run's files go while `wf status` reads them | It says where the run stands, with no estimate. | `workflow/progress.py:211`, `workflow/report.py:260` | `test_wf_status_still_says_where_a_run_stands_when_its_files_change_meanwhile` |
 | An agent session opens, and closes | `events.jsonl` gets `session_started`, and then `session_ended`. | `workflow/nodes.py:479`, `workflow/nodes.py:516` | `test_each_session_starts_and_ends_with_an_event`, `test_a_session_inside_a_sub_workflow_names_its_transcript_from_the_run_folder` |
 | A session has no `session_ended`, its attempt goes on, and its process drives the run | `wf sessions` lists it. | `workflow/observe.py:70` | `test_wf_sessions_lists_the_agent_sessions_that_run_now` |
 | The attempt, pass or item of a session ends, or that of the workflow node around it | The session is over, also with no `session_ended`. | `workflow/observe.py:65`, `workflow/observe.py:94` | `test_a_session_ends_with_its_attempt_its_item_or_the_workflow_node_around_it`, `test_a_session_inside_a_workflow_node_that_timed_out_is_not_listed` |
