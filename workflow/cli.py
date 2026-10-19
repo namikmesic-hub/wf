@@ -183,7 +183,9 @@ def main(argv: list[str] | None = None) -> int:
                            help=f"where to wait for the browser's redirect (default {signin.PORT})")
         if tool.token:
             setup.add_argument("--token", action="store_true", help=f"paste a {tool.token} instead")
-        setup.set_defaults(handler=_tools_setup, tool=tool.name, token=False)
+        if tool.write_scopes:
+            setup.add_argument("--write", action="store_true", help="ask for the write scopes too, for nodes with `write: true`")
+        setup.set_defaults(handler=_tools_setup, tool=tool.name, token=False, write=False)
         actions.add_parser("doctor", help=f"check that {tool.title} works").set_defaults(handler=_tools_doctor, tool=tool.name)
 
     integrate = commands.add_parser("integrate", help="connect wf to another tool")
@@ -415,9 +417,11 @@ def _integrate(args) -> int:
 def _tools_list(args) -> int:
     for tool in TOOLS.values():
         try:
-            status = "set up" if keychain.load(tool.name) else "not set up"
+            stored = keychain.load(tool.name)
         except keychain.Unavailable:
             status = "can't tell"  # no keyring to look in
+        else:
+            status = "not set up" if stored is None else "set up" if keychain.can_write(stored) else "reads only"
         print(f"{tool.name:<9} {status:<11} {tool.url}\n{'':<21} sign-in: {tool.sign_in}")
     return 0
 
@@ -430,7 +434,7 @@ def _tools_setup(args) -> int:
         print(f"wf tools {tool.name} setup: run it at a terminal, since it asks you to sign in", file=sys.stderr)
         return 1
     try:
-        stored = asyncio.run(signin.setup(tool, port=args.port, token=args.token, say=print, ask=input,
+        stored = asyncio.run(signin.setup(tool, port=args.port, token=args.token, write=args.write, say=print, ask=input,
                                           ask_secret=getpass.getpass, open_url=webbrowser.open))
         keychain.save(tool.name, stored)
     except (signin.SetupFailed, signin.Unreachable, keychain.Unavailable) as error:

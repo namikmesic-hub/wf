@@ -132,6 +132,8 @@ class _Checker:
         self._sub_workflows()
         self.roots = self._roots()
         self.order = _Order(self.topo)
+        if self.wf.defaults.tools is not None:  # once, whether or not an agent node inherits them
+            self._tool_list("defaults.tools", self.wf.defaults.tools)
         for node_id in self.nodes:
             self._node(node_id)
         self._branches()
@@ -512,17 +514,22 @@ class _Checker:
             self.warn(where, f"puts output from {listed} into the shell unquoted; pass it through `env` and use \"$NAME\", or add `| quote`")
 
     def _web_to_full(self, where: str, refs: list[Ref], node_id: str) -> None:
+        """An agent with `access: full` that reads what an agent with web pages or wf tools wrote."""
         if self.wf.setting(node_id, "access") != "full":
             return
         sources = []
         for ref in refs:
             target = ref.name if ref.name in self.nodes else (
                 ref.path[0] if ref.name == "history" and ref.path and ref.path[0] in self.nodes else None)
-            if target and self.nodes[target].kind == "agent" and self.wf.setting(target, "web"):
+            if target and self.nodes[target].kind == "agent":
                 sources.append(target)
         for source in dict.fromkeys(sources):
-            self.warn(where, f"an agent with `access: full` reads output from `{source}`, which has `web: true`; "
-                             "web pages can carry instructions aimed at agents")
+            if self.wf.setting(source, "web"):
+                self.warn(where, f"an agent with `access: full` reads output from `{source}`, which has `web: true`; "
+                                 "web pages can carry instructions aimed at agents")
+            if tools := [use.name for use in self.wf.setting(source, "tools")]:
+                self.warn(where, f"an agent with `access: full` reads output from `{source}`, which reads {', '.join(tools)}; "
+                                 "messages, notes and mail that other people write can carry instructions aimed at agents")
 
     def _harness(self, node_id: str) -> None:
         node, at = self.nodes[node_id], f"nodes.{node_id}"
@@ -591,8 +598,12 @@ class _Checker:
                 self.error(where, "`session` isn't available here: the model and effort are chosen before the session starts")
 
     def _tools(self, node_id: str) -> None:
-        uses = self.wf.setting(node_id, "tools")
-        where = f"nodes.{node_id}.tools" if self.nodes[node_id].tools is not None else "defaults.tools"
+        """The node's own `tools` (defaults.tools are checked once, in run())."""
+        node = self.nodes[node_id]
+        if node.tools is not None:
+            self._tool_list(f"nodes.{node_id}.tools", node.tools)
+
+    def _tool_list(self, where: str, uses: list) -> None:
         seen = set()
         for i, use in enumerate(uses):
             if use.name not in TOOLS:
@@ -601,9 +612,9 @@ class _Checker:
                 self.error(f"{where}[{i}]", f"`{use.name}` is listed twice")
             else:
                 seen.add(use.name)
-                self._set_up(where, use.name)
+                self._set_up(where, use.name, use.write)
 
-    def _set_up(self, where: str, name: str) -> None:
+    def _set_up(self, where: str, name: str, write: bool) -> None:
         try:
             stored = keychain.load(name)
         except keychain.Unavailable as error:
@@ -611,6 +622,9 @@ class _Checker:
             return
         if stored is None:
             self.warn(where, f"`{name}` isn't set up on this machine, so the node fails when it runs: run `wf tools {name} setup`")
+        elif write and not keychain.can_write(stored):
+            self.warn(where, f"`{name}` is set up to read only, so a node that writes with it fails when it runs: "
+                             f"run `wf tools {name} setup --write`")
 
     def _workspace(self, node_id: str) -> None:
         workspace = self.wf.setting(node_id, "workspace")

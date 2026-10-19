@@ -7,6 +7,8 @@ Requests for a "silent" method never get an answer (a wedged app server). Each t
 takes the next list of actions:
     {"tool": {"arguments": {...}, "name": "submit_result"}}  call a dynamic tool, wait for the reply
     {"tool": {"arguments": {...}, "name": "...", "namespace": "linear"}}   one in a namespace
+    {"tool": {...}, "background": true}                      send the call and go on without waiting; the
+                                                             turn ends once its reply is in
     {"approval": "item/commandExecution/requestApproval"}  ask for approval, wait for the reply
     {"item": {"type": "commandExecution", "command": "ls"}} item/started + item/completed
     {"tokens": 1200}                                         a response of 1200 tokens: thread/tokenUsage/updated
@@ -58,16 +60,19 @@ async def main() -> None:
         write({"id": request_id, "method": method, "params": params})
         return await pending[request_id]
 
+    async def tool_call(thread: str, turn: str, tool: dict) -> None:
+        log("reply", await call("item/tool/call", {"threadId": thread, "turnId": turn, "callId": f"call-{next(ids)}",
+                                                   "tool": tool.get("name", "submit_result"), "namespace": tool.get("namespace"),
+                                                   "arguments": tool["arguments"]}))
+
     async def run_turn(thread: str, turn: str, actions: list) -> None:
         write({"method": "turn/started", "params": {"threadId": thread, "turn": {"id": turn, "items": [], "status": "inProgress"}}})
-        status, error = "completed", None
+        status, error, background = "completed", None, []
         for action in actions:
-            if "tool" in action:
-                reply = await call("item/tool/call", {"threadId": thread, "turnId": turn, "callId": f"call-{next(ids)}",
-                                                      "tool": action["tool"].get("name", "submit_result"),
-                                                      "namespace": action["tool"].get("namespace"),
-                                                      "arguments": action["tool"]["arguments"]})
-                log("reply", reply)
+            if "tool" in action and action.get("background"):
+                background.append(asyncio.ensure_future(tool_call(thread, turn, action["tool"])))
+            elif "tool" in action:
+                await tool_call(thread, turn, action["tool"])
             elif "approval" in action:
                 log("reply", await call(action["approval"], {"threadId": thread, "turnId": turn, "itemId": "i1"}))
             elif "item" in action:
@@ -95,6 +100,7 @@ async def main() -> None:
             elif "hang" in action:
                 await interrupts.setdefault(turn, asyncio.Event()).wait()
                 status = "interrupted"
+        await asyncio.gather(*background)
         write({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": turn, "items": [], "status": status, "error": error}}})
 
     while line := await reader.readline():

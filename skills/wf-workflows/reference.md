@@ -59,13 +59,17 @@ Every kind: `needs`, `routes`, `for_each`, `max_parallel` (4), `max_items` (20),
 `on_item_error` (fail | continue), `workspace` (repo), `base`, `branch`, `timeout` (60m;
 none for human and workflow), `retry` (1 for agents, else 0), `description`.
 
-Agents also: `harness`, `model`, `effort` (maps by harness when `harness` is a list), `access`, `web` (false), `session` (fresh | continue), `max_turns`, `budget_usd`, `tools`.
-Commands also: `env` (template values), `check` (true: non-zero exit fails the node; false: route on `exit_code`).
+Agents also: `harness`, `model`, `effort` (maps by harness when `harness` is a
+list), `access`, `web` (false), `session` (fresh | continue), `max_turns`,
+`budget_usd`. Commands also: `env` (template values), `check` (true: non-zero
+exit fails the node; false: route on `exit_code`).
 
-`tools: [slack, granola, linear, notion, gmail]` lets the agent read those through wf, on every harness.
+Agent nodes also take `tools`, the wf tools the agent may use, on every harness.
+For example `tools: [slack, granola, linear, notion, gmail]`.
 An entry gets only the tool's read operations.
-`{name: linear, write: true}` adds the ones that post, send or create.
+`{name: linear, write: true}` gets every operation the server offers, deleting and signing out included.
 Each tool is set up once per machine with `wf tools <name> setup`, and `wf validate` warns about one that isn't.
+For Slack and Linear, `setup --write` asks for the write scopes too, which a node with `write: true` needs.
 docs/tools.md lists the reads.
 
 `harness: [codex, claude-code]` falls back in order: each harness gets 1 +

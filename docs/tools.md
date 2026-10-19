@@ -8,7 +8,7 @@ Your own connectors and MCP servers don't matter here, because wf's sessions don
 
 ```sh
 wf tools list              # each tool, how it signs in, and whether it's set up
-wf tools linear setup      # sign in once
+wf tools linear setup      # sign in once, for reads
 wf tools linear doctor     # check that it works; `wf tools doctor` checks every tool
 ```
 
@@ -37,42 +37,62 @@ None of them needs a program on your machine.
 | `notion` | Notion's MCP server, `https://mcp.notion.com/mcp` | OAuth, and wf registers itself. Or a pasted MCP token | `notion-get-self` |
 | `gmail` | Google's Gmail MCP server, `https://gmailmcp.googleapis.com/mcp/v1` | OAuth with a Google Cloud OAuth client you make | `list_labels` |
 
-Notion also publishes a local server (`notion-mcp-server`), but Notion says it's no longer actively maintained and points to the remote one.
+Notion also publishes a local server (`notion-mcp-server`).
+But Notion says it's no longer actively maintained, and points to the remote one.
 Google's Gmail server is a Developer Preview.
 
 ## Setting up
 
-`wf tools <name> setup` signs in with OAuth's authorization code flow and PKCE, the way MCP's authorization spec describes:
+`wf tools <name> setup` signs in with OAuth's authorization code flow and PKCE.
+It follows MCP's authorization spec, revision 2026-07-28:
 
-1. It reads the MCP server's metadata (RFC 9728), which names the vendor's authorization server.
-   That server's metadata (RFC 8414) gives the endpoints and scopes.
-2. It registers wf as an OAuth client (RFC 7591) with Granola, Linear and Notion.
-   Slack and Google don't allow that, so for those it asks for the ID and secret of a client you made.
-3. It opens your browser at the vendor's sign-in page, and waits for the redirect back on `http://localhost:47152/callback`.
-   `--port` picks another port.
-4. It trades the code for tokens, keeps them in the macOS Keychain, and runs doctor.
+1. It asks the MCP server for a session without a token.
+   The server's 401 names its protected resource metadata (RFC 9728), or wf tries the well-known places for it.
+   That metadata names the vendor's authorization server.
+   The authorization server's own metadata (RFC 8414 or OpenID Connect Discovery) gives the endpoints.
+   wf tries the URLs in the order the spec gives.
+2. It needs an OAuth client.
+   The spec prefers Client ID Metadata Documents, which need an HTTPS URL that serves the client's metadata.
+   wf has no such URL, so with Granola, Linear and Notion it registers itself instead (RFC 7591).
+   The spec deprecates that registration, but keeps it for compatibility.
+   Slack and Google allow neither, so setup asks for the ID and secret of a client that you made.
+3. It asks for the tool's read scopes.
+   With `--write`, it asks for the write scopes too.
+   That's for Slack and Linear, whose scopes tell reads from writes.
+   For the other vendors, one sign-in does both, and only wf keeps a node to reads.
+4. It opens your browser at the vendor's sign-in page.
+   It waits for the redirect back on `http://localhost:47152/callback`, and `--port` picks another port.
+   It takes only a redirect that brings back the `state` it sent.
+5. It trades the code for tokens, keeps them in the macOS Keychain, and runs doctor.
 
 With `--token`, setup asks you to paste a token instead, for the vendors that give one out.
 A pasted token has no refresh: when the vendor stops taking it, run setup again.
 
 Setup needs a terminal, and you.
-Run it again to replace a sign-in.
+Run it again to replace a sign-in, for example with `--write` when a node starts to write.
 
 ### Slack
 
-Slack's MCP server only takes OAuth clients that are Slack apps, and only internal apps or apps in the Slack Marketplace.
+Slack's MCP server only takes OAuth clients that are Slack apps.
+And only internal apps or apps in the Slack Marketplace can use it.
 So make an internal app for wf once:
 
 1. At https://api.slack.com/apps, create a new app from scratch in your workspace.
 2. Under Agents, turn on "Slack Model Context Protocol (MCP) Server".
-3. Under OAuth & Permissions, add the redirect URL `http://localhost:47152/callback`, and the user token scopes that setup prints.
-   They're the scopes Slack's server lists:
-   `canvases:read canvases:write channels:history channels:read channels:write chat:write emoji:read files:read files:write groups:history groups:read groups:write im:history im:read im:write lists:read lists:write mpim:history mpim:read mpim:write reactions:read reactions:write search:read.files search:read.im search:read.mpim search:read.private search:read.public search:read.users users:read users:read.email`.
+3. Under OAuth & Permissions, add the redirect URL `http://localhost:47152/callback`.
+   Add the user token scopes that setup prints, which are the read scopes in the table below.
+   With `--write`, setup asks for the write scopes too, so the app needs them as well.
 4. Under Basic Information, copy the Client ID and the Client Secret.
    Setup asks for them.
 
+| Slack scopes | |
+|---|---|
+| Read (always) | `search:read.public search:read.private search:read.mpim search:read.im search:read.files search:read.users channels:history groups:history mpim:history im:history channels:read groups:read mpim:read im:read files:read canvases:read lists:read reactions:read emoji:read users:read users:read.email` |
+| Write (with `--write`) | `chat:write channels:write groups:write im:write mpim:write reactions:write canvases:write lists:write files:write` |
+
 `wf tools slack setup --token` takes a user token (`xoxp-...`) instead.
 For one, install the app to your workspace, and copy the User OAuth Token from OAuth & Permissions.
+Such a token has the scopes the app has.
 
 ### Gmail
 
@@ -80,8 +100,10 @@ Google's Gmail MCP server takes OAuth clients that you make, in a Google Cloud p
 
 1. Join the Google Workspace Developer Preview Program, which the Gmail MCP server is part of.
 2. In a Google Cloud project, enable the Gmail API and the Gmail MCP API.
-3. Set up the OAuth consent screen: Internal, or External with you as a test user.
-   Give it the scopes `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/gmail.compose`.
+3. Set up the OAuth consent screen as Internal.
+   Give it the scopes `https://www.googleapis.com/auth/gmail.readonly` and `https://www.googleapis.com/auth/gmail.compose`, which Google's guide gives.
+   External works too, with you as a test user.
+   But while an External app is in Testing, Google ends its sign-ins after 7 days, and setup has to run again.
 4. Create an OAuth client ID of type Web application.
    Tick "Use this client for an AI-powered agent", and add the authorized redirect URI `http://localhost:47152/callback`.
 5. Copy its Client ID and Client Secret.
@@ -97,61 +119,93 @@ On the free plan, that's notes from the last 30 days, and some operations are fo
 
 - `wf tools linear setup --token` takes a Linear API key (Settings > Security & access).
   A key with only the Read permission is enough for read-only nodes.
-- `wf tools notion setup --token` takes a Notion MCP token, which workspace owners on the Business and Enterprise plans make in Notion's Developer portal.
+- `wf tools notion setup --token` takes a Notion MCP token.
+  Workspace owners on the Business and Enterprise plans make one in Notion's Developer portal.
 
 ## Doctor
 
 `wf tools <name> doctor` asks three questions, and stops at the first that fails:
 
 1. Is there a sign-in in the Keychain?
-2. Is it still good? Connecting refreshes an expired token, and the server must take it.
-3. Does a harmless read call work? The table above lists each tool's.
+2. Is it still good?
+   Connecting refreshes an expired token, and the server must take it.
+3. Does a harmless read call work?
+   The first table on this page names each tool's.
 
 ```
 linear: pass
-  secret     an OAuth sign-in in the macOS Keychain, set up 2026-10-19
+  secret     an OAuth sign-in for reads only in the macOS Keychain, set up 2026-10-19
   sign-in    accepted by https://mcp.linear.app/mcp, which offers 41 read operations
   read call  `get_user` answered
 
 slack: fail
-  secret     an OAuth sign-in in the macOS Keychain, set up 2026-10-19
+  secret     an OAuth sign-in for reads only in the macOS Keychain, set up 2026-10-19
   problem    Slack didn't refresh the sign-in (invalid_grant)
   next step  run `wf tools slack setup`
 ```
 
-`wf tools doctor` checks every tool.
-A tool that isn't set up is reported, and fails the command only when you asked about that one tool.
+The tests named below are in `tests/test_tools.py`.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| The Keychain holds no sign-in for the tool, or one wf didn't write | `not set up`, with `run wf tools <name> setup`. `wf tools doctor` doesn't fail for it, and `wf tools <name> doctor` exits with 1. | `workflow/tools/doctor.py:45`, `workflow/cli.py:457` | `test_doctor_for_every_tool_reports_one_that_is_not_set_up_without_failing`, `test_a_stored_item_wf_didnt_write_counts_as_not_set_up` |
+| The Keychain can't be read | `fail`, with "unlock your login Keychain". | `workflow/tools/doctor.py:43` | `test_doctor_says_when_the_keyring_cannot_be_read` |
+| The access token has expired | It's refreshed, and the checks go on. | `workflow/tools/signin.py:217` | `test_doctor_refreshes_a_sign_in_that_has_expired` |
+| The vendor refuses the sign-in, or the refresh | `fail`, with `run wf tools <name> setup`. | `workflow/tools/doctor.py:60` | `test_doctor_says_to_sign_in_again_when_the_vendor_refuses` |
+| The server can't be reached | `fail`, with "check your network connection". | `workflow/tools/doctor.py:64` | `test_doctor_reports_a_server_it_cannot_reach` |
+| The server no longer offers the read call | `fail`, with "update wf". | `workflow/tools/doctor.py:56` | `test_doctor_says_to_update_wf_when_the_server_no_longer_offers_its_read_call` |
+| The read call answers an error | `fail`, with what the server said. | `workflow/tools/doctor.py:67` | `test_doctor_fails_when_the_read_call_fails` |
+| All three checks pass | `pass` | `workflow/tools/doctor.py:69` | `test_doctor_passes_when_the_sign_in_works_and_a_read_call_answers` |
+| Setup saved a sign-in that doctor fails | Setup exits with 1. | `workflow/cli.py:445` | `test_setup_that_saves_a_sign_in_doctor_rejects_exits_with_1` |
 
 ## In a workflow
 
 `tools` is an agent node field, and can go in `defaults` like the others.
 Each entry is a tool's name, which gives the agent that tool's read operations.
 Or it's `{name: ..., write: true}`, which gives the agent every operation the server offers.
+That includes deleting, and for Granola signing out.
 Posting, sending and creating reach other people, so a node only gets them when it asks for them by name.
 
-`wf validate` checks that each tool exists and is listed once, and warns about one that isn't set up on this machine.
+The tests named below are in `tests/test_tools.py` for validation, and in `tests/test_tool_sessions.py` for runs.
 
-When a node runs, each attempt connects to its tools first.
-A tool that isn't set up, or whose sign-in the vendor refuses, fails the node at once with what to run, since a retry would find the same.
-A server that doesn't answer fails just the attempt, and `retry` applies.
-Dry runs attach no tools, so they work without any being set up.
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| A `tools` entry names an unknown tool, or one that's listed twice | `wf validate` errors. | `workflow/validate.py:610`, `workflow/validate.py:612` | `test_validate_knows_the_tools_and_warns_about_one_not_set_up` |
+| `defaults.tools` has such an entry | The same errors, once, even in a workflow without an agent node. | `workflow/validate.py:136` | `test_tools_in_defaults_are_checked_even_without_an_agent_node` |
+| `write` isn't `true` or `false` | `wf validate` errors. | `workflow/spec.py:146` | `test_tools_entries_have_a_shape` |
+| A tool isn't set up on this machine | `wf validate` warns. | `workflow/validate.py:624` | `test_validate_knows_the_tools_and_warns_about_one_not_set_up` |
+| A node has `write: true`, and the tool is set up for reads only | `wf validate` warns, and the node fails when it runs, with `run wf tools <name> setup --write`. | `workflow/validate.py:626`, `workflow/tools/relay.py:88` | `test_a_node_that_writes_with_a_read_only_sign_in_gets_a_warning`, `test_attach_refuses_a_writing_node_a_read_only_sign_in` |
+| An agent with `access: full` reads the output of an agent with tools | `wf validate` warns: messages and mail can carry instructions aimed at agents. | `workflow/validate.py:531` | `test_a_full_access_agent_that_reads_what_a_tool_using_agent_wrote_gets_a_warning` |
+| An attempt starts | It connects to the node's tools. The session gets each tool's read operations, or all of them with `write: true`. | `workflow/nodes.py:343`, `workflow/tools/relay.py:59` | `test_each_node_gets_its_own_tools_and_only_their_reads_unless_it_opts_in`, `test_every_page_of_a_servers_operations_is_attached` |
+| The agent calls an operation its node may not use | wf refuses the call, which never reaches the vendor. | `workflow/tools/relay.py:70` | `test_a_read_only_node_cannot_call_a_write` |
+| A tool isn't set up, or its server refuses the sign-in when the attempt connects | The node fails at once, with what to run: a retry would find the same. | `workflow/nodes.py:499` | `test_a_tool_that_is_not_set_up_fails_the_node_without_a_retry`, `test_a_sign_in_the_server_refuses_when_connecting_fails_the_node_without_a_retry` |
+| Two tools fail to connect | The failure that setup fixes is the one reported. | `workflow/tools/relay.py:95` | `test_the_failure_that_setup_fixes_wins_when_two_tools_fail` |
+| A tool's server doesn't answer | The attempt fails, and `retry` applies. | `workflow/nodes.py:501` | `test_a_server_that_does_not_answer_fails_the_attempt_and_the_retry_tries_again` |
+| During the session, a tool's sign-in is refused or its connection is lost | The call's answer says why, and the attempt fails after the session, even when the agent submitted a result. | `workflow/tools/relay.py:148`, `workflow/nodes.py:495` | `test_a_sign_in_refused_in_the_middle_of_a_session_says_what_to_run`, `test_a_node_whose_tool_stopped_working_fails_even_with_a_result` |
+| An operation answers with an error | The agent reads the error, as it would any tool's, and nothing fails. | `workflow/tools/relay.py:78` | `test_an_operation_that_answers_with_an_error_doesnt_fail_the_node` |
+| A dry run | No tools are attached, so a dry run works without any set up. | `workflow/nodes.py:343` | `test_a_dry_run_attaches_no_tools` |
 
 ## What counts as a read
 
 These are the operations a node gets without `write: true`.
-An operation a server offers that isn't listed, a new one included, counts as a write: the agent isn't told about it, and wf refuses a call to it.
+An operation a server offers that isn't listed counts as a write, and so does a new one.
+The agent isn't told about it, and wf refuses a call to it.
 The lists are in `workflow/tools/catalog.py`.
+They follow the names each server listed on 2026-10-19.
+The Gmail and Notion lists are checked against each server's live tool list at the first sign-in.
 
-- **slack**: `slack_search_public`, `slack_search_public_and_private`, `slack_search_channels`, `slack_search_users`, `slack_search_emojis`, `slack_read_channel`, `slack_read_thread`, `slack_read_canvas`, `slack_read_file`, `slack_read_list`, `slack_read_user_profile`, `slack_list_user_channels`, `slack_list_channel_members`, `slack_get_reactions`.
-  Writes include sending, scheduling and drafting messages, reactions, canvases, lists and file uploads.
-- **granola**: `query_granola_meetings`, `list_meetings`, `get_meetings`, `get_meeting_transcript`, `get_meeting_attachment`, `list_meeting_folders`, `get_account_info`.
-  Not reads: `switch_workspace` (it changes the workspace in the Granola app), `sign_out`, and the folder operations.
-- **linear**: `list_issues`, `get_issue`, `list_comments`, `list_issue_statuses`, `get_issue_status`, `list_issue_labels`, `list_projects`, `get_project`, `list_project_labels`, `list_milestones`, `get_milestone`, `list_initiatives`, `get_initiative`, `list_initiative_labels`, `get_status_updates`, `list_documents`, `get_document`, `get_attachment`, `extract_images`, `list_cycles`, `list_teams`, `get_team`, `list_users`, `get_user`, `get_workspace`, `list_custom_views`, `list_templates`, `get_template`, `get_triage_responsibility`, `get_notifications`, `list_releases`, `get_release`, `list_release_notes`, `get_release_note`, `list_release_pipelines`, `list_diffs`, `get_diff`, `get_diff_threads`, `list_agent_skills`, `get_agent_skill`, `search_documentation`.
-  Writes are the `save_`, `create_`, `delete_`, `restore_` and `retire_` operations, and the ones that mark, share, merge or review.
-- **notion**: `notion-search`, `notion-fetch`, `notion-get-self`, `notion-get-users`, `notion-get-teams`, `notion-get-groups`, `notion-get-comments`, `notion-get-tool-access`, `notion-get-async-task`, `notion-list-private-pages`, `notion-list-shared-pages`, `notion-list-favorite-pages`, `notion-list-recent-pages`, `notion-list-page-backlinks`, `notion-query-data-sources`, `notion-query-multiple-data-sources`, `notion-query-meeting-notes`, `notion-memory-search`, `notion-get-file-download-urls`, `notion-download-attachment`, `notion-get-enabled-skills`, `notion-download-skill`, `notion-search-agents`, `notion-query-sessions`, `notion-search-sessions`, `notion-get-session-status`, `notion-wait-session`, `notion-list-session-events`, `notion-read-session-event`, `notion-calendar-list-calendars`, `notion-calendar-list-events`, `notion-calendar-list-coworkers-events`, `notion-calendar-list-contacts`, `notion-calendar-list-calendar-resources`.
-  These follow Notion's own split into read-only and write tools.
-- **gmail**: `search_threads`, `get_thread`, `get_message`, `list_labels`, `list_drafts`, `get_draft`.
-  Writes include drafts, sending, replying, forwarding, labels, trash and spam.
+| Tool | Read operations | Not reads (examples) |
+|---|---|---|
+| `slack` | `slack_search_public`, `slack_search_public_and_private`, `slack_search_channels`, `slack_search_users`, `slack_search_emojis`, `slack_read_channel`, `slack_read_thread`, `slack_read_canvas`, `slack_read_file`, `slack_read_list`, `slack_read_user_profile`, `slack_list_user_channels`, `slack_list_channel_members`, `slack_get_reactions` | sending, scheduling and drafting messages, reactions, canvases, lists, file uploads |
+| `granola` | `query_granola_meetings`, `list_meetings`, `get_meetings`, `get_meeting_transcript`, `get_meeting_attachment`, `list_meeting_folders`, `get_account_info` | `switch_workspace`, which changes the workspace in the Granola app, and `sign_out` |
+| `linear` | `list_issues`, `get_issue`, `list_comments`, `list_issue_statuses`, `get_issue_status`, `list_issue_labels`, `list_projects`, `get_project`, `list_project_labels`, `list_milestones`, `get_milestone`, `list_initiatives`, `get_initiative`, `list_initiative_labels`, `get_status_updates`, `list_documents`, `get_document`, `get_attachment`, `extract_images`, `list_cycles`, `list_teams`, `get_team`, `list_users`, `get_user`, `get_workspace`, `list_custom_views`, `list_templates`, `get_template`, `get_triage_responsibility`, `get_notifications`, `list_releases`, `get_release`, `list_release_notes`, `get_release_note`, `list_release_pipelines`, `list_diffs`, `get_diff`, `get_diff_threads`, `list_agent_skills`, `get_agent_skill`, `search_documentation` | the `save_`, `create_`, `delete_`, `restore_` and `retire_` operations, and the ones that mark, share, merge or review |
+| `notion` | `notion-search`, `notion-fetch`, `notion-get-self`, `notion-get-users`, `notion-get-teams`, `notion-get-groups`, `notion-get-comments`, `notion-get-tool-access`, `notion-get-async-task`, `notion-list-private-pages`, `notion-list-shared-pages`, `notion-list-favorite-pages`, `notion-list-recent-pages`, `notion-list-page-backlinks`, `notion-query-data-sources`, `notion-query-multiple-data-sources`, `notion-query-meeting-notes`, `notion-memory-search`, `notion-get-file-download-urls`, `notion-download-attachment`, `notion-get-enabled-skills`, `notion-download-skill`, `notion-search-agents`, `notion-query-sessions`, `notion-search-sessions`, `notion-get-session-status`, `notion-wait-session`, `notion-list-session-events`, `notion-read-session-event`, `notion-calendar-list-calendars`, `notion-calendar-list-events`, `notion-calendar-list-coworkers-events`, `notion-calendar-list-contacts`, `notion-calendar-list-calendar-resources` | creating, changing, moving, deleting and restoring pages, databases, views, comments and skills, and starting, stopping or messaging a Custom Agent session |
+| `gmail` | `search_threads`, `get_thread`, `get_message`, `list_labels`, `list_drafts`, `get_draft` | drafts, sending, replying, forwarding, labels, trash, spam |
+
+The Notion list is wf's own choice, made from Notion's tool descriptions.
+Notion groups its tools by task, not by reads and writes.
+The Custom Agent session operations that only look at a session count as reads: querying, searching, its status, waiting for it, and its events.
+Starting, stopping or messaging a session counts as a write.
 
 ## How it works
 
@@ -159,39 +213,81 @@ wf is the vendor server's only MCP client.
 The agent sees each tool the way it sees `submit_result`: as a server that wf hosts in its own process.
 On Claude Code that's an SDK MCP server named after the tool (`mcp__linear__list_issues`).
 On Codex it's a namespace of dynamic tools (`linear`).
-On Cursor it's an MCP server named after the tool, at a URL on 127.0.0.1 that only this session gets, next to the one that serves `submit_result`.
+On Cursor it's an MCP server named after the tool, at a URL on 127.0.0.1.
+Only this session gets that URL, and it sits next to the one that serves `submit_result`.
 Each call comes back to wf, which passes it on to the vendor with the stored token.
 This keeps two promises the same way on every harness:
 
 - **The secret stays in wf.**
   It isn't in the agent's environment, its command line, a config file, a workflow file or the run folder.
-  Handing the vendor's URL and token to the harness instead would put the token on Claude Code's command line, because the Agent SDK passes MCP servers there.
-  Any command the agent runs could then read it with `ps`.
+  Handing the vendor's URL and token to the harness instead would put the token on Claude Code's command line.
+  The Agent SDK passes MCP servers there, and any command the agent runs could read them with `ps`.
 - **Read-only holds in one place.**
   The agent is only told about the operations its node may use, and wf refuses any other name.
-  The harnesses' own filters couldn't do this everywhere: Claude Code's `full` access allows every tool, and Cursor's protocol (ACP) has no tool filter.
+  The harnesses' own filters couldn't do this everywhere.
+  Claude Code's `full` access allows every tool, and Cursor's protocol (ACP) has no tool filter.
+
+Transcripts in the run folder keep each call to a wf tool: its operation, its arguments, whether it worked, and the size of the answer.
+They don't keep the answer itself, which is other people's messages, notes and mail.
+The agent's own messages and its result can still quote what it read.
+
+### Keeping the sign-in fresh
 
 The Keychain item has the service `wf tools` and the tool's name as its account.
 It holds the tokens, and what refreshing them needs: the token endpoint, and the client ID and secret.
-Before an access token expires, wf refreshes it.
 Linear and Notion replace the refresh token on every refresh, so two refreshes at once would break the sign-in.
-A lock file in `~/.wf/tools/` makes them take turns, across wf processes too.
+The tests named below are in `tests/test_tools.py`, unless another file is named.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| A session asks for a token that expires within 60 seconds | wf refreshes it first. A token that expires later is used as it is. | `workflow/tools/signin.py:217` | `test_a_token_is_refreshed_within_a_minute_of_expiring` |
+| The server refuses a token during a session | wf refreshes it once, and sends the request again. | `workflow/tools/relay.py:181` | `test_a_token_refused_in_the_middle_of_a_session_is_refreshed_once` (`tests/test_tool_sessions.py`) |
+| Two sessions need a refresh at once | There's one refresh, and the second session gets the new token. | `workflow/tools/signin.py:196` | `test_two_refreshes_at_once_take_turns` |
+| wf processes with different `WF_HOME` folders refresh one tool | They take turns: the lock is in a folder of the user's, in the temporary folder. | `workflow/tools/signin.py:256` | `test_the_refresh_lock_is_the_users_whatever_wf_home_says` |
+| The session that asked for a refresh is cancelled, by a timeout for example | The refresh finishes in a task of its own, and saves the new tokens. | `workflow/tools/signin.py:198` | `test_a_refresh_finishes_and_is_saved_when_the_session_that_asked_is_cancelled` |
+| The Keychain refuses to save new tokens | wf keeps them in memory, and saves them before the next refresh. | `workflow/tools/signin.py:235` | `test_new_tokens_the_keychain_refuses_are_kept_and_saved_before_another_refresh` |
+| The vendor refuses a refresh, and the Keychain now holds a newer sign-in | wf uses the newer one. | `workflow/tools/signin.py:230` | `test_a_refused_refresh_reads_the_keychain_again_for_one_saved_meanwhile` |
+| The vendor refuses a refresh | The sign-in is gone, and the message says to run setup. | `workflow/tools/signin.py:247` | `test_doctor_says_to_sign_in_again_when_the_vendor_refuses` |
+| The token endpoint answers 5xx or 429 | The refresh can be tried again later: the attempt fails, and `retry` applies. | `workflow/tools/signin.py:249` | `test_a_refresh_the_vendor_is_too_busy_for_can_be_tried_again` |
+| The vendor answers a refresh without a new refresh token | wf keeps the one it has, and uses it again. | `workflow/tools/signin.py:251` | `test_a_vendor_that_keeps_the_refresh_token_is_refreshed_with_it_again` |
+
+### Why wf has its own OAuth client
+
+The MCP SDK that wf uses (mcp 2.3.0) has an OAuth client of its own, `OAuthClientProvider`.
+It covers discovery, registration, PKCE and refresh, and wf uses its discovery helpers.
+But three needs of wf are outside it:
+
+- Google gives a refresh token only to a request with `access_type=offline`, and the provider can't add a parameter.
+- Slack's token endpoint answers with `token_type: user`, and with `ok: false` and HTTP 200 for an error.
+  The provider's token model only takes `Bearer`.
+- The provider refreshes within one process.
+  wf runs refresh in several processes at once, and must not lose a rotated refresh token.
+
+### Who can reach the Keychain
 
 The Keychain keeps the secret out of files and out of the agent's view, but it doesn't fence it from other programs you run.
 macOS lets the program that saved an item read it again without asking.
 So an agent with `edit` or `full` access, which can run commands as you, could read it with the same Python that wf runs on.
 A `read-only` agent has no shell.
+Setup asks Slack and Linear for read scopes only, unless you give `--write`.
+So by default a token that leaked could only read.
 
 ## Sources
 
 Checked on 2026-10-19.
 
-- Slack: [Slack MCP server](https://docs.slack.dev/ai/mcp-server/) (endpoint, confidential OAuth clients only, no dynamic client registration, scopes per tool), [developing with it](https://docs.slack.dev/ai/slack-mcp-server/developing) (the Agents toggle), [PKCE](https://docs.slack.dev/authentication/using-pkce), [oauth.v2.user.access](https://docs.slack.dev/reference/methods/oauth.v2.user.access).
-- Granola: [Granola MCP](https://docs.granola.ai/help-center/sharing/integrations/mcp) (endpoint, OAuth with dynamic client registration, no API keys, plans, tools).
-- Linear: [Linear MCP server](https://linear.app/docs/mcp) (endpoint, OAuth 2.1 with dynamic client registration, API keys as bearer tokens).
-- Notion: [Notion MCP](https://developers.notion.com/docs/mcp), [getting started](https://developers.notion.com/docs/get-started-with-mcp) (endpoint, OAuth, MCP tokens, the local server no longer maintained), [supported tools](https://developers.notion.com/docs/mcp-supported-tools) (read-only and write tools).
-- Gmail: [configure the Gmail MCP server](https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server) (endpoint, Developer Preview, Web application client, scopes, `access_type=offline`).
-- MCP: [authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) (protected resource metadata, PKCE, `resource`).
-- Each server's metadata gave the endpoints and scopes above.
-  It's at `/.well-known/oauth-protected-resource`, and at its authorization server's `/.well-known/oauth-authorization-server`, read on the same day.
-- The operation names are the ones each server listed on the same day.
+| Source | What it gives |
+|---|---|
+| [Slack MCP server](https://docs.slack.dev/ai/mcp-server/) | The endpoint, confidential OAuth clients only, no dynamic client registration, and the scopes per tool |
+| [Developing with Slack's MCP server](https://docs.slack.dev/ai/slack-mcp-server/developing) | The Agents toggle |
+| [Slack PKCE](https://docs.slack.dev/authentication/using-pkce), [oauth.v2.user.access](https://docs.slack.dev/reference/methods/oauth.v2.user.access) | Slack's token answers |
+| [Granola MCP](https://docs.granola.ai/help-center/sharing/integrations/mcp) | The endpoint, OAuth with dynamic client registration, no API keys, plans and tools |
+| [Linear MCP server](https://linear.app/docs/mcp) | The endpoint, OAuth 2.1 with dynamic client registration, the `read` scope, and API keys as bearer tokens |
+| [Notion MCP](https://developers.notion.com/docs/mcp), [getting started](https://developers.notion.com/docs/get-started-with-mcp) | The endpoint, OAuth, MCP tokens, and the local server no longer maintained |
+| [Notion's supported tools](https://developers.notion.com/docs/mcp-supported-tools) | The tools and what each does |
+| [Configure the Gmail MCP server](https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server) | The endpoint, Developer Preview, the Web application client, the scopes, and `access_type=offline` |
+| [Google OAuth 2.0: refresh token expiration](https://developers.google.com/identity/protocols/oauth2#expiration) | Refresh tokens that expire after 7 days for an External app in Testing |
+| [MCP authorization, 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization), [its server discovery](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery) | Protected resource metadata, the discovery order, client registration and its priority, PKCE, `resource`, and `iss` |
+| [MCP versioning](https://modelcontextprotocol.io/specification/versioning) | 2026-07-28 is the current revision |
+| Each server's metadata, at `/.well-known/oauth-protected-resource` and its authorization server's `/.well-known/oauth-authorization-server` | The endpoints and scopes above |
+| Each server's tool list | The operation names |

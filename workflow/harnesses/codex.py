@@ -27,7 +27,8 @@ wf tools (spec.tools) are dynamic tools too: a namespace per tool, named after
 it, holding the operations the node may use. A call arrives with that
 `namespace` and is passed on to the vendor (tools/relay.py). Such a call can
 take a while, so every request from the app server is answered in a task of
-its own, and the connection keeps reading meanwhile.
+its own, and the connection keeps reading meanwhile. The transcript keeps such
+a call's operation, arguments and outcome, but not what the vendor returned.
 
 Access levels map to Codex's sandbox: read-only, workspace-write and
 danger-full-access, with approvalPolicy "never" so nothing stops to ask (any
@@ -258,6 +259,9 @@ class CodexSession:
         elif kind == "commandExecution":
             transcript(self.spec.log, "command", command=item.get("command"), exit_code=item.get("exitCode"),
                        output=short(item.get("aggregatedOutput") or "", 2000))
+        elif kind == "dynamicToolCall" and item.get("namespace") in {server.name for server in self.spec.tools}:
+            transcript(self.spec.log, "tool", item={key: value for key, value in item.items() if key != "contentItems"},
+                       kept=False, characters=sum(len(c.get("text") or c.get("imageUrl") or "") for c in item.get("contentItems") or []))
         elif kind in ("fileChange", "webSearch", "mcpToolCall", "dynamicToolCall"):
             transcript(self.spec.log, "tool", item=item)
 

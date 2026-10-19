@@ -12,10 +12,11 @@ wf runs the graph on LangGraph:
 - parallel steps work in their own git worktrees;
 - a failed attempt is retried, or falls back to another agent;
 - limits cap a run's cost, tokens and time;
-- any run can pause for a person and be answered and resumed later, from a terminal or by an autonomous operator;
-- agents can read Slack, Granola, Linear, Notion and Gmail through tools wf brings itself, set up once with `wf tools <name> setup`.
+- any run can pause for a person and be answered and resumed later, from a
+  terminal or by an autonomous operator.
 
 One cap on live agent sessions holds across all your runs that share a `~/.wf`.
+Agents can also read Slack, Granola, Linear, Notion and Gmail through tools that wf brings itself.
 
 ## Install
 

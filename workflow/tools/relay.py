@@ -13,7 +13,9 @@ Every call comes back to wf, which passes it on with the stored sign-in. That ke
 
 attach() connects to each tool a node uses, for one attempt. A connection runs in a task of
 its own, which enters and leaves the MCP client (anyio wants both in the same task), while
-calls come from whichever task the harness runs them in.
+calls come from whichever task the harness runs them in. A call that fails because the
+sign-in was refused or the connection is gone says so, and the ToolServer keeps it as its
+`failure`: the runner fails the attempt after the session, since the agent worked without it.
 """
 
 import asyncio
@@ -57,6 +59,11 @@ class ToolServer:
         self._allowed = {op.name for op in self.operations}
         self._connection = connection
 
+    @property
+    def failure(self) -> Exception | None:
+        """Why the tool stopped working during the session, if it did: NotSetUp or Unreachable."""
+        return self._connection.failure
+
     async def call(self, name: str, arguments: object) -> tuple[list[dict], bool]:
         """Run one operation. Returns (content, is_error): MCP text and image blocks."""
         if name not in self._allowed:
@@ -65,7 +72,9 @@ class ToolServer:
             result = await self._connection.client.call_tool(
                 name, arguments if isinstance(arguments, dict) else {}, read_timeout_seconds=CALL_TIMEOUT)
         except Exception as error:
-            return [_text(f"Error: {self.title} didn't answer: {_why(error)}")], True
+            failure = self._connection.ended(error)
+            said = str(failure) if failure else f"{self.title} didn't answer: {_why(error)}"
+            return [_text(f"Error: {said}")], True
         return _content(result), bool(result.is_error)
 
 
@@ -73,6 +82,11 @@ class ToolServer:
 async def attach(uses: list) -> AsyncIterator[list[ToolServer]]:
     """Connect to the tools a node uses (spec.ToolUse entries), for one attempt. Raises NotSetUp
     or keychain.Unavailable when one can't be used as it is, Unreachable when its server failed."""
+    for use in uses:
+        tool = TOOLS[use.name]
+        if use.write and not keychain.can_write(await signin.load(tool)):
+            raise NotSetUp(tool, f"{tool.title} is set up to read only, and this step may write",
+                           f"run `wf tools {tool.name} setup --write`")
     connections = [_Connection(TOOLS[use.name]) for use in uses]
     try:
         opened = await asyncio.gather(*(c.open() for c in connections), return_exceptions=True)
@@ -90,6 +104,8 @@ class _Connection:
         self.auth = _Bearer(tool)
         self.client: Client | None = None
         self.operations: list[Operation] = []
+        self.failure: Exception | None = None  # why it stopped working after it connected
+        self._lost: BaseException | None = None  # what ended the connection, if it ended early
         self._stop = asyncio.Event()
         self._ready: asyncio.Future | None = None
         self._task: asyncio.Task | None = None
@@ -116,16 +132,27 @@ class _Connection:
         try:
             timeout = httpx2.Timeout(signin.TIMEOUT, read=CALL_TIMEOUT)
             async with (httpx2.AsyncClient(auth=self.auth, timeout=timeout) as http,
-                        Client(streamable_http_client(self.tool.url, http_client=http), mode="legacy",
+                        Client(streamable_http_client(self.tool.url, http_client=http),
                                read_timeout_seconds=CALL_TIMEOUT, client_info=CLIENT) as client):
                 self.operations = await _operations(client)
                 self.client = client
                 if not self._ready.done():  # open() may have been cancelled meanwhile
                     self._ready.set_result(None)
                 await self._stop.wait()
-        except Exception as error:  # after it was ready, later calls report the lost connection themselves
+        except Exception as error:
             if not self._ready.done():
                 self._ready.set_exception(self._explain(error))
+            else:
+                self._lost = error  # later calls report it
+
+    def ended(self, error: BaseException) -> Exception | None:
+        """A call raised `error`. If the sign-in was refused or the connection is gone, that's the
+        tool's failure for the rest of the session: keep it, and return it."""
+        if self.auth.problem is not None:
+            self.failure = self.auth.problem
+        elif self._lost is not None or (self._task is not None and self._task.done()):
+            self.failure = Unreachable(f"lost the connection to {self.tool.title}: {_why(self._lost or error)}")
+        return self.failure
 
     def _explain(self, error: BaseException) -> Exception:
         tool = self.tool

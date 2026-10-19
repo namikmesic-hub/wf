@@ -12,7 +12,9 @@ mcp__wf__submit_result.
 wf tools (spec.tools) are in-process MCP servers too, one per tool, named after
 it: the agent sees mcp__slack__slack_read_channel, and each call comes back
 here to be passed on (tools/relay.py). Each operation the node may use is in
-allowed_tools; the server lists no others.
+allowed_tools; the server lists no others. What a wf tool returns stays out of
+the transcript, which notes only its size: it's other people's messages and
+mail, and the run folder outlives the session.
 
 Access levels (`options()`):
 - read-only: Read, Grep and Glob, plus the runner's own `git` tool
@@ -145,7 +147,11 @@ def _submit_tool(result_tool: ResultTool):
 def _relayed(server, operation):
     """One operation of a wf tool, as an SDK MCP tool that passes each call on."""
 
-    @tool(operation.name, operation.description, operation.input_schema, annotations=operation.annotations)
+    schema = operation.input_schema
+    if schema.get("type") == "object" and "properties" not in schema:  # the SDK would read its keys as parameters
+        schema = {**schema, "properties": {}}
+
+    @tool(operation.name, operation.description, schema, annotations=operation.annotations)
     async def relay(args: dict) -> dict:
         content, is_error = await server.call(operation.name, args)
         return {"content": content, "is_error": is_error}
@@ -170,6 +176,8 @@ class ClaudeSession:
         self._cost_so_far = spec.prior_cost_usd if spec.fork_from else 0.0  # the running total, as last reported
         self._turn = Usage()  # tokens of the turn in progress, from its assistant messages
         self._seen: set[str] = set()  # message ids already counted in _turn
+        self._relayed: set[str] = set()  # ids of the calls to wf tools, whose results aren't kept
+        self._tool_prefixes = tuple(f"mcp__{server.name}__" for server in spec.tools)
 
     async def start(self) -> None:
         self._client = ClaudeSDKClient(options(self.spec))
@@ -203,11 +211,16 @@ class ClaudeSession:
                     if isinstance(block, TextBlock) and block.text.strip():
                         transcript(log, "text", text=block.text)
                     elif isinstance(block, ToolUseBlock):
+                        if block.name.startswith(self._tool_prefixes):
+                            self._relayed.add(block.id)
                         transcript(log, "tool", name=block.name, input=block.input)
                         emit({"event": "agent_tool", "tool": _tool_name(block.name), "detail": _detail(block, self.spec.cwd)})
             elif isinstance(item, UserMessage) and isinstance(item.content, list):
                 for block in item.content:
-                    if isinstance(block, ToolResultBlock):
+                    if isinstance(block, ToolResultBlock) and block.tool_use_id in self._relayed:
+                        transcript(log, "tool_result", is_error=bool(block.is_error), kept=False,
+                                   characters=len(str(block.content)))
+                    elif isinstance(block, ToolResultBlock):
                         transcript(log, "tool_result", is_error=bool(block.is_error), content=short(block.content, 2000))
             elif isinstance(item, RateLimitEvent):
                 info = item.rate_limit_info

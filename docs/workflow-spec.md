@@ -135,7 +135,7 @@ end:
 | `wf run <file> [name=value ...]` | Validates, then runs the workflow. Inputs come from `name=value` pairs (a value that parses as JSON is used as JSON), from `--input file.json`, or from prompts for anything missing. Prints progress, then the end output. |
 | `wf resume <run-id> [--limit NAME=VALUE]` | Continues a paused or failed run, or one a limit stopped (with a bigger limit). Finished nodes and items aren't rerun. |
 | `wf tools list` | Lists the tools agent nodes can use (see [docs/tools.md](tools.md)), how each signs in, and whether it's set up. |
-| `wf tools <name> setup` | Signs in to a tool once, in the browser or with a pasted token, and keeps the secret in the macOS Keychain. |
+| `wf tools <name> setup [--write]` | Signs in to a tool once, in the browser or with a pasted token, and keeps the secret in the macOS Keychain. It asks Slack and Linear for read scopes only, unless `--write` is given. |
 | `wf tools <name> doctor`, `wf tools doctor` | Checks that a tool's sign-in is there and still good, and makes one harmless read call. Prints pass or fail with the next step. |
 
 `wf run` exit codes: 0 succeeded, 1 failed or stopped by a limit, 2 paused waiting for a person
@@ -321,7 +321,7 @@ Fields every kind accepts:
 | `web` | `false` | Allow web search and page fetching. |
 | `session` | `fresh` | `fresh` starts a new agent session for every pass: the code carries over through the workspace, and the instruction carries the feedback. `continue` carries the conversation over too. See [Sessions](#sessions). |
 | `max_turns`, `budget_usd` | none | Passed to harnesses that support them. |
-| `tools` | none | wf tools the agent may use: `[slack, linear]`. Each gets only its read operations, unless the entry is `{name: ..., write: true}`. See [docs/tools.md](tools.md). |
+| `tools` | none | wf tools the agent may use: `[slack, linear]`. Each gets only its read operations, unless the entry is `{name: ..., write: true}`, which gets every operation the server offers. See [docs/tools.md](tools.md). |
 
 Access levels:
 - `read-only`: read and search files, and run commands that don't change anything, such
@@ -676,7 +676,8 @@ So a result can only reach the attempt it belongs to.
 
 A node's `tools` reach the agent the same way.
 wf connects to each vendor's MCP server itself, and offers the agent the operations the node may use as tools of its own.
-That's an SDK MCP server per tool on Claude Code, a namespace of dynamic tools on Codex, and an MCP server over HTTP per tool on Cursor.
+Claude Code gets an SDK MCP server per tool, and Codex a namespace of dynamic tools per tool.
+Cursor gets an MCP server over HTTP per tool.
 Each call comes back to the runner, which passes it on with the stored sign-in, so the secret never reaches the agent.
 
 The runner uses this tool instead of each harness's own structured-output feature because
@@ -822,7 +823,8 @@ Errors:
     `{{ start.<input> }}` as the value that `with` gives. So `fix/{{ start.task }}` and
     `review/{{ start.task }}` are apart, and so are `fm/{{ start.task }}/author` and
     `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.
-13. Each `tools` entry names a known tool, and no tool is listed twice.
+13. Each `tools` entry names a known tool, and no tool is listed twice, in a node and in `defaults`.
+    `write` is `true` or `false`.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`
@@ -837,6 +839,9 @@ Warnings:
 - The workflow uses `run.cost_usd` or `limits.cost_usd` with a harness that doesn't report cost, or `run.tokens` or `limits.tokens` with one that doesn't report tokens.
 - A node that can run on `cursor` sets `effort`.
 - A node uses a tool that isn't set up on this machine (`wf tools <name> setup`).
+- A node has `write: true` for a tool that is set up for reads only (`wf tools <name> setup --write`).
+- An agent with `access: full` reads output from an agent with `tools`.
+  Messages, notes and mail that other people write can carry instructions aimed at agents.
 
 ## Implementation notes (Python, LangGraph)
 

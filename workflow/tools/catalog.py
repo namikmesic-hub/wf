@@ -7,6 +7,10 @@ docs/tools.md has the sources for each choice.
 `reads` is the whole of what a node gets unless it opts in to writes for that tool. An operation
 the server offers that isn't listed, a new one included, counts as a write: the agent isn't told
 about it and wf refuses calls to it.
+
+`scopes` and `write_scopes` split a vendor's OAuth scopes the same way, where the vendor's
+scopes allow it (Slack, Linear): setup asks for the read scopes, and for the write scopes too
+only with `--write`. Other vendors' sign-ins can do both, and only wf keeps them to reads.
 """
 
 from dataclasses import dataclass, field
@@ -24,7 +28,8 @@ class Tool:
     # "yours" means you make one (a Slack app, a Google Cloud OAuth client) and paste its id and secret
     client: Literal["registered", "yours"] = "registered"
     client_help: str = ""  # how to make your client: {redirect} and {scopes} are filled in
-    scopes: tuple[str, ...] = ()  # none: the scopes the server's metadata lists
+    scopes: tuple[str, ...] = ()  # none: the scopes the server asks for, or its metadata lists
+    write_scopes: tuple[str, ...] = ()  # added to `scopes` by `setup --write`
     authorize: dict = field(default_factory=dict)  # extra parameters for the authorization request
     resource: bool = True  # send RFC 8707's `resource`, as MCP clients do (Google's OAuth predates it)
     token: str = ""  # a token the vendor gives out that `setup --token` takes instead, in words
@@ -42,14 +47,16 @@ Slack's MCP server only takes OAuth clients that are Slack apps, so wf needs one
 2. Under Agents, turn on "Slack Model Context Protocol (MCP) Server".
 3. Under OAuth & Permissions, add the redirect URL {redirect}
    and these user token scopes: {scopes}
+   (`--write` asks for the write scopes too, so the app needs them as well then)
 4. Under Basic Information, copy the Client ID and the Client Secret."""
 
 GMAIL_HELP = """\
 Google's Gmail MCP server is a Developer Preview, and it takes OAuth clients that you make (once):
 1. Join the Google Workspace Developer Preview Program, which the Gmail MCP server is part of.
 2. In a Google Cloud project of yours, enable the Gmail API and the Gmail MCP API.
-3. Set up the OAuth consent screen: Internal, or External with you as a test user,
-   with the scopes {scopes}
+3. Set up the OAuth consent screen as Internal, with the scopes {scopes}
+   (External works too, with you as a test user, but while it's in Testing Google ends the
+   sign-in after 7 days, and setup has to run again)
 4. Create an OAuth client ID of type Web application, tick "Use this client for an AI-powered
    agent", and add the authorized redirect URI {redirect}
 5. Copy its Client ID and Client Secret."""
@@ -62,6 +69,12 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in [
         client="yours",
         client_help=SLACK_HELP,
         token="Slack user token (xoxp-..., from your Slack app's OAuth & Permissions page once it's installed)",
+        scopes=("search:read.public", "search:read.private", "search:read.mpim", "search:read.im", "search:read.files",
+                "search:read.users", "channels:history", "groups:history", "mpim:history", "im:history",
+                "channels:read", "groups:read", "mpim:read", "im:read", "files:read", "canvases:read", "lists:read",
+                "reactions:read", "emoji:read", "users:read", "users:read.email"),
+        write_scopes=("chat:write", "channels:write", "groups:write", "im:write", "mpim:write", "reactions:write",
+                      "canvases:write", "lists:write", "files:write"),
         probe=("slack_read_user_profile", {"response_format": "concise"}),
         reads=frozenset({
             "slack_search_public", "slack_search_public_and_private", "slack_search_channels",
@@ -85,6 +98,8 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in [
         title="Linear",
         url="https://mcp.linear.app/mcp",
         token="Linear API key (Settings > Security & access; a key with only the Read permission is enough for reads)",
+        scopes=("read",),
+        write_scopes=("write",),
         probe=("get_user", {"query": "me"}),
         reads=frozenset({
             "list_issues", "get_issue", "list_comments", "list_issue_statuses", "get_issue_status",

@@ -36,6 +36,7 @@ from pydantic import (
     Field,
     PlainValidator,
     PrivateAttr,
+    StrictBool,
     Tag,
     ValidationError,
 )
@@ -142,7 +143,7 @@ class ToolUse(_Model):
     """A tool an agent node may use (`wf tools list`). `write: true` adds the operations that aren't reads."""
 
     name: str
-    write: bool = False
+    write: StrictBool = False  # `write: "no"` is an error, not a quiet false
 
 
 Tools = list[Annotated[ToolUse, BeforeValidator(_tool_use)]]

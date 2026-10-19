@@ -33,6 +33,11 @@ def load(name: str) -> dict | None:
     return stored if isinstance(stored, dict) and stored.get("access_token") else None
 
 
+def can_write(stored: dict) -> bool:
+    """Does a stored sign-in allow writes? Only one that setup asked for reads alone doesn't."""
+    return stored.get("write", True)
+
+
 def save(name: str, stored: dict) -> None:
     try:
         keyring.set_password(SERVICE, name, json.dumps(stored))

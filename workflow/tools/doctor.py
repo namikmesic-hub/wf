@@ -45,7 +45,8 @@ async def check(tool: Tool) -> Report:
         report.status = "not set up"
         return report.add("next step", f"run `wf tools {tool.name} setup`")
     how = "a pasted token" if stored.get("method") == "token" else "an OAuth sign-in"
-    report.add("secret", f"{how} in the macOS Keychain, set up {stored.get('set_up', 'at an unknown date')}")
+    reach = "" if keychain.can_write(stored) else " for reads only"
+    report.add("secret", f"{how}{reach} in the macOS Keychain, set up {stored.get('set_up', 'at an unknown date')}")
     again = f"run `wf tools {tool.name} doctor` again"
     try:
         async with relay.attach([ToolUse(name=tool.name)]) as (server,):

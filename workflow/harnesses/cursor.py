@@ -43,7 +43,8 @@ can only reach the attempt it belongs to.
 wf tools (spec.tools) are served the same way: each tool gets a URL of its own
 on that server, named after the tool (`linear`), with the operations its node
 may use. A call comes back to the runner, which passes it on to the vendor
-(tools/relay.py), so Cursor never sees the vendor's token.
+(tools/relay.py), so Cursor never sees the vendor's token. The transcript keeps
+such a call's input and outcome, but not what the vendor returned.
 
 Access levels: the node never stops to ask. Permission requests are answered
 from its level with "allow once" or "reject", never "allow always", which
@@ -352,8 +353,11 @@ class CursorSession:
             self.spec.emit({"event": "agent_tool", "tool": _label(call), "detail": _detail(call, self.spec.cwd)})
         elif status in ("completed", "failed"):
             self.calls.pop(update.get("toolCallId"), None)
+            output = call.get("rawOutput") or call.get("content") or ""
+            relayed = (call.get("rawInput") or {}).get("providerIdentifier") in {server.name for server in self.spec.tools}
+            kept = {"kept": False, "characters": len(json.dumps(output))} if relayed else {"output": short(output, 2000)}
             transcript(self.spec.log, "tool", title=call.get("title"), tool_kind=call.get("kind"), status=status,
-                       input=call.get("rawInput"), output=short(call.get("rawOutput") or call.get("content") or "", 2000))
+                       input=call.get("rawInput"), **kept)
 
     def _flush(self) -> None:
         if self.text.strip():

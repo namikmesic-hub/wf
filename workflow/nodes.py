@@ -43,8 +43,10 @@ A limit reached while it waits ends the wait, and the attempt doesn't start.
 An agent node's wf tools (`tools`) are connected for each attempt and handed
 to the session in SessionSpec.tools (tools/relay.py). A tool that isn't set up
 fails the job at once, since a retry would find it the same; a server that
-didn't answer fails just the attempt. Dry runs connect none: scripted results
-don't call tools.
+didn't answer fails just the attempt. So does a tool that stopped working
+during the session (its sign-in refused, its connection lost), even when the
+agent then submitted a result: it worked without the tool. Dry runs connect
+none: scripted results don't call tools.
 
 Workspaces: `new` is a git worktree (workspaces.py). For an `edit` or `full`
 agent in a worktree the runner made, a retry starts from the commit the job
@@ -499,6 +501,9 @@ async def _attached(uses, number: int):
     try:
         async with relay.attach(uses) as tools:
             yield tools
+            failure = next((tool.failure for tool in tools if tool.failure), None)
+            if failure:
+                raise failure
     except (signin.NotSetUp, keychain.Unavailable) as error:  # a retry would find it the same
         raise _Failed(str(error), number) from error
     except signin.Unreachable as error:
