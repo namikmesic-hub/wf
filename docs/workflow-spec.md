@@ -161,7 +161,8 @@ Each harness needs its own login, and only the harnesses a workflow uses need to
   Each cursor-agent process gets a settings folder of its own, outside the repo, so your `~/.cursor` settings don't apply and aren't changed.
   `wf` is tested against one cursor-agent version and warns when the installed one differs, because it reads the messages Cursor writes.
 - **Tools** (Slack, Granola, Linear, Notion, Gmail): only the ones a workflow's nodes list.
-  `wf tools <name> setup` signs in once per machine; [docs/tools.md](tools.md) has the steps.
+  `wf tools <name> setup` signs in once per machine.
+  [docs/tools.md](tools.md) has the steps.
 
 `wf init my-flow` writes:
 
@@ -673,10 +674,9 @@ Each agent attempt gets one tool, `submit_result`. Its input schema is the node'
 Each call arrives tied to its session: a process, a thread id or a session's URL.
 So a result can only reach the attempt it belongs to.
 
-A node's `tools` reach the agent the same way: wf connects to each vendor's MCP server itself,
-and offers the agent the operations the node may use as tools of its own (an SDK MCP server
-per tool on Claude Code, a namespace of dynamic tools on Codex). Each call comes back to the
-runner, which passes it on with the stored sign-in, so the secret never reaches the agent.
+A node's `tools` reach the agent the same way.
+wf connects to each vendor's MCP server itself, and offers the agent the operations the node may use as tools of its own: an SDK MCP server per tool on Claude Code, a namespace of dynamic tools on Codex.
+Each call comes back to the runner, which passes it on with the stored sign-in, so the secret never reaches the agent.
 
 The runner uses this tool instead of each harness's own structured-output feature because
 it works the same everywhere, and the agent gets validation errors back while it still has
@@ -821,8 +821,8 @@ Errors:
     `{{ start.<input> }}` as the value that `with` gives. So `fix/{{ start.task }}` and
     `review/{{ start.task }}` are apart, and so are `fm/{{ start.task }}/author` and
     `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.
-13. Each `tools` entry names a known tool, and no tool is listed twice. A node with `tools`
-    can't run on `cursor`, which can't attach them yet.
+13. Each `tools` entry names a known tool, and no tool is listed twice.
+    A node with `tools` can't run on `cursor`, which can't attach them yet.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`

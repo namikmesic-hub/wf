@@ -59,16 +59,14 @@ Every kind: `needs`, `routes`, `for_each`, `max_parallel` (4), `max_items` (20),
 `on_item_error` (fail | continue), `workspace` (repo), `base`, `branch`, `timeout` (60m;
 none for human and workflow), `retry` (1 for agents, else 0), `description`.
 
-Agents also: `harness`, `model`, `effort` (maps by harness when `harness` is a
-list), `access`, `web` (false), `session` (fresh | continue), `max_turns`,
-`budget_usd`, `tools`. Commands also: `env` (template values), `check` (true:
-non-zero exit fails the node; false: route on `exit_code`).
+Agents also: `harness`, `model`, `effort` (maps by harness when `harness` is a list), `access`, `web` (false), `session` (fresh | continue), `max_turns`, `budget_usd`, `tools`.
+Commands also: `env` (template values), `check` (true: non-zero exit fails the node; false: route on `exit_code`).
 
-`tools: [slack, granola, linear, notion, gmail]` lets the agent read those
-through wf, on Claude Code and Codex (not Cursor). An entry gets only the
-tool's read operations; `{name: linear, write: true}` adds the ones that post,
-send or create. Each tool is set up once per machine with `wf tools <name>
-setup`; `wf validate` warns about one that isn't. docs/tools.md lists the reads.
+`tools: [slack, granola, linear, notion, gmail]` lets the agent read those through wf, on Claude Code and Codex (not Cursor).
+An entry gets only the tool's read operations.
+`{name: linear, write: true}` adds the ones that post, send or create.
+Each tool is set up once per machine with `wf tools <name> setup`, and `wf validate` warns about one that isn't.
+docs/tools.md lists the reads.
 
 `harness: [codex, claude-code]` falls back in order: each harness gets 1 +
 `retry` attempts, then the next takes over; a harness that is unavailable

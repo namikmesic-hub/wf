@@ -12,10 +12,8 @@ wf runs the graph on LangGraph:
 - parallel steps work in their own git worktrees;
 - a failed attempt is retried, or falls back to another agent;
 - limits cap a run's cost, tokens and time;
-- any run can pause for a person and be answered and resumed later, from a
-  terminal or by an autonomous operator;
-- agents can read Slack, Granola, Linear, Notion and Gmail through tools wf
-  brings itself, set up once with `wf tools <name> setup`.
+- any run can pause for a person and be answered and resumed later, from a terminal or by an autonomous operator;
+- agents can read Slack, Granola, Linear, Notion and Gmail through tools wf brings itself, set up once with `wf tools <name> setup`.
 
 One cap on live agent sessions holds across all your runs that share a `~/.wf`.
 
@@ -52,8 +50,7 @@ wf tools doctor                          # check that every tool you set up work
 ## Docs
 
 - [docs/workflow-spec.md](docs/workflow-spec.md): the file format, and how runs behave.
-- [docs/tools.md](docs/tools.md): the tools agents can use, how each signs in, and
-  which of their operations count as reads.
+- [docs/tools.md](docs/tools.md): the tools agents can use, how each signs in, and which of their operations count as reads.
 - [skills/wf-workflows](skills/wf-workflows/SKILL.md): an agent skill for building,
   changing and improving workflows.
 - [integrations/firstmate](integrations/firstmate/README.md): let
