@@ -338,7 +338,9 @@ class _Checker:
             if refs and name == "instruction":
                 self._web_to_full(f"{at}.instruction", refs, node_id)
         if node.kind == "agent":
-            self._tools(node_id, self._harness(node_id))
+            possible = self._harness(node_id)
+            self._tools(node_id, possible)
+            self._project_instructions(node_id, possible)
         if node.kind == "workflow":
             self._with(node_id)
         for i, route in enumerate(node.routes):
@@ -616,6 +618,22 @@ class _Checker:
             self.error(at, f"this node has {listed}, and can run on {reaching} at `{access}` access, where its commands could "
                            "read every stored sign-in: give the tools to a read-only node, or one on Codex at `edit`, "
                            "or set `tools_with_shell: true` to accept that")
+
+    def _project_instructions(self, node_id: str, possible: set[str]) -> None:
+        """`project_instructions: false` where a harness still loads some instruction file: once per
+        harness, where the setting is. A harness a template picks could be any of them."""
+        if self.wf.setting(node_id, "project_instructions"):
+            return
+        harness = self.wf.setting(node_id, "harness")
+        if not possible and isinstance(harness, str) and ("{{" in harness or "{%" in harness):
+            possible = set(HARNESSES)
+        own = self.nodes[node_id].project_instructions is not None
+        where = f"nodes.{node_id}.project_instructions" if own else "defaults.project_instructions"
+        for name in sorted(possible & harnesses.KEPT_INSTRUCTIONS.keys()):
+            if (where, name) not in self._warned:
+                self._warned.add((where, name))
+                self.warn(where, f"on {name}, `project_instructions: false` doesn't keep out "
+                                 f"{harnesses.KEPT_INSTRUCTIONS[name]}")
 
     def _tool_list(self, where: str, uses: list) -> None:
         seen = set()

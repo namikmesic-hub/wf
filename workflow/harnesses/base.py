@@ -21,6 +21,12 @@ every access level (SessionSpec.only_wf_tools), and each adapter switches off
 what its harness would otherwise load. A node without `tools` gets what it got
 before.
 
+A session also gets the repo's own agent instruction files (CLAUDE.md,
+AGENTS.md, Cursor's rules), as the harness loads them, unless the node sets
+`project_instructions: false` (SessionSpec.project_instructions). Then each
+adapter keeps out every such file its harness lets it. Its docstring names
+what stays, and `wf validate` warns about that (harnesses.KEPT_INSTRUCTIONS).
+
 How a turn ended:
 - done: the turn finished normally (the agent may or may not have called
   submit_result; the attempt loop checks the tool).
@@ -74,6 +80,7 @@ class SessionSpec:
     prior_cost_usd: float = 0.0  # what fork_from had spent: a forked session's totals include it
     tools: list["ToolServer"] = field(default_factory=list)  # wf tools the agent may call, besides submit_result
     only_wf_tools: bool = False  # the node lists `tools`: no other MCP servers or connectors, whatever the access
+    project_instructions: bool = True  # False: the repo's CLAUDE.md, AGENTS.md and rules stay out of the session
 
 
 @dataclass

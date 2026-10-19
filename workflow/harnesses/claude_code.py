@@ -33,7 +33,11 @@ Every session also gets:
 - the node's model and effort, explicitly, so your own Claude Code settings
   never decide them;
 - setting_sources=["project"] and Claude Code's own system prompt: the repo's
-  CLAUDE.md applies, your user-level settings and memory don't;
+  CLAUDE.md applies (or its AGENTS.md, when it has no CLAUDE.md), your
+  user-level settings and memory don't. With `project_instructions: false`,
+  setting_sources=[] leaves out the repo's side too: its CLAUDE.md and
+  AGENTS.md files at every level, .claude/rules, .claude/settings.json and
+  the skills in .claude/skills;
 - your Claude subscription login. The Agent SDK passes its environment to
   Claude Code, and ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN there would take
   precedence over the login, so they're blanked for the Claude Code process
@@ -130,7 +134,7 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
         allowed_tools=[*allowed, TOOL],
         disallowed_tools=disallowed,
         permission_mode=mode,
-        setting_sources=["project"],
+        setting_sources=["project"] if spec.project_instructions else [],
         system_prompt={"type": "preset", "preset": "claude_code"},
         mcp_servers=servers,
         strict_mcp_config=spec.only_wf_tools,

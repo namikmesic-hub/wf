@@ -180,6 +180,27 @@ def permission_requests() -> list[dict]:
     ]
 
 
+def test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [GOOD], [GOOD])
+    Path("AGENTS.md").write_text("You are someone else.\n")
+    assert run("project_instructions: false\nroutes: [{to: ask, max: 1}, {to: end}]\nsession: continue\n") == 0
+    new, loaded = entries(log, "start")
+    for start in (new, loaded):  # it reads rules and AGENTS.md from the folder it starts in: an empty one
+        folder = Path(start["cwd"])
+        assert start["files"] == [] and not folder.exists()  # and the folder goes with the session
+        assert not folder.is_relative_to(Path.home()) and not folder.is_relative_to(repo)
+    assert Path(new["cwd"]) != Path(loaded["cwd"])
+    workspace = str(Path.cwd().resolve())
+    assert [Path(p["cwd"]).resolve() for p in sent(log, "session/new") + sent(log, "session/load")] == [Path(workspace)] * 2
+
+
+def test_by_default_cursor_agent_starts_in_the_workspace(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [GOOD])
+    assert run() == 0
+    (start,) = entries(log, "start")
+    assert Path(start["cwd"]).resolve() == Path.cwd().resolve()
+
+
 @pytest.mark.parametrize(
     "settings, expected",
     [

@@ -60,6 +60,12 @@ def test_every_session_sets_everything_explicitly(tmp_path, monkeypatch):
     assert o.env == {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}  # use the subscription login
 
 
+def test_without_project_instructions_no_setting_source_loads(tmp_path):
+    o = options(spec(tmp_path, project_instructions=False))
+    assert o.setting_sources == []  # no CLAUDE.md, AGENTS.md, .claude/rules, skills or settings from the repo
+    assert o.system_prompt == {"type": "preset", "preset": "claude_code"}  # Claude Code's own prompt stays
+
+
 def test_api_key_auth_can_be_chosen(tmp_path, monkeypatch):
     monkeypatch.setenv("WF_CLAUDE_AUTH", "api-key")
     assert options(spec(tmp_path)).env == {}
@@ -103,3 +109,45 @@ end:
     log = [json.loads(line) for line in (folder / "nodes" / "read" / "1" / "attempt-1.log").read_text().splitlines()]
     assert any(e["kind"] == "tool" and e["name"] == GIT for e in log)  # it used the runner's git tool
     assert Path("notes.txt").read_text() == "The secret word is: quince\n"  # and changed nothing
+
+
+@pytest.mark.harness
+def test_a_real_node_without_project_instructions_does_not_get_the_repos_claude_md(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True, capture_output=True)
+    git("init", "-q")
+    Path("CLAUDE.md").write_text("The code word for this project is: periwinkle\n")
+    git("add", "CLAUDE.md")
+    git("commit", "-qm", "first")
+    ask = ("Don't read, search or open any file, and use no tool but submit_result. From what you were told alone, "
+           "what is the code word for this project? Submit none if you weren't given one.")
+    Path("flow.yaml").write_text(f"""
+version: 1
+name: real
+defaults:
+  harness: claude-code
+  harnesses:
+    claude-code: {{model: claude-haiku-5-5, effort: low}}
+start: {{input: {{}}}}
+nodes:
+  told:
+    needs: [start]
+    instruction: "{ask}"
+    output: {{word: {{type: string}}}}
+  kept_out:
+    needs: [start]
+    project_instructions: false
+    instruction: "{ask}"
+    output: {{word: {{type: string}}}}
+end:
+  output:
+    told: "{{{{ told.word }}}}"
+    kept_out: "{{{{ kept_out.word }}}}"
+""")
+    assert cli.main(["run", "flow.yaml"]) == 0, capsys.readouterr()
+    (folder,) = Path(".wf/runs").iterdir()
+    out = json.loads((folder / "output.json").read_text())
+    assert out["told"].strip(" .").lower() == "periwinkle"  # the repo's CLAUDE.md reaches a node by default
+    assert "periwinkle" not in out["kept_out"].lower()  # and not one with the field off, whose instruction still did
+    log = [json.loads(line) for line in (folder / "nodes" / "kept_out" / "1" / "attempt-1.log").read_text().splitlines()]
+    assert not any(e["kind"] == "tool" and "CLAUDE.md" in json.dumps(e["input"]) for e in log)  # it didn't read the file either

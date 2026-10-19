@@ -30,10 +30,11 @@ def repo(tmp_path, monkeypatch):
     return tmp_path
 
 
-def codex(monkeypatch, tmp_path: Path, *turns, models=None, silent=()) -> Path:
+def codex(monkeypatch, tmp_path: Path, *turns, models=None, silent=(), skills=()) -> Path:
     """Use the fake app server for `codex`; returns its request log."""
     scenario, log = tmp_path / "scenario.json", tmp_path / "requests.jsonl"
-    scenario.write_text(json.dumps({"turns": list(turns), "silent": list(silent), **({"models": models} if models else {})}))
+    scenario.write_text(json.dumps({"turns": list(turns), "silent": list(silent), "skills": list(skills),
+                                    **({"models": models} if models else {})}))
     monkeypatch.setitem(harnesses.FACTORIES, "codex",
                         lambda: Codex(command=[sys.executable, str(FAKE), str(scenario), str(log)], request_timeout=1))
     return log
@@ -102,6 +103,25 @@ def test_access_levels_map_to_sandboxes(repo, monkeypatch, settings, sandbox, co
     assert run(settings + "model: gpt-6-sol\n") == 0
     (thread,) = sent(log, "thread/start")
     assert (thread["sandbox"], thread["model"], thread["config"]) == (sandbox, "gpt-6-sol", config)
+
+
+def test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill(repo, monkeypatch):
+    skills = [{"name": "golf", "scope": "repo", "path": "/r/.agents/skills/golf/SKILL.md", "enabled": True},
+              {"name": "mine", "scope": "user", "path": "/home/.agents/skills/mine/SKILL.md", "enabled": True}]
+    log = codex(monkeypatch, repo, [GOOD], skills=skills)
+    assert run("project_instructions: false\n") == 0
+    assert sent(log, "skills/list") == [{"cwds": [str(Path.cwd().resolve())], "forceReload": True}]
+    (thread,) = sent(log, "thread/start")
+    assert thread["config"] == {"model_reasoning_effort": "medium", "web_search": "disabled", "project_doc_max_bytes": 0,
+                                "skills": {"config": [{"path": "/r/.agents/skills/golf/SKILL.md", "enabled": False}]}}
+    assert [t["input"][0]["text"] for t in sent(log, "turn/start")] == [f"Say hi\n\n{FINISH}"]  # the instruction still goes
+
+
+def test_a_codex_that_does_not_list_its_skills_is_unavailable_to_a_node_without_project_instructions(repo, monkeypatch, capsys):
+    log = codex(monkeypatch, repo, silent=["skills/list"])
+    assert run("project_instructions: false\n") == 1
+    assert "codex is unavailable: Codex didn't list its skills" in capsys.readouterr().out
+    assert sent(log, "thread/start") == []
 
 
 def test_every_tool_call_gets_a_reply_with_the_problems_in_the_text(repo, monkeypatch):

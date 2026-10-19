@@ -87,9 +87,21 @@ a continued attempt runs, and the mark goes only when a turn of that attempt
 ends with a result. When the attempt fails, even after its result came in (a
 timeout), the next one starts fresh instead of loading the failure.
 
-What can't be switched off: the repo's rules and AGENTS.md load, and so do your
-Cursor account's User Rules and the skills in your home folder (such as
-~/.claude/skills and ~/.agents/skills). Cursor runs a web fetch its server
+Instruction files: cursor-agent reads the repo's rules, skills, subagents and
+commands from the folder it starts in, not from session/new's cwd. That is
+.cursor/rules, .cursorrules, AGENTS.md, CLAUDE.md and CLAUDE.local.md, in that
+folder, each folder above it, and folders below it, and the skills in its
+.cursor, .claude, .codex and .agents folders. So a session starts in the
+workspace, unless the node sets `project_instructions: false`. Then it starts
+in a new empty folder in the system's temp folder, outside the repo and your
+home folder, and session/new still gives the workspace, where the agent works.
+The cost: Cursor's semantic code search and lint diagnostics then don't cover
+the workspace.
+
+What can't be switched off: your Cursor account's User Rules, and the skills in
+your home folder (such as ~/.claude/skills and ~/.agents/skills). The repo's
+hooks (.cursor/hooks.json, .claude/settings.json) load from session/new's cwd,
+even with `project_instructions: false`. Cursor runs a web fetch its server
 marks as needing no approval, even with `web: false`.
 
 wf is tested with one cursor-agent version (TESTED), because it reads the
@@ -104,6 +116,7 @@ import os
 import re
 import shutil
 import signal
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -236,6 +249,7 @@ class CursorSession:
         self.harness, self.spec = harness, spec
         self.id = ""
         self.folder: Path | None = None  # this process's config folder
+        self.bare: Path | None = None  # an empty folder to start in, without the repo's instruction files
         self.rpc: _Connection | None = None
         self.url = ""  # this session's MCP server
         self.tool_urls: list[str] = []  # its wf tools' servers
@@ -270,8 +284,10 @@ class CursorSession:
                 self.id = spec.fork_from  # set first: close() puts the session back even if loading fails
                 (self.folder / "acp-sessions").mkdir()
                 saved.rename(self.folder / "acp-sessions" / self.id)
-            self.rpc = await _Connection.start(command, spec.cwd, harness.env(self.folder), harness.home / "cursor-agent.log",
-                                               harness.request_timeout, self)
+            if not spec.project_instructions:
+                self.bare = Path(tempfile.mkdtemp(prefix="wf-cursor-"))
+            self.rpc = await _Connection.start(command, self.bare or spec.cwd, harness.env(self.folder),
+                                               harness.home / "cursor-agent.log", harness.request_timeout, self)
             await self.rpc.request("initialize", {
                 "protocolVersion": 1, "clientInfo": {"name": "wf", "version": "0.1.0"},
                 "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False,
@@ -401,6 +417,9 @@ class CursorSession:
                 self._keep_session()
                 shutil.rmtree(self.folder, ignore_errors=True)
                 self.folder = None
+            if self.bare is not None:
+                shutil.rmtree(self.bare, ignore_errors=True)
+                self.bare = None
 
     def _keep_session(self) -> None:
         """Move the session out of the config folder, which goes, when a later pass may load it."""

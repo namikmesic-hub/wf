@@ -10,7 +10,7 @@ from textwrap import dedent, indent
 
 import pytest
 
-from workflow import validate
+from workflow import harnesses, validate
 
 DOCS = Path(__file__).parent.parent / "docs"
 EXAMPLES = Path(__file__).parent.parent / "workflow" / "examples"
@@ -668,6 +668,38 @@ def test_a_template_reading_run_tokens_warns_when_cursor_runs(tmp_path):
         end='used: {type: integer, value: "{{ run.tokens }}"}',
     ))
     assert_problems(report, [("warning", "end.output.used.value", "cursor doesn't report tokens")])
+
+
+def test_project_instructions_takes_a_boolean_on_a_node_or_in_defaults(tmp_path):
+    report = check(tmp_path, flow('a: {needs: [start], instruction: x, project_instructions: "no"}'))
+    assert_problems(report, [("error", "nodes.a.project_instructions", "Input should be a valid boolean")])
+    text = flow("a: {needs: [start], instruction: x}").replace("defaults:\n", "defaults:\n  project_instructions: false\n")
+    assert_problems(check(tmp_path, text), [])  # Claude Code keeps every instruction file out
+
+
+def test_project_instructions_off_warns_once_per_harness_that_keeps_a_file(tmp_path):
+    codex = "on codex, `project_instructions: false` doesn't keep out your global ~/.codex/AGENTS.md"
+    report = check(tmp_path, flow("""
+        a: {needs: [start], instruction: x, harness: codex, project_instructions: false}
+        b: {needs: [start], instruction: x, harness: codex}
+        c: {needs: [start], instruction: x, harness: codex, project_instructions: true}
+        """))
+    assert_problems(report, [("warning", "nodes.a.project_instructions", codex)])  # b and c load them: nothing to say
+    text = flow("""
+        a: {needs: [start], instruction: x, harness: codex}
+        b: {needs: [start], instruction: x, harness: [claude-code, codex], model: {claude-code: opus, codex: gpt-6}}
+        c: {needs: [start], instruction: x}
+        """).replace("defaults:\n", "defaults:\n  project_instructions: false\n")
+    assert_problems(check(tmp_path, text), [("warning", "defaults.project_instructions", codex)])
+
+
+def test_project_instructions_off_warns_about_every_harness_a_template_could_pick(tmp_path):
+    report = check(tmp_path, flow(
+        'a: {needs: [start], instruction: x, harness: "{{ start.task }}", project_instructions: false, '
+        'model: {cursor: composer-2.5}}'))
+    assert [(p.level, p.where) for p in report.problems] == [("warning", "nodes.a.project_instructions")] * len(
+        harnesses.KEPT_INSTRUCTIONS)
+    assert all(f"on {name}," in p.message for p, name in zip(report.problems, sorted(harnesses.KEPT_INSTRUCTIONS)))
 
 
 # ---------- malformed files are reported, never crash ----------

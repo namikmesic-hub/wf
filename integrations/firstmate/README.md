@@ -66,6 +66,11 @@ Agent attempts in every run that uses that `~/.wf` then share that many sessions
 An attempt waits for a free one, and `wf status` lists the waits (see "Agent
 slots" in the spec).
 
+firstmate's own AGENTS.md tells each agent that loads it that it is the first mate.
+So a workflow that works on the firstmate repository sets `project_instructions: false` in its `defaults`.
+Then its agents don't get that file, and only the workflow's instructions tell them what they are.
+See "Instruction files" in the spec for what each harness still loads.
+
 firstmate gives its built-in answers channel only to its own adapters, so the
 first mate answers wf questions itself with `wf answer`, under its usual
 ask-user rules.
