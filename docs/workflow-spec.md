@@ -216,15 +216,15 @@ becomes
 }
 ```
 
-- Every field is required unless it has `optional: true`. That key is removed from the
-  final schema. A missing optional field reads as `none` in templates and end outputs,
-  at any depth: in nested objects, list items and `additionalProperties` values. A
-  node's `output.json` records it as null. To let an agent or a person give null, use
-  `type: [string, "null"]`.
+- Every field is required unless it has `optional: true`.
+  That key is removed from the final schema.
+  A missing optional field reads as `none` in templates and end outputs, at any depth: in nested objects, list items and `additionalProperties` values.
+  A node's `output.json` records it as null.
+  To let an agent or a person give null, use `type: [string, "null"]`.
 - A value a template makes for `with` or for an end output's schema can hold that `none`.
-  There, `none` in any field the schema doesn't require counts as left out: a `with`
-  input that has a `default` gets the default, and an output with a missing optional
-  field passes through to a schema that declares the field or leaves it out.
+  There, `none` in any field the schema doesn't require counts as left out.
+  So a `with` input that has a `default` gets the default.
+  And an output with a missing optional field passes through to a schema that declares the field or leaves it out.
 - In `start.input`, a field can have a `default`, used when that input isn't given. A field
   with a default is optional.
 - Write `description`s. For agent nodes they're part of the `submit_result` tool, so the
@@ -686,8 +686,8 @@ Errors:
    they read from, including `item.<field>` checked against the list's item schema when
    that can be worked out.
 8. `item` and `index` appear only in `for_each` nodes. `for_each` reads a list.
-9. `model` and `effort` are maps when `harness` is a list, and don't read `session`. A node
-   that can run on `cursor` has a `model`.
+9. `model` and `effort` are maps when `harness` is a list, and don't read `session`.
+   A node that can run on `cursor` has a `model`.
 10. Each short-form end output is a single field reference.
 11. Each sub-workflow exists and is valid, no workflow includes itself (directly or
     indirectly), and `with` sets every required input with a matching type.
