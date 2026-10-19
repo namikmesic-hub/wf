@@ -11,6 +11,8 @@ through a counter file next to requests.jsonl: each session/prompt takes the nex
     {"tool": {"name": "submit_result", "arguments": {...}}}  call a tool on the session's MCP server as
                                                        Cursor does: tool call updates, a permission
                                                        request, then tools/call over HTTP if allowed
+    {"tool": {"server": "linear", "name": "list_issues", "arguments": {...}}}  the same, on another
+                                                       MCP server that session/new named
     {"permission": {"kind": "execute", "title": "`ls`", ...}}  ask for permission, record the answer
     {"error": "Upgrade your plan to continue"}         how Cursor reports a failed request: "\n\n" + text
     {"error": ["Error: [resource", "_exhausted] ..."]}  the same, sent in several chunks
@@ -23,8 +25,8 @@ Sessions are kept in CURSOR_CONFIG_DIR/acp-sessions/<id>, as Cursor keeps them, 
 works across processes; it replays the history first, as Cursor does. A new or loaded session
 reports its model and parameters in configOptions: the effort in a model id only when initialize
 asked for parameterized models, as with Cursor. Every request, the arguments,
-environment and cli-config.json each process started with, the MCP tools offered, and every answer
-to the fake's own requests are appended to requests.jsonl.
+environment and cli-config.json each process started with, the MCP tools offered (`tools` for wf's server,
+`server_tools` for the others), and every answer to the fake's own requests are appended to requests.jsonl.
 """
 
 import asyncio
@@ -86,7 +88,7 @@ async def main() -> None:
     pending: dict[int, asyncio.Future] = {}
     cancelled = asyncio.Event()
     sessions = Path(os.environ["CURSOR_CONFIG_DIR"]) / "acp-sessions"
-    state = {"url": None, "mcp": False, "parameterized": False}
+    state = {"urls": {}, "connected": set(), "parameterized": False}
     model = args[args.index("--model") + 1] if "--model" in args else "default"
 
     async def ask(method: str, params: dict):
@@ -98,17 +100,19 @@ async def main() -> None:
     def update(session: str, body: dict) -> None:
         write({"method": "session/update", "params": {"sessionId": session, "update": body}})
 
-    async def use_tool(session: str, name: str, arguments: dict) -> None:
-        if not state["mcp"]:  # connect the way Cursor does, before the first call
-            state["mcp"] = True
-            await asyncio.to_thread(post, state["url"], {"id": 0, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
-            await asyncio.to_thread(post, state["url"], {"method": "notifications/initialized"})
-            listed = await asyncio.to_thread(post, state["url"], {"id": 1, "method": "tools/list", "params": {}})
-            log("tools", [t["name"] for t in listed["result"]["tools"]])
+    async def use_tool(session: str, name: str, arguments: dict, server: str = "wf") -> None:
+        url = state["urls"][server]
+        if server not in state["connected"]:  # connect the way Cursor does, before the first call
+            state["connected"].add(server)
+            await asyncio.to_thread(post, url, {"id": 0, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
+            await asyncio.to_thread(post, url, {"method": "notifications/initialized"})
+            listed = await asyncio.to_thread(post, url, {"id": 1, "method": "tools/list", "params": {}})
+            names = [t["name"] for t in listed["result"]["tools"]]
+            log("tools", names) if server == "wf" else log("server_tools", {"server": server, "names": names})
         call = f"call-{next(calls)}"
         update(session, {"sessionUpdate": "tool_call", "toolCallId": call, "title": "MCP: tool", "kind": "other", "status": "pending", "rawInput": {}})
-        update(session, {"sessionUpdate": "tool_call_update", "toolCallId": call, "title": f"wf: {name}",
-                         "rawInput": {"providerIdentifier": "wf", "toolName": name, "args": arguments}})
+        update(session, {"sessionUpdate": "tool_call_update", "toolCallId": call, "title": f"{server}: {name}",
+                         "rawInput": {"providerIdentifier": server, "toolName": name, "args": arguments}})
         update(session, {"sessionUpdate": "tool_call_update", "toolCallId": call, "status": "in_progress"})
         answer = await ask("session/request_permission", {
             "sessionId": session, "toolCall": {"toolCallId": call, "title": f"wf-{name}: {name}", "kind": "other", "status": "pending"},
@@ -117,7 +121,7 @@ async def main() -> None:
                         {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"}]})
         log("permission", answer)
         if answer.get("outcome", {}).get("optionId") == "allow-once":
-            reply = await asyncio.to_thread(post, state["url"], {"id": next(ids), "method": "tools/call",
+            reply = await asyncio.to_thread(post, url, {"id": next(ids), "method": "tools/call",
                                                                  "params": {"name": name, "arguments": arguments}})
             log("reply", reply["result"])
         update(session, {"sessionUpdate": "tool_call_update", "toolCallId": call, "status": "completed", "rawOutput": {"success": True}})
@@ -135,7 +139,8 @@ async def main() -> None:
             if "text" in action:
                 update(session, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": action["text"]}})
             elif "tool" in action:
-                await use_tool(session, action["tool"].get("name", "submit_result"), action["tool"]["arguments"])
+                await use_tool(session, action["tool"].get("name", "submit_result"), action["tool"]["arguments"],
+                               action["tool"].get("server", "wf"))
             elif "permission" in action:
                 asked = dict(action["permission"])
                 options = asked.pop("options", None) or [
@@ -185,7 +190,7 @@ async def main() -> None:
                 continue
             (sessions / session).mkdir(parents=True, exist_ok=True)
             (sessions / session / "meta.json").write_text(json.dumps({"cwd": params["cwd"]}))
-            state["url"] = params["mcpServers"][0]["url"]
+            state["urls"] = {server["name"]: server["url"] for server in params["mcpServers"]}
             if method == "session/load":  # Cursor replays the conversation before it answers
                 update(session, {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "an earlier instruction"}})
                 update(session, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "an earlier answer"}})

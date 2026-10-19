@@ -16,6 +16,7 @@ wf runs the graph on LangGraph:
   terminal or by an autonomous operator.
 
 One cap on live agent sessions holds across all your runs that share a `~/.wf`.
+Agents can also read Slack, Granola, Linear, Notion and Gmail through tools that wf brings itself.
 
 ## Install
 
@@ -38,9 +39,19 @@ wf report --workflow implement           # what the runs did, per step
 `wf run <file> --dry-run <script.yaml>` walks a workflow with scripted agent
 results, for free. `wf --help` lists every command.
 
+Steps that read Slack, Granola, Linear, Notion or Gmail list them in `tools`.
+Sign in to each once per machine:
+
+```sh
+wf tools list                            # each tool, and whether it's set up
+wf tools slack setup                     # sign in; the secret goes to the macOS Keychain
+wf tools doctor                          # check that every tool you set up works
+```
+
 ## Docs
 
 - [docs/workflow-spec.md](docs/workflow-spec.md): the file format, and how runs behave.
+- [docs/tools.md](docs/tools.md): the tools agents can use, how each signs in, and which of their operations count as reads.
 - [skills/wf-workflows](skills/wf-workflows/SKILL.md): an agent skill for building,
   changing and improving workflows.
 - [integrations/firstmate](integrations/firstmate/README.md): let
@@ -53,6 +64,7 @@ results, for free. `wf --help` lists every command.
 ## Status
 
 Claude Code, Codex and Cursor are supported.
+Tools attach to sessions on all three.
 
 ## Development
 

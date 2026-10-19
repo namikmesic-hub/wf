@@ -57,3 +57,12 @@ def test_usage_limits_and_token_counts_are_reported_as_expected(schema):
     assert "usageLimitExceeded" in info and "unauthorized" in info and "rateLimitExceeded" in info
     usage = schema("ThreadTokenUsageUpdatedNotification")["definitions"]["TokenUsageBreakdown"]
     assert "totalTokens" in usage["required"]
+
+
+def test_dynamic_tools_come_in_namespaces_and_calls_name_theirs(schema):
+    tools = schema("ThreadStartParams")["definitions"]["DynamicToolSpec"]["oneOf"]
+    namespace = next(variant for variant in tools if variant["properties"]["type"]["enum"] == ["namespace"])
+    assert {"name", "description", "tools", "type"} <= set(namespace["required"])  # what codex.py's _namespace sends
+    assert "namespace" in schema("DynamicToolCallParams")["properties"]  # how a call names its tool's namespace
+    items = schema("DynamicToolCallResponse")["definitions"]["DynamicToolCallOutputContentItem"]["oneOf"]
+    assert {"inputText", "inputImage"} <= {item["properties"]["type"]["enum"][0] for item in items}

@@ -23,6 +23,18 @@ every call, unknown tools and errors included; a missing reply would hang
 the turn. Only the reply's text reaches the model, so problems are spelled
 out there.
 
+wf tools (spec.tools) are dynamic tools too: a namespace per tool, named after
+it, holding the operations the node may use. A call arrives with that
+`namespace` and is passed on to the vendor (tools/relay.py). Such a call can
+take a while, so every request from the app server is answered in a task of
+its own, and the connection keeps reading meanwhile. The transcript keeps such
+a call's operation, arguments and outcome, but not what the vendor returned.
+
+A node that lists `tools` gets no other MCP server. `--disable apps` already
+keeps your ChatGPT connectors out of every thread. The thread's config also
+switches off each MCP server your config.toml names, and each plugin, since
+plugins bring MCP servers of their own: config/read says which there are.
+
 Access levels map to Codex's sandbox: read-only, workspace-write and
 danger-full-access, with approvalPolicy "never" so nothing stops to ask (any
 approval request that still arrives is declined). Web search is "live" with
@@ -145,13 +157,15 @@ class CodexSession:
                                                       f"so your ~/.codex/config.toml decides it"})
         if spec.access == "edit":
             config["sandbox_workspace_write"] = {"network_access": spec.web}
+        if spec.only_wf_tools:
+            config.update(await self._without_mcp_servers())
         params = {
             "cwd": str(spec.cwd), "sandbox": SANDBOX[spec.access], "approvalPolicy": "never",
             **({"model": model} if model else {}),
             "ephemeral": not spec.continuable,  # saved only when a later pass may fork it
             "config": config,
             "dynamicTools": [{"type": "function", "name": output_tool.NAME, "description": output_tool.DESCRIPTION,
-                              "inputSchema": spec.tool.schema}],
+                              "inputSchema": spec.tool.schema}] + [_namespace(server) for server in spec.tools],
         }
         try:
             if spec.fork_from:
@@ -166,6 +180,18 @@ class CodexSession:
         self.id = thread_id
         self.rpc.threads[self.id] = self
         transcript(spec.log, "thread", id=self.id, model=result.get("model"), sandbox=params["sandbox"], config=config)
+
+    async def _without_mcp_servers(self) -> dict:
+        """Thread config that switches off the MCP servers and plugins Codex would load here.
+        A server that the config doesn't name can't be switched off by name (Codex refuses the
+        thread), which is why plugins go too: they bring theirs."""
+        try:
+            found = (await self.rpc.request("config/read", {"cwd": str(self.spec.cwd)})).get("config") or {}
+        except (_RpcError, TimeoutError) as error:
+            raise Unavailable(f"Codex didn't say which MCP servers it has, so wf can't keep them out: {error}") from error
+        off = {"enabled": False}
+        return {"mcp_servers": {name: off for name in found.get("mcp_servers") or {}},
+                "plugins": {name: off for name in found.get("plugins") or {}}}
 
     def pending_usage(self) -> Usage:
         return Usage(tokens=self._total - self._turn_start) if self.turn else Usage()
@@ -243,7 +269,9 @@ class CodexSession:
         elif kind == "webSearch":
             self.spec.emit({"event": "agent_tool", "tool": "web search", "detail": short(item.get("query") or "", 80)})
         elif kind in ("mcpToolCall", "dynamicToolCall"):
-            self.spec.emit({"event": "agent_tool", "tool": item.get("tool") or kind, "detail": ""})
+            name = item.get("tool") or kind  # a wf tool's is linear.list_issues, as on the other harnesses
+            self.spec.emit({"event": "agent_tool", "tool": f"{item['namespace']}.{name}" if item.get("namespace") else name,
+                            "detail": ""})
 
     def _record(self, item: dict) -> None:
         kind = item.get("type")
@@ -252,6 +280,9 @@ class CodexSession:
         elif kind == "commandExecution":
             transcript(self.spec.log, "command", command=item.get("command"), exit_code=item.get("exitCode"),
                        output=short(item.get("aggregatedOutput") or "", 2000))
+        elif kind == "dynamicToolCall" and item.get("namespace") in {server.name for server in self.spec.tools}:
+            transcript(self.spec.log, "tool", item={key: value for key, value in item.items() if key != "contentItems"},
+                       kept=False, characters=sum(len(c.get("text") or c.get("imageUrl") or "") for c in item.get("contentItems") or []))
         elif kind in ("fileChange", "webSearch", "mcpToolCall", "dynamicToolCall"):
             transcript(self.spec.log, "tool", item=item)
 
@@ -277,6 +308,7 @@ class _Connection:
         self.ids = itertools.count(1)
         self.pending: dict[int, asyncio.Future] = {}
         self.threads: dict[str, CodexSession] = {}
+        self.answering: set[asyncio.Task] = set()  # replies to the app server's requests, in progress
         self.dead: str | None = None  # why the connection ended, once it has
         self.reader = asyncio.ensure_future(self._read())
 
@@ -321,7 +353,9 @@ class _Connection:
                 except json.JSONDecodeError:
                     continue
                 if "method" in message and "id" in message:
-                    await self._answer(message)
+                    task = asyncio.ensure_future(self._answer(message))
+                    self.answering.add(task)
+                    task.add_done_callback(self.answering.discard)
                 elif "method" in message:
                     session = self.threads.get((message.get("params") or {}).get("threadId"))
                     if session is not None:
@@ -348,21 +382,27 @@ class _Connection:
         method, params, request_id = message["method"], message.get("params") or {}, message["id"]
         try:
             if method == "item/tool/call":
-                result = self._tool_call(params)
+                result = await self._tool_call(params)
             elif method in DECLINE:
                 result = DECLINE[method]
             elif method == "currentTime/read":
                 result = {"currentTimeAt": int(time.time())}
             else:
-                await self._write({"id": request_id, "error": {"code": -32601, "message": f"wf doesn't handle {method}"}})
-                return
+                result = None
         except Exception as error:  # never leave the app server waiting
             result = _tool_reply(f"Error: {type(error).__name__}: {error}", False)
-        await self._write({"id": request_id, "result": result})
+        reply = {"result": result} if result is not None else {
+            "error": {"code": -32601, "message": f"wf doesn't handle {method}"}}
+        with contextlib.suppress(OSError):  # the app server is gone: the reader notices that
+            await self._write({"id": request_id, **reply})
 
-    def _tool_call(self, params: dict) -> dict:
+    async def _tool_call(self, params: dict) -> dict:
         session = self.threads.get(params.get("threadId"))
-        if session is None or params.get("tool") != output_tool.NAME:
+        server = next((t for t in session.spec.tools if t.name == params.get("namespace")), None) if session else None
+        if server is not None:
+            content, is_error = await server.call(params.get("tool"), params.get("arguments"))
+            return {"success": not is_error, "contentItems": [_content_item(block) for block in content]}
+        if session is None or params.get("namespace") or params.get("tool") != output_tool.NAME:
             return _tool_reply(f"Error: there's no tool called `{params.get('tool')}` here. "
                                f"Call `{output_tool.NAME}` with your result.", False)
         text, is_error = session.spec.tool.submit(params.get("arguments"))  # (item/started already showed the call)
@@ -382,14 +422,29 @@ class _Connection:
                     self.process.kill()
                 await self.process.wait()
         self.reader.cancel()
+        for task in self.answering:
+            task.cancel()
         # gather() hands back the reader's own cancellation as a value, but still lets a
         # cancellation of this task (Ctrl-C during teardown) through
-        await asyncio.gather(self.reader, return_exceptions=True)
+        await asyncio.gather(self.reader, *self.answering, return_exceptions=True)
         self.stderr.close()
 
 
 def _tool_reply(text: str, success: bool) -> dict:
     return {"success": success, "contentItems": [{"type": "inputText", "text": text}]}
+
+
+def _namespace(server) -> dict:
+    """A wf tool as a namespace of dynamic tools: the operations its node may use."""
+    return {"type": "namespace", "name": server.name, "description": server.description,
+            "tools": [{"type": "function", "name": op.name, "description": op.description, "inputSchema": op.input_schema}
+                      for op in server.operations]}
+
+
+def _content_item(block: dict) -> dict:
+    if block.get("type") == "image":
+        return {"type": "inputImage", "imageUrl": f"data:{block['mimeType']};base64,{block['data']}"}
+    return {"type": "inputText", "text": block.get("text", "")}
 
 
 def _code(error: dict):

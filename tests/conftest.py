@@ -1,12 +1,17 @@
-"""Shared test setup: wf's own folder (~/.wf) goes to a fresh temp folder in every test,
-outside the test's repo, as the real ~/.wf is. A cap on agent sessions set where the
-tests run (WF_MAX_AGENTS) doesn't apply to them. Runs go in the repo's .wf/runs unless a
-test sets a runs folder itself. The runner's git and the tests' own git commands read none
-of your global or system config, so a global config that signs commits with a key that waits
-for a touch doesn't stop the tests' commits. (The agents' git tool drops these variables, so
-it still reads your ~/.gitconfig.)"""
+"""Shared test setup:
+- wf's own folder (~/.wf) goes to a fresh temp folder in every test, outside the
+  test's repo, as the real ~/.wf is;
+- a cap on agent sessions set where the tests run (WF_MAX_AGENTS) doesn't apply to them;
+- runs go in the repo's .wf/runs unless a test sets a runs folder itself;
+- the runner's git and the tests' own git commands read none of your global or system
+  config, so a global config that signs commits with a key that waits for a touch doesn't
+  stop the tests' commits (the agents' git tool drops these variables, so it still reads
+  your ~/.gitconfig);
+- the keyring is an empty one in memory, so no test reads or writes your real Keychain."""
 
+import keyring
 import pytest
+from keyring.backend import KeyringBackend
 
 
 @pytest.fixture(autouse=True)
@@ -24,3 +29,29 @@ def no_git_config(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for name in ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"):  # config set in the environment
         monkeypatch.delenv(name, raising=False)
+
+
+class FakeKeyring(KeyringBackend):
+    priority = 1
+
+    def __init__(self):
+        super().__init__()
+        self.items: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service, username):
+        return self.items.get((service, username))
+
+    def set_password(self, service, username, password):
+        self.items[(service, username)] = password
+
+    def delete_password(self, service, username):
+        self.items.pop((service, username), None)
+
+
+@pytest.fixture(autouse=True)
+def fake_keyring():
+    previous = keyring.get_keyring()
+    fake = FakeKeyring()
+    keyring.set_keyring(fake)
+    yield fake
+    keyring.set_keyring(previous)

@@ -7,6 +7,11 @@
     wf run <file> [name=value ...]   validate, then run it (runner.py)
     wf resume <run-id>               continue a paused or failed run
 
+Tools that agent nodes can use (`tools: [slack, ...]`; workflow/tools/):
+    wf tools list                    each tool, how it signs in, and whether it's set up
+    wf tools <name> setup            sign in once; the secret goes to the macOS Keychain
+    wf tools <name> doctor           check that a tool works; `wf tools doctor` checks them all
+
 For an operator that isn't at a terminal (operate.py):
     wf run <file> --detach --json    start in the background
     wf wait <run-id>                 block until the run needs attention
@@ -30,12 +35,17 @@ tell a pause from a typo.
 """
 
 import argparse
+import asyncio
+import getpass
 import json
 import re
 import sys
+import webbrowser
 from pathlib import Path
 
 from . import diagram, firstmate, operate, report, runner, runs, spec, validate, workspaces
+from .tools import keychain, signin
+from .tools.catalog import TOOLS
 
 STARTER = """\
 version: 1
@@ -160,6 +170,23 @@ def main(argv: list[str] | None = None) -> int:
                                  "the run's work (a dry run's always go)")
     discarding.add_argument("--runs-dir", **runs_dir)
     discarding.set_defaults(handler=_discard)
+
+    tools = commands.add_parser("tools", help="set up and check the tools agents can use: Slack, Linear, ...")
+    tool_commands = tools.add_subparsers(dest="tools_command", required=True, parser_class=_Parser)
+    tool_commands.add_parser("list", help="each tool, how it signs in, and whether it's set up").set_defaults(handler=_tools_list)
+    tool_commands.add_parser("doctor", help="check every tool").set_defaults(handler=_tools_doctor, tool=None)
+    for tool in TOOLS.values():
+        actions = tool_commands.add_parser(tool.name, help=f"{tool.title}, through {tool.url}").add_subparsers(
+            dest="action", required=True, parser_class=_Parser)
+        setup = actions.add_parser("setup", help=f"sign in to {tool.title}; the secret goes to the macOS Keychain")
+        setup.add_argument("--port", type=int, default=signin.PORT,
+                           help=f"where to wait for the browser's redirect (default {signin.PORT})")
+        if tool.token:
+            setup.add_argument("--token", action="store_true", help=f"paste a {tool.token} instead")
+        if tool.write_scopes:
+            setup.add_argument("--write", action="store_true", help="ask for the write scopes too, for nodes with `write: true`")
+        setup.set_defaults(handler=_tools_setup, tool=tool.name, token=False, write=False)
+        actions.add_parser("doctor", help=f"check that {tool.title} works").set_defaults(handler=_tools_doctor, tool=tool.name)
 
     integrate = commands.add_parser("integrate", help="connect wf to another tool")
     integrate.add_argument("tool", choices=["firstmate"])
@@ -385,6 +412,50 @@ def _integrate(args) -> int:
         return 1
     print(firstmate.instructions(dest, manifest))
     return 0
+
+
+def _tools_list(args) -> int:
+    for tool in TOOLS.values():
+        try:
+            stored = keychain.load(tool.name)
+        except keychain.Unavailable:
+            status = "can't tell"  # no keyring to look in
+        else:
+            status = "not set up" if stored is None else "set up" if keychain.can_write(stored) else "reads only"
+        print(f"{tool.name:<9} {status:<11} {tool.url}\n{'':<21} sign-in: {tool.sign_in}")
+    return 0
+
+
+def _tools_setup(args) -> int:
+    from .tools import doctor  # loads the MCP client
+
+    tool = TOOLS[args.tool]
+    if not sys.stdin.isatty():
+        print(f"wf tools {tool.name} setup: run it at a terminal, since it asks you to sign in", file=sys.stderr)
+        return 1
+    try:
+        stored = asyncio.run(signin.setup(tool, port=args.port, token=args.token, write=args.write, say=print, ask=input,
+                                          ask_secret=getpass.getpass, open_url=webbrowser.open))
+        keychain.save(tool.name, stored)
+    except (signin.SetupFailed, signin.Unreachable, keychain.Unavailable) as error:
+        print(f"wf tools {tool.name} setup: {error}", file=sys.stderr)
+        return 1
+    print(f"Saved the {tool.title} sign-in in the macOS Keychain. Checking that it works:")
+    found = asyncio.run(doctor.check(tool))
+    print(found.text())
+    return 0 if found.status == "pass" else 1
+
+
+def _tools_doctor(args) -> int:
+    """Exit code 1 when a tool fails, or when the one tool asked about isn't set up."""
+    from .tools import doctor  # loads the MCP client
+
+    async def check_all():
+        return await asyncio.gather(*(doctor.check(TOOLS[name]) for name in ([args.tool] if args.tool else TOOLS)))
+
+    found = asyncio.run(check_all())
+    print("\n".join(report.text() for report in found))
+    return 1 if any(r.status == "fail" or (args.tool and r.status != "pass") for r in found) else 0
 
 
 def _graph(args) -> int:

@@ -9,6 +9,16 @@ calls it like any tool, and the call arrives here as a Python function call.
 Claude Code names MCP tools mcp__<server>__<tool>, so the agent sees
 mcp__wf__submit_result.
 
+wf tools (spec.tools) are in-process MCP servers too, one per tool, named after
+it: the agent sees mcp__slack__slack_read_channel, and each call comes back
+here to be passed on (tools/relay.py). Each operation the node may use is in
+allowed_tools; the server lists no others. A node that lists `tools` gets no
+other MCP server: strict_mcp_config leaves out the repo's and your own, and
+ENABLE_CLAUDEAI_MCP_SERVERS=false your claude.ai connectors, which Claude Code
+would otherwise load at `full` access. What a wf tool returns stays out of
+the transcript, which notes only its size: it's other people's messages and
+mail, and the run folder outlives the session.
+
 Access levels (`options()`):
 - read-only: Read, Grep and Glob, plus the runner's own `git` tool
   (git_tool.py) for diff, log, show, blame and status. No shell: even
@@ -73,6 +83,7 @@ GIT = f"mcp__{SERVER}__{git_tool.NAME}"
 SEARCH = ["Read", "Grep", "Glob"]
 WEB = ["WebSearch", "WebFetch"]
 API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+CONNECTORS = "ENABLE_CLAUDEAI_MCP_SERVERS"  # false: Claude Code loads none of your claude.ai connectors
 
 
 class ClaudeCode:
@@ -102,6 +113,10 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
         tools, allowed, mode, disallowed = None, [], "bypassPermissions", ([] if spec.web else list(WEB))
     use_api_key = os.environ.get("WF_CLAUDE_AUTH") == "api-key"
     own_tools = [_submit_tool(spec.tool)] + ([_git_tool(spec.cwd)] if spec.access == "read-only" else [])
+    servers = {SERVER: create_sdk_mcp_server(SERVER, tools=own_tools)}
+    for server in spec.tools:
+        servers[server.name] = create_sdk_mcp_server(server.name, tools=[_relayed(server, op) for op in server.operations])
+        allowed += [f"mcp__{server.name}__{op.name}" for op in server.operations]
     budget = spec.budget_usd
     if budget is not None and spec.fork_from:
         budget += spec.prior_cost_usd  # the SDK caps the session's total, which includes what it was forked from
@@ -117,8 +132,10 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
         permission_mode=mode,
         setting_sources=["project"],
         system_prompt={"type": "preset", "preset": "claude_code"},
-        mcp_servers={SERVER: create_sdk_mcp_server(SERVER, tools=own_tools)},
-        env={} if use_api_key else {name: "" for name in API_KEY_VARS},
+        mcp_servers=servers,
+        strict_mcp_config=spec.only_wf_tools,
+        env={**({} if use_api_key else {name: "" for name in API_KEY_VARS}),
+             **({CONNECTORS: "false"} if spec.only_wf_tools else {})},
         resume=spec.fork_from,
         fork_session=spec.fork_from is not None,
     )
@@ -131,6 +148,21 @@ def _submit_tool(result_tool: ResultTool):
         return {"content": [{"type": "text", "text": text}], "is_error": is_error}
 
     return submit_result
+
+
+def _relayed(server, operation):
+    """One operation of a wf tool, as an SDK MCP tool that passes each call on."""
+
+    schema = operation.input_schema
+    if schema.get("type") == "object" and "properties" not in schema:  # the SDK would read its keys as parameters
+        schema = {**schema, "properties": {}}
+
+    @tool(operation.name, operation.description, schema, annotations=operation.annotations)
+    async def relay(args: dict) -> dict:
+        content, is_error = await server.call(operation.name, args)
+        return {"content": content, "is_error": is_error}
+
+    return relay
 
 
 def _git_tool(cwd):
@@ -150,6 +182,8 @@ class ClaudeSession:
         self._cost_so_far = spec.prior_cost_usd if spec.fork_from else 0.0  # the running total, as last reported
         self._turn = Usage()  # tokens of the turn in progress, from its assistant messages
         self._seen: set[str] = set()  # message ids already counted in _turn
+        self._relayed: set[str] = set()  # ids of the calls to wf tools, whose results aren't kept
+        self._tool_prefixes = tuple(f"mcp__{server.name}__" for server in spec.tools)
 
     async def start(self) -> None:
         self._client = ClaudeSDKClient(options(self.spec))
@@ -183,11 +217,16 @@ class ClaudeSession:
                     if isinstance(block, TextBlock) and block.text.strip():
                         transcript(log, "text", text=block.text)
                     elif isinstance(block, ToolUseBlock):
+                        if block.name.startswith(self._tool_prefixes):
+                            self._relayed.add(block.id)
                         transcript(log, "tool", name=block.name, input=block.input)
                         emit({"event": "agent_tool", "tool": _tool_name(block.name), "detail": _detail(block, self.spec.cwd)})
             elif isinstance(item, UserMessage) and isinstance(item.content, list):
                 for block in item.content:
-                    if isinstance(block, ToolResultBlock):
+                    if isinstance(block, ToolResultBlock) and block.tool_use_id in self._relayed:
+                        transcript(log, "tool_result", is_error=bool(block.is_error), kept=False,
+                                   characters=len(str(block.content)))
+                    elif isinstance(block, ToolResultBlock):
                         transcript(log, "tool_result", is_error=bool(block.is_error), content=short(block.content, 2000))
             elif isinstance(item, RateLimitEvent):
                 info = item.rate_limit_info
@@ -229,7 +268,12 @@ def _login_problem(result: ResultMessage) -> bool:
 
 
 def _tool_name(name: str) -> str:
-    return name.removeprefix(f"mcp__{SERVER}__")
+    """For progress lines: mcp__wf__submit_result is submit_result, and a wf tool's
+    mcp__linear__list_issues is linear.list_issues, as on the other harnesses."""
+    if name.startswith(f"mcp__{SERVER}__") or not name.startswith("mcp__"):
+        return name.removeprefix(f"mcp__{SERVER}__")
+    server, _, operation = name.removeprefix("mcp__").partition("__")
+    return f"{server}.{operation}"
 
 
 def _detail(block: ToolUseBlock, cwd) -> str:

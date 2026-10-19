@@ -40,6 +40,14 @@ submit_result is a tool on an MCP server the harness runs (mcp_http.py), given
 to session/new as the server `wf`. Each session gets its own URL, so a call
 can only reach the attempt it belongs to.
 
+wf tools (spec.tools) are served the same way: each tool gets a URL of its own
+on that server, named after the tool (`linear`), with the operations its node
+may use. A call comes back to the runner, which passes it on to the vendor
+(tools/relay.py), so Cursor never sees the vendor's token. The transcript keeps
+such a call's input and outcome, but not what the vendor returned. A node that
+lists `tools` may call no other MCP server's tools, at any access level: its
+own config folder already holds none of yours, and permit() refuses the rest.
+
 Access levels: the node never stops to ask. Permission requests are answered
 from its level with "allow once" or "reject", never "allow always", which
 Cursor would save.
@@ -226,6 +234,7 @@ class CursorSession:
         self.folder: Path | None = None  # this process's config folder
         self.rpc: _Connection | None = None
         self.url = ""  # this session's MCP server
+        self.tool_urls: list[str] = []  # its wf tools' servers
         self.prompt: asyncio.Future | None = None  # the running session/prompt
         self.turn = False  # updates count only while a turn runs (session/load replays history)
         self.calls: dict[str, dict] = {}  # tool calls in progress, as their updates describe them
@@ -246,8 +255,12 @@ class CursorSession:
             tools.append(mcp_http.Tool(git_tool.NAME, git_tool.DESCRIPTION, git_tool.SCHEMA, self._git))
         self.folder = harness.folder(spec.access)
         self.url = harness.tools.add(tools)
-        command = [*harness.command, "--model", spec.model, *FLAGS, "acp"]
         servers = [{"type": "http", "name": SERVER, "url": self.url, "headers": []}]
+        for server in spec.tools:
+            self.tool_urls.append(harness.tools.add([mcp_http.Tool(op.name, op.description, op.input_schema, _relay(server, op.name))
+                                                     for op in server.operations]))
+            servers.append({"type": "http", "name": server.name, "url": self.tool_urls[-1], "headers": []})
+        command = [*harness.command, "--model", spec.model, *FLAGS, "acp"]
         try:
             if saved is not None:  # Cursor loads a session from its own config folder
                 self.id = spec.fork_from  # set first: close() puts the session back even if loading fails
@@ -329,7 +342,8 @@ class CursorSession:
         """The answer to session/request_permission: the node's access level decides."""
         asked = params.get("toolCall") or {}
         call = {**self.calls.get(asked.get("toolCallId"), {}), **{k: v for k, v in asked.items() if v}}
-        allowed = allows(self.spec.access, self.spec.web, self.spec.cwd, call)
+        allowed = allows(self.spec.access, self.spec.web, self.spec.cwd, call, {SERVER, *(t.name for t in self.spec.tools)},
+                         only_these=self.spec.only_wf_tools)
         transcript(self.spec.log, "permission", tool_kind=call.get("kind"), title=call.get("title"), allowed=allowed)
         return choose(params.get("options") or [], allowed)
 
@@ -342,8 +356,11 @@ class CursorSession:
             self.spec.emit({"event": "agent_tool", "tool": _label(call), "detail": _detail(call, self.spec.cwd)})
         elif status in ("completed", "failed"):
             self.calls.pop(update.get("toolCallId"), None)
+            output = call.get("rawOutput") or call.get("content") or ""
+            relayed = (call.get("rawInput") or {}).get("providerIdentifier") in {server.name for server in self.spec.tools}
+            kept = {"kept": False, "characters": len(json.dumps(output))} if relayed else {"output": short(output, 2000)}
             transcript(self.spec.log, "tool", title=call.get("title"), tool_kind=call.get("kind"), status=status,
-                       input=call.get("rawInput"), output=short(call.get("rawOutput") or call.get("content") or "", 2000))
+                       input=call.get("rawInput"), **kept)
 
     def _flush(self) -> None:
         if self.text.strip():
@@ -368,9 +385,10 @@ class CursorSession:
                             await asyncio.wait_for(self.prompt, 5)
                 finally:
                     await self.rpc.stop()
-        finally:  # even when cancelled: the URL must stop reaching this attempt
-            if self.url and self.harness.tools is not None:
-                self.harness.tools.remove(self.url)
+        finally:  # even when cancelled: the URLs must stop reaching this attempt
+            if self.harness.tools is not None:
+                for url in filter(None, [self.url, *self.tool_urls]):
+                    self.harness.tools.remove(url)
             if self.continuing is not None and self.succeeded:
                 self.continuing.unlink(missing_ok=True)
             if self.folder is not None:
@@ -399,21 +417,35 @@ def notice(message: str) -> str:
     return text[starts[-1] + 2:] if starts else ""
 
 
+def _relay(server, operation: str):
+    """One operation of a wf tool, for mcp_http.Tool: the call goes to the vendor through tools/relay.py."""
+
+    async def call(arguments: dict) -> tuple[list[dict], bool]:
+        return await server.call(operation, arguments)
+
+    return call
+
+
 def _effective(result: dict) -> dict:
     """The model and model parameters a new or loaded session reports it uses."""
     options = result.get("configOptions") if isinstance(result, dict) else None
     return {o.get("id"): o.get("currentValue") for o in options or [] if isinstance(o, dict) and o.get("id") != "mode"}
 
 
-def allows(access: str, web: bool, cwd: Path, call: dict) -> bool:
-    """Is what a permission request asks for within the node's access level?"""
+def allows(access: str, web: bool, cwd: Path, call: dict, servers: set[str] = frozenset({SERVER}),
+           only_these: bool = False) -> bool:
+    """Is what a permission request asks for within the node's access level? `servers`: the MCP
+    servers wf gave the session, wf's own and its tools'. `only_these`: the node lists `tools`,
+    so no other server's tools, even at `full`."""
     kind = call.get("kind")
     if kind in ("fetch", "search"):  # web fetch and web search: searching files never asks
         return web
+    if kind == "other" and only_these:
+        return (call.get("rawInput") or {}).get("providerIdentifier") in servers
     if kind == "read" or access == "full":
         return True
-    if kind == "other":  # an MCP tool: only wf's own
-        return (call.get("rawInput") or {}).get("providerIdentifier") == SERVER
+    if kind == "other":  # an MCP tool: only on a server wf gave it
+        return (call.get("rawInput") or {}).get("providerIdentifier") in servers
     if access == "edit" and kind == "execute":
         return True
     if access == "edit" and kind in ("edit", "delete", "move"):
@@ -441,7 +473,10 @@ def _paths(call: dict) -> list[str]:
 
 
 def _label(call: dict) -> str:
-    tool = (call.get("rawInput") or {}).get("toolName")  # an MCP tool: submit_result, git
+    data = call.get("rawInput") or {}
+    tool, server = data.get("toolName"), data.get("providerIdentifier")  # an MCP tool: submit_result, git, ...
+    if tool and server not in (None, SERVER):
+        return f"{server}.{tool}"  # a wf tool's is linear.list_issues, as on the other harnesses
     return tool or LABELS.get(call.get("kind"), call.get("kind") or "tool")
 
 
