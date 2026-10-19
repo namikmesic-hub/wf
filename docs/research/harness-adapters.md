@@ -34,6 +34,9 @@ The spec changes this implies are listed at the [end](#4-proposed-spec-changes).
 
 ## 1. The three harnesses side by side
 
+The Cursor column describes the `cursor-sdk` design. [Section 6](#6-cursor-through-acp)
+replaced it on 2026-10-19 with `cursor-agent acp`, which runs on the local login.
+
 | | Claude Code | Codex | Cursor |
 |---|---|---|---|
 | **From Python** | `claude-agent-sdk`: one CLI process per session | `codex app-server` over stdio: one process per run, many threads | `cursor-sdk`: one bundled Node "bridge" per run, many agents |

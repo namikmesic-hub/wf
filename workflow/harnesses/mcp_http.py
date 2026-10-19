@@ -8,6 +8,9 @@ call can only reach the tools of the session it was given to; remove() ends
 the URL when the session closes.
 
 It speaks the part of MCP's Streamable HTTP transport an agent uses:
+- a request with an Origin header that isn't 127.0.0.1 or localhost gets 403,
+  so a web page in a browser can't reach the tools, and one naming a protocol
+  version it doesn't know (MCP-Protocol-Version) gets 400;
 - a POSTed request gets its reply as one JSON body, and a notification gets
   202 Accepted;
 - GET, which would open a stream for messages the server starts, gets 405, as
@@ -23,10 +26,12 @@ import json
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
-VERSION = "2025-06-18"  # offered when the client names no protocol version
+VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")  # MCP versions this subset fits; the last is offered
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 MAX_BODY = 16 * 1024 * 1024
-REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 404: "Not Found", 405: "Method Not Allowed"}
+REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed"}
 
 
 @dataclass
@@ -76,12 +81,18 @@ class Server:
         finally:
             writer.close()
 
-    async def _handle(self, method: str, path: str, body: bytes) -> tuple[int, dict | None]:
+    async def _handle(self, method: str, path: str, headers: dict, body: bytes) -> tuple[int, dict | None]:
+        origin = headers.get("origin")
+        if origin is not None and _host(origin) not in LOOPBACK:
+            return 403, None
         tools = self.routes.get(path.removeprefix("/mcp/")) if path.startswith("/mcp/") else None
         if tools is None:
             return 404, None
         if method != "POST":
             return 405, None
+        version = headers.get("mcp-protocol-version")
+        if version is not None and version not in VERSIONS:
+            return 400, _error(None, -32600, f"unsupported MCP-Protocol-Version {version}; this server speaks {', '.join(VERSIONS)}")
         try:
             message = json.loads(body)
         except ValueError:
@@ -96,7 +107,8 @@ class Server:
 async def _answer(message: dict, tools: list[Tool]) -> dict:
     method, params, request_id = message["method"], message.get("params") or {}, message["id"]
     if method == "initialize":
-        result = {"protocolVersion": params.get("protocolVersion") or VERSION, "capabilities": {"tools": {}},
+        asked = params.get("protocolVersion")
+        result = {"protocolVersion": asked if asked in VERSIONS else VERSIONS[-1], "capabilities": {"tools": {}},
                   "serverInfo": {"name": "wf", "version": "0.1.0"}}
     elif method == "ping":
         result = {}
@@ -121,8 +133,15 @@ def _error(request_id, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-async def _read(reader: asyncio.StreamReader) -> tuple[str, str, bytes] | None:
-    """One request: (method, path, body), or None when the client closed the connection."""
+def _host(origin: str) -> str | None:
+    try:
+        return urlsplit(origin).hostname
+    except ValueError:
+        return None
+
+
+async def _read(reader: asyncio.StreamReader) -> tuple[str, str, dict, bytes] | None:
+    """One request: (method, path, headers, body), or None when the client closed the connection."""
     line = b"\r\n"
     while line in (b"\r\n", b"\n"):  # a client may send a blank line between requests
         line = await reader.readline()
@@ -146,4 +165,4 @@ async def _read(reader: asyncio.StreamReader) -> tuple[str, str, bytes] | None:
         if length > MAX_BODY:
             raise ValueError("body too large")
         body = await reader.readexactly(length)
-    return method, path, body
+    return method, path, headers, body

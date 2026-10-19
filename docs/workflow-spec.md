@@ -659,7 +659,8 @@ Each agent attempt gets one tool, `submit_result`. Its input schema is the node'
 - **Codex**: a dynamic tool, declared when the thread starts. The app server sends each call
   to the runner as an `item/tool/call` request on the same connection.
 - **Cursor**: an MCP server the runner serves over HTTP on 127.0.0.1, given to Cursor when
-  the session starts. Each session gets its own URL, with an unguessable token in it.
+  the session starts. Each session gets its own URL, with an unguessable token in it. A
+  request from a web page (an Origin header that isn't 127.0.0.1 or localhost) gets no answer.
 
 Each call arrives tied to its session (a process, a thread id or a session's URL), so a
 result can only reach the attempt it belongs to.
