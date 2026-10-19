@@ -566,6 +566,71 @@ def test_a_node_that_writes_with_a_read_only_sign_in_gets_a_warning(repo):
                                         "run `wf tools linear setup --write`")]
 
 
+def shell_flow(harness: str, access: str, extra: str = "", tools: str = "[linear]") -> str:
+    Path("flow.yaml").write_text(dedent(f"""
+        version: 1
+        name: shell
+        defaults:
+          harnesses: {{claude-code: {{model: opus}}, cursor: {{model: composer-2.5}}}}
+        start: {{input: {{}}}}
+        nodes:
+          brief:
+            needs: [start]
+            harness: {harness}
+            access: {access}
+            tools: {tools}
+            instruction: Write up the open issues
+        """) + "".join(f"    {line}\n" for line in extra.splitlines() if line) + "end: {output: {}}\n")
+    return "flow.yaml"
+
+
+@pytest.mark.parametrize("harness, access, reaches", [
+    ("claude-code", "read-only", False), ("claude-code", "edit", True), ("claude-code", "full", True),
+    ("codex", "read-only", False), ("codex", "edit", False), ("codex", "full", True),
+    ("cursor", "read-only", False), ("cursor", "edit", True), ("cursor", "full", True),
+])
+def test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in(repo, harness, access, reaches):
+    keychain.save("linear", {"method": "token", "access_token": "x"})
+    found = problems(shell_flow(harness, access))
+    expected = [("error", "nodes.brief", f"this node has linear, and can run on {harness} at `{access}` access, where its "
+                                          "commands could read every stored sign-in: give the tools to a read-only node, "
+                                          "or one on Codex at `edit`, or set `tools_with_shell: true` to accept that")]
+    assert found == (expected if reaches else [])
+
+
+def test_a_node_that_opts_in_gets_a_warning_naming_it_and_its_tools(repo):
+    keychain.save("linear", {"method": "token", "access_token": "x"})
+    keychain.save("slack", {"method": "token", "access_token": "x"})
+    assert problems(shell_flow("cursor", "full", "tools_with_shell: true", tools="[linear, slack]")) == [
+        ("warning", "nodes.brief", "`tools_with_shell: true`: the agent of `brief` has linear, slack, and its commands on "
+                                   "cursor at `full` access could read every stored sign-in")]
+
+
+def test_a_harness_list_names_each_harness_whose_shell_reaches_the_keychain(repo):
+    keychain.save("linear", {"method": "token", "access_token": "x"})
+    flow_text = Path(shell_flow("[codex, claude-code, cursor]", "edit")).read_text().replace(
+        "harnesses: {claude-code: {model: opus}, cursor: {model: composer-2.5}}",
+        "harnesses: {claude-code: {model: opus}, cursor: {model: composer-2.5}}\n  model: {claude-code: opus, codex: gpt-6, cursor: composer-2.5}")
+    Path("flow.yaml").write_text(flow_text)
+    (level, where, message), = problems("flow.yaml")
+    assert (level, where) == ("error", "nodes.brief") and "can run on claude-code and cursor at `edit` access" in message
+
+
+@pytest.mark.parametrize("extra, tools, found", [
+    ("", "[]", []),  # no tools: nothing to read
+    ("tools_with_shell: \"yes\"", "[linear]", [("error", "nodes.brief.tools_with_shell", "Input should be a valid boolean")]),
+])
+def test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools(repo, extra, tools, found):
+    keychain.save("linear", {"method": "token", "access_token": "x"})
+    assert problems(shell_flow("claude-code", "full", extra, tools=tools)) == found
+
+
+def test_tools_with_shell_goes_on_the_node_not_in_defaults(repo):
+    text = Path(shell_flow("claude-code", "read-only")).read_text().replace("defaults:\n", "defaults:\n  tools_with_shell: true\n")
+    Path("flow.yaml").write_text(text)
+    assert ("error", "defaults.tools_with_shell", "unknown key") in problems("flow.yaml")
+
+
 def test_tools_in_defaults_reach_every_agent_node(repo):
     text = Path(flow("[linear]")).read_text().replace("    tools: [linear]\n", "").replace(
         "defaults:\n", "defaults:\n  tools: [notion]\n")

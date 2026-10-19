@@ -69,6 +69,8 @@ For example `tools: [slack, granola, linear, notion, gmail]`.
 An entry gets only the tool's read operations.
 `{name: linear, write: true}` gets every operation the server offers, deleting and signing out included.
 A node with `tools`, even `tools: []`, gets no other MCP server or connector, at any access level.
+With tools, Claude Code and Cursor at `edit` or `full`, and Codex at `full`, need `tools_with_shell: true` on the node.
+Their commands could read every stored sign-in, so validate errors without it, and warns with it.
 Each tool is set up once per machine with `wf tools <name> setup`, and `wf validate` warns about one that isn't.
 For Slack and Linear, `setup --write` asks for the write scopes too, which a node with `write: true` needs.
 docs/tools.md lists the reads.

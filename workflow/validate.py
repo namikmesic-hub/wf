@@ -29,7 +29,7 @@ import itertools
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import schemas, spec, templates
+from . import harnesses, schemas, spec, templates
 from .scheduler import END, START, Topology
 from .schemas import ANY, EACH, NoField
 from .spec import HARNESSES, NODE_ID, RESERVED, Problem, SpecError, Workflow
@@ -338,8 +338,7 @@ class _Checker:
             if refs and name == "instruction":
                 self._web_to_full(f"{at}.instruction", refs, node_id)
         if node.kind == "agent":
-            self._harness(node_id)
-            self._tools(node_id)
+            self._tools(node_id, self._harness(node_id))
         if node.kind == "workflow":
             self._with(node_id)
         for i, route in enumerate(node.routes):
@@ -531,12 +530,13 @@ class _Checker:
                 self.warn(where, f"an agent with `access: full` reads output from `{source}`, which reads {', '.join(tools)}; "
                                  "messages, notes and mail that other people write can carry instructions aimed at agents")
 
-    def _harness(self, node_id: str) -> None:
+    def _harness(self, node_id: str) -> set[str]:
+        """Check the node's harness; returns the harnesses it can run on, as far as validate can tell."""
         node, at = self.nodes[node_id], f"nodes.{node_id}"
         harness = self.wf.setting(node_id, "harness")
         if harness is None:
             self.error(at, "no harness: set `harness` here or `defaults.harness`")
-            return
+            return set()
         where = f"{at}.harness" if node.harness is not None else "defaults.harness"
         choices = ", ".join(HARNESSES)
         possible: set[str] = set()
@@ -570,6 +570,7 @@ class _Checker:
         if not possible and isinstance(harness, str) and ("{{" in harness or "{%" in harness):
             possible = self._named_by(harness, node_id)
         self._model_and_effort(node_id, possible or set(HARNESSES))
+        return possible
 
     def _named_by(self, harness: str, node_id: str) -> set[str]:
         """The harnesses a template like "{{ item.harness }}" can give, from its field's enum; none known otherwise."""
@@ -597,11 +598,24 @@ class _Checker:
             if any(ref.name == "session" for ref in refs):
                 self.error(where, "`session` isn't available here: the model and effort are chosen before the session starts")
 
-    def _tools(self, node_id: str) -> None:
-        """The node's own `tools` (defaults.tools are checked once, in run())."""
-        node = self.nodes[node_id]
+    def _tools(self, node_id: str, possible: set[str]) -> None:
+        """The node's own `tools` (defaults.tools are checked once, in run()), and whether its agent
+        could have them with a shell that reaches the Keychain, where every sign-in is stored."""
+        node, at = self.nodes[node_id], f"nodes.{node_id}"
         if node.tools is not None:
-            self._tool_list(f"nodes.{node_id}.tools", node.tools)
+            self._tool_list(f"{at}.tools", node.tools)
+        uses, access = self.wf.setting(node_id, "tools") or [], self.wf.setting(node_id, "access")
+        reaching = " and ".join(sorted(name for name in possible if harnesses.reaches_keychain(name, access)))
+        if not uses or not reaching:
+            return
+        listed = ", ".join(use.name for use in uses)
+        if node.tools_with_shell:
+            self.warn(at, f"`tools_with_shell: true`: the agent of `{node_id}` has {listed}, and its commands on {reaching} "
+                          f"at `{access}` access could read every stored sign-in")
+        else:
+            self.error(at, f"this node has {listed}, and can run on {reaching} at `{access}` access, where its commands could "
+                           "read every stored sign-in: give the tools to a read-only node, or one on Codex at `edit`, "
+                           "or set `tools_with_shell: true` to accept that")
 
     def _tool_list(self, where: str, uses: list) -> None:
         seen = set()

@@ -208,11 +208,50 @@ def test_cursor_refuses_other_mcp_servers_tools_for_a_node_with_tools_even_at_fu
     yours = {"kind": "other", "title": "notes: read_notes", "rawInput": {"providerIdentifier": "notes", "toolName": "read_notes"}}
     log = cursor(monkeypatch, repo, [{"permission": yours}, {"tool": {"arguments": {"summary": "done"}}}])
     text = Path(flow("[linear]", harness="cursor")).read_text()
-    Path("flow.yaml").write_text(text.replace("    tools: [linear]\n", "    tools: [linear]\n    access: full\n"))
+    Path("flow.yaml").write_text(text.replace("    tools: [linear]\n", "    tools: [linear]\n    access: full\n    tools_with_shell: true\n"))
     assert cli.main(["run", "flow.yaml"]) == 0
     assert [answer["outcome"]["optionId"] for answer in codex_log(log, "permission")] == ["reject-once", "allow-once"]
     assert not allows("full", False, repo, yours, {"wf", "linear"}, only_these=True)
     assert allows("full", False, repo, yours, {"wf"})  # a node without tools keeps full's everything
+
+
+# ---------- a shell that reaches the Keychain ----------
+
+
+def keychain_flow(opt_in: bool) -> str:
+    """A node with tools at `edit`, on a harness its template picks, which validate can't see."""
+    Path("flow.yaml").write_text(dedent("""
+        version: 1
+        name: shell
+        start: {input: {harness: {type: string, default: claude-code}}}
+        nodes:
+          write:
+            needs: [start]
+            harness: "{{ start.harness }}"
+            model: {claude-code: opus}
+            access: edit
+            tools: [linear]
+            OPT_IN
+            instruction: Write up the open issues
+        end: {output: {}}
+        """).replace("OPT_IN", "tools_with_shell: true" if opt_in else "tools_with_shell: false"))
+    return "flow.yaml"
+
+
+def test_a_run_refuses_a_harness_whose_shell_reaches_the_keychain_without_the_opt_in(vendor, repo, monkeypatch, capsys):
+    sign_in(vendor)
+    fake = install(monkeypatch, Fake("claude-code", submit({"summary": "ok"})))
+    assert cli.main(["run", keychain_flow(opt_in=False)]) == 1
+    assert ("claude-code is unavailable: at `edit` access its commands could read every stored sign-in, "
+            "and the node doesn't set `tools_with_shell: true`") in capsys.readouterr().err
+    assert fake.specs == []
+
+
+def test_a_run_lets_a_node_that_opted_in_have_tools_and_a_shell(vendor, repo, monkeypatch):
+    sign_in(vendor)
+    fake = install(monkeypatch, Fake("claude-code", submit({"summary": "ok"})))
+    assert cli.main(["run", keychain_flow(opt_in=True)]) == 0
+    assert [server.name for server in fake.specs[0].tools] == ["linear"] and fake.specs[0].access == "edit"
 
 
 # ---------- when a tool fails ----------
@@ -632,6 +671,7 @@ def test_a_real_claude_code_node_with_tools_at_full_access_sees_no_other_mcp_ser
             needs: [start]
             access: full
             tools: [linear]
+            tools_with_shell: true
             instruction: >-
               Don't call any tool but submit_result. Submit the exact name of every tool you
               can call whose name starts with mcp__.

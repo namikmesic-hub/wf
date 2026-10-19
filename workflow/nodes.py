@@ -40,6 +40,11 @@ timeout starts once the attempt has its slot, and the wait shows in
 events.jsonl (slot_waiting, slot_taken) and in status.json (agents_waiting).
 A limit reached while it waits ends the wait, and the attempt doesn't start.
 
+A node with `tools` doesn't run on a harness whose commands could reach the
+Keychain at its access level (harnesses.KEYCHAIN_SHELL) unless it sets
+`tools_with_shell: true`: that harness counts as unavailable, and the next one
+in the node's list takes over. `wf validate` says so before the run.
+
 An agent node's wf tools (`tools`) are connected for each attempt and handed
 to the session in SessionSpec.tools (tools/relay.py). A tool that isn't set up
 fails the job at once, since a retry would find it the same; a server that
@@ -88,7 +93,7 @@ from langgraph.types import interrupt
 from . import capacity, dryrun, output_tool, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
-from .harnesses import SessionSpec, Unavailable, Usage
+from .harnesses import SessionSpec, Unavailable, Usage, reaches_keychain
 from .spec import seconds
 from .state import Finished, Job
 
@@ -354,6 +359,10 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         # retries, and attempts after a crash or `wf resume` (which may find half-done edits)
         if start and (number > job["attempt"] or entered_before):
             await _git(ctx, workspaces.reset, workspace["path"], start)
+        access = wf.setting(node_id, "access")
+        if uses and reaches_keychain(name, access) and not wf.nodes[node_id].tools_with_shell:
+            raise _Unavailable(f"at `{access}` access its commands could read every stored sign-in, "
+                               "and the node doesn't set `tools_with_shell: true`")
         try:
             agent = await ctx.harness(name)
         except Unavailable as error:

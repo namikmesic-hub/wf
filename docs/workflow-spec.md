@@ -322,6 +322,7 @@ Fields every kind accepts:
 | `session` | `fresh` | `fresh` starts a new agent session for every pass: the code carries over through the workspace, and the instruction carries the feedback. `continue` carries the conversation over too. See [Sessions](#sessions). |
 | `max_turns`, `budget_usd` | none | Passed to harnesses that support them. |
 | `tools` | none | wf tools the agent may use: `[slack, linear]`. Each gets only its read operations, unless the entry is `{name: ..., write: true}`, which gets every operation the server offers. A node with `tools`, even `tools: []`, gets no other MCP server or connector, at any access level. See [docs/tools.md](tools.md). |
+| `tools_with_shell` | `false` | Lets a node with `tools` run where its agent's commands can reach the Keychain: Claude Code and Cursor at `edit` and `full`, Codex at `full`. Such an agent could read every stored sign-in. Only on the node, not in `defaults`. |
 
 Access levels:
 - `read-only`: read and search files, and run commands that don't change anything, such
@@ -825,6 +826,7 @@ Errors:
     `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.
 13. Each `tools` entry names a known tool, and no tool is listed twice, in a node and in `defaults`.
     `write` is `true` or `false`.
+14. A node with `tools` can't run where its agent's commands reach the Keychain, unless it sets `tools_with_shell: true`.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`
@@ -840,6 +842,7 @@ Warnings:
 - A node that can run on `cursor` sets `effort`.
 - A node uses a tool that isn't set up on this machine (`wf tools <name> setup`).
 - A node has `write: true` for a tool that is set up for reads only (`wf tools <name> setup --write`).
+- A node sets `tools_with_shell: true`: its agent could read every stored sign-in.
 - An agent with `access: full` reads output from an agent with `tools`.
   Messages, notes and mail that other people write can carry instructions aimed at agents.
 

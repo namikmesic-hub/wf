@@ -6,6 +6,11 @@ Read base.py first (the Harness and Session interfaces), then the adapters:
     cursor.py        Cursor, through `cursor-agent acp` (the Agent Client Protocol
                      over stdio), with mcp_http.py serving it submit_result
 
+KEYCHAIN_SHELL names the access levels at which a harness's agent runs commands
+that can reach the macOS Keychain, and so every stored sign-in of wf tools: no
+sandbox at all, or Codex's danger-full-access. A node with `tools` runs there
+only with `tools_with_shell: true` (validate.py, nodes.py).
+
 create() builds a harness by name. FACTORIES maps names to constructors and
 imports each adapter only when it's first used, so a workflow that never runs
 Claude Code never imports the Claude Agent SDK. Tests swap in fakes by patching
@@ -38,10 +43,17 @@ def _cursor() -> Harness:
 FACTORIES: dict[str, Callable[[], Harness]] = {"claude-code": _claude_code, "codex": _codex, "cursor": _cursor}
 
 
+KEYCHAIN_SHELL = {"claude-code": ("edit", "full"), "cursor": ("edit", "full"), "codex": ("full",)}
+
+
+def reaches_keychain(harness: str, access: str) -> bool:
+    return access in KEYCHAIN_SHELL.get(harness, ())
+
+
 def create(name: str) -> Harness:
     if name not in FACTORIES:
         raise Unavailable(f"the `{name}` harness isn't supported yet")
     return FACTORIES[name]()
 
 
-__all__ = ["FACTORIES", "Harness", "Session", "SessionSpec", "TurnEnd", "Unavailable", "Usage", "create"]
+__all__ = ["FACTORIES", "KEYCHAIN_SHELL", "reaches_keychain", "Harness", "Session", "SessionSpec", "TurnEnd", "Unavailable", "Usage", "create"]

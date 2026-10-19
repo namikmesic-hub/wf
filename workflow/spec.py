@@ -190,6 +190,7 @@ class AgentNode(_Node):
     max_turns: int | None = Field(None, ge=1)
     budget_usd: float | None = Field(None, gt=0)
     tools: Tools | None = None
+    tools_with_shell: StrictBool | None = None  # only here, not in defaults: each such node says so
 
 
 class CommandNode(_Node):
