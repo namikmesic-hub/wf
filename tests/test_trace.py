@@ -2,9 +2,11 @@
 commands run a workflow. The tests read trace.jsonl, blobs/ and what `wf trace` prints."""
 
 import asyncio
+import io
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from textwrap import dedent
@@ -263,7 +265,12 @@ def test_a_short_secret_is_removed_wherever_it_shows(repo):
     assert of("job_end", node="echo")[0]["output"]["stdout"] == f"pin is {trace.HIDDEN}"
 
 
-def test_a_secret_that_a_sub_workflow_returns_is_hidden_inside_it_too(repo):
+@pytest.mark.parametrize("source, note_shows", [
+    ("{{ creds.token }}", True),
+    ("{{ history.creds | tojson }}", False),  # every output the node has given
+    ("{{ history | tojson }}", False),
+])
+def test_a_secret_that_a_sub_workflow_returns_is_hidden_inside_it_too(repo, source, note_shows):
     Path("creds.yaml").write_text(dedent("""
         version: 1
         name: creds
@@ -281,16 +288,17 @@ def test_a_secret_that_a_sub_workflow_returns_is_hidden_inside_it_too(repo):
           use:
             needs: [creds]
             command: 'test -n "$TOKEN"'
-            env: {TOKEN: "{{ creds.token }}"}
+            env: {TOKEN: "SOURCE"}
             secret_env: [TOKEN]
         end: {output: {}}
-    """)
+    """.replace("SOURCE", source))
     assert cli.main(["run", "flow.yaml"]) == 0
     assert "tok-sub-42" not in everything_written()
     (fetched,) = of("job_end", node="fetch")
     assert (fetched["where"], fetched["output"]["stdout"]) == ("creds/", trace.HIDDEN)
     assert of("render", field="end.output.token")[0]["result"] == trace.HIDDEN
-    assert of("render", field="end.output.note")[0]["result"] == 0  # an output that feeds no secret shows
+    note = of("render", field="end.output.note")[0]["result"]
+    assert note == (0 if note_shows else trace.HIDDEN)  # an output that feeds no secret shows
 
 
 def test_a_secret_in_an_agents_result_is_hidden_from_its_harness_record_of_the_call(repo, monkeypatch):
@@ -525,6 +533,22 @@ def test_wf_trace_reads_blobs_back_in_json_and_shows_a_missing_one_as_its_refere
         blob.unlink()
     assert cli.main(["trace", run_dir().name, "--field", "command"]) == 0
     assert "characters in blobs/" in capsys.readouterr().out
+
+
+def test_wf_trace_prints_text_that_utf8_cannot_hold_escaped(repo, monkeypatch):
+    assert cli.main(["run", write(COUNTED)]) == 0
+    trace.Trace(run_dir()).write({"kind": "render", "id": "count#1", "parent": "run", "node": "count", "pass": 1,
+                                  "field": "command", "template": "x", "reads": [{"path": "count.stdout", "value": "a \ud800"}],
+                                  "result": "a \ud800"})
+    for more in ([], ["--field", "command"], ["--var", "count.stdout"], ["--json"], ["--var", "count.stdout", "--json"]):
+        out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")  # a strict UTF-8 stdout, as a pipe has
+        monkeypatch.setattr(sys, "stdout", out)
+        assert cli.main(["trace", run_dir().name, *more]) == 0
+        out.flush()
+        shown = out.buffer.getvalue().decode("utf-8")
+        assert "a \\ud800" in shown
+        if "--json" in more:
+            assert "a \ud800" in json.dumps(json.loads(shown), ensure_ascii=False)  # the JSON escape reads back as it was
 
 
 def test_wf_trace_refuses_a_bad_path_and_a_run_without_a_trace(repo, capsys):

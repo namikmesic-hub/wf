@@ -698,6 +698,17 @@ def test_cursor_reports_a_tool_call_that_a_timeout_stops_for_the_trace(repo, mon
     assert [r["outcome"] for r in trace_records() if r["kind"] == "attempt_end"] == ["timed_out"]
 
 
+def test_cursor_reports_a_tool_call_again_when_its_input_comes_late(repo, monkeypatch):
+    cursor(monkeypatch, repo, [{"call": {"kind": "read", "title": "Read a.txt", "rawInput": {"path": "a.txt"}}},
+                               {"tool": {"arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[]", harness="cursor")]) == 0
+    first, then = [r for r in trace_records() if r["kind"] == "tool_call"][:2]
+    assert first["id"] == then["id"]  # the same call, reported again with what came later
+    assert (first["arguments"]["input"], then["arguments"]["input"]) == (None, {"path": "a.txt"})
+    (result,) = [r for r in trace_records() if r["kind"] == "tool_result" and r["id"] == first["id"]]
+    assert result["result"] == {"output": "hello"}
+
+
 def test_cursor_refuses_an_mcp_server_wf_did_not_give_the_session(tmp_path):
     call = {"kind": "other", "rawInput": {"providerIdentifier": "slack", "toolName": "slack_send_message"}}
     assert allows("full", False, tmp_path, call, {"wf", "slack"})  # full allows everything anyway

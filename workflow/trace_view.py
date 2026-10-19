@@ -155,6 +155,12 @@ def _inside(value: Any, path: tuple) -> tuple[bool, Any]:
 # ---------- text ----------
 
 
+def printable(text: str) -> str:
+    """`text` with each character that UTF-8 can't hold, such as a lone surrogate from an agent,
+    as its \\u escape. Inside a JSON string, that is the JSON escape for it."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def text(run: Run, found: list[dict], field: str | None = None) -> str:
     """The records as an outline, or with `field`, each render of it in turn."""
     if field is not None and field != "routes":

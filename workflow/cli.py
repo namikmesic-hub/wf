@@ -401,14 +401,16 @@ def _trace(args) -> int:
             print(f"wf trace: --var {error}", file=sys.stderr)
             return 1
         matches = trace_view.values(run, chosen, path)
-        print(json.dumps({"run": run.id, "var": args.var, "values": matches}, indent=2, ensure_ascii=False, default=str)
-              if args.json else trace_view.values_text(matches, args.var))
+        print(trace_view.printable(json.dumps({"run": run.id, "var": args.var, "values": matches}, indent=2,
+                                              ensure_ascii=False, default=str)
+                                   if args.json else trace_view.values_text(matches, args.var)))
         return 0
     if args.json:
         records = [trace_view.expanded(run, record) for record in chosen]
-        print(json.dumps({"run": run.id, "dir": str(run.dir), "records": records}, indent=2, ensure_ascii=False, default=str))
+        print(trace_view.printable(json.dumps({"run": run.id, "dir": str(run.dir), "records": records}, indent=2,
+                                              ensure_ascii=False, default=str)))
     else:
-        print(trace_view.text(run, chosen, args.field) or "no records match")
+        print(trace_view.printable(trace_view.text(run, chosen, args.field) or "no records match"))
     return 0
 
 

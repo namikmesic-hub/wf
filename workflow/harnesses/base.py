@@ -71,7 +71,8 @@ class Recorder:
         """Text the agent wrote."""
 
     def tool_call(self, call: str, tool: str, arguments: Any) -> None:
-        """The agent called `tool`. `call` is the harness's id for the call."""
+        """The agent called `tool`. `call` is the harness's id for the call. An adapter reports a
+        call when it starts, and again if it learns more of its arguments later."""
 
     def tool_result(self, call: str, result: Any, is_error: bool = False, kept: bool = True) -> None:
         """The answer to a call. kept=False for a wf tool's answer (other people's messages and

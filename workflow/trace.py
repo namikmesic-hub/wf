@@ -266,10 +266,16 @@ def outputs_reached(node_id: str, node, paths, sub) -> frozenset[str]:
     every = frozenset(sub.end.output)
     reached = set()
     for path in paths:
-        if path[0] == node_id:
+        if path[0] == "history":
+            if len(path) == 1 or path[1] is EACH:  # all of history, or any node's
+                return every
+            if path[1] != node_id:
+                continue
+            if len(path) == 2:  # every output this node has given
+                return every
+            rest = path[3:]  # inside one of them
+        elif path[0] == node_id:
             rest = path[1:]
-        elif path[0] == "history" and len(path) > 2 and path[1] == node_id:
-            rest = path[3:]
         else:
             continue
         if node.for_each is not None:  # the node's output is a list of the sub-workflow's outputs
@@ -527,10 +533,13 @@ class Attempt:
         self._write("message", self._next("m"), self._turn_id(), text=text)
 
     def tool_call(self, call: str, tool: str, arguments: Any) -> None:
+        """A call that the harness reports again, as it learns more, gets its record again with
+        the same id. The last record of an id holds all its arguments."""
         if tool == output_tool.NAME:  # the agent's result, which the harness may report before submit_result sees it
             arguments = self._as_result(arguments)
-        self._calls[str(call)] = ours = self._next("c")
-        self._write("tool_call", ours, self._turn_id(), tool=tool, arguments=arguments)
+        ours = self._calls.get(str(call)) or self._next("c")
+        self._calls[str(call)] = ours
+        self._write("tool_call", ours, ours.rsplit(".", 1)[0], tool=tool, arguments=arguments)
 
     def tool_result(self, call: str, result: Any, is_error: bool = False, kept: bool = True) -> None:
         ours = self._calls.pop(str(call), None) or self._next("c")

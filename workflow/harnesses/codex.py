@@ -150,7 +150,7 @@ class CodexSession:
         self._total = 0  # the thread's token count, as last reported
         self._turn_start = 0
         self._counted = False  # has a token count come in yet?
-        self._traced: set[str] = set()  # the tool calls the trace already has, from item/started
+        self._traced: dict[str, dict] = {}  # call id -> the arguments the trace has for it
 
     async def start(self) -> None:
         spec = self.spec
@@ -313,11 +313,13 @@ class CodexSession:
                                         item.get("status") == "failed" or item.get("success") is False, kept=not relayed)
 
     def _trace_call(self, item: dict) -> None:
-        """A tool call for the trace, once: its arguments are all of the item but its outcome."""
+        """A tool call for the trace: its arguments are all of the item but its outcome. Again
+        at item/completed, if the item says more there than at item/started."""
         call = str(item.get("id") or "")
-        if item.get("type") in TOOL_ITEMS and call not in self._traced:
-            self._traced.add(call)
-            self.spec.trace.tool_call(call, _tool_label(item), {k: v for k, v in item.items() if k not in ANSWER and k not in ("id", "type")})
+        arguments = {k: v for k, v in item.items() if k not in ANSWER and k not in ("id", "type")}
+        if item.get("type") in TOOL_ITEMS and self._traced.get(call) != arguments:
+            self._traced[call] = arguments
+            self.spec.trace.tool_call(call, _tool_label(item), arguments)
 
     async def close(self) -> None:
         try:

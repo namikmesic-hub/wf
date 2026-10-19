@@ -381,6 +381,8 @@ class CursorSession:
             call["shown"] = True
             self.spec.emit({"event": "agent_tool", "tool": _label(call), "detail": _detail(call, self.spec.cwd)})
             self._trace_call(update.get("toolCallId"), call)  # now: a timeout may stop it before it completes
+        elif "traced" in call and status not in ("completed", "failed"):
+            self._trace_call(update.get("toolCallId"), call)  # an update can add the input after it started
         elif status in ("completed", "failed"):
             self.calls.pop(update.get("toolCallId"), None)
             output = call.get("rawOutput") or call.get("content") or ""
@@ -392,11 +394,12 @@ class CursorSession:
             self.spec.trace.tool_result(update.get("toolCallId"), output, status == "failed", kept=not relayed)
 
     def _trace_call(self, call_id, call: dict) -> None:
-        """A tool call for the trace, once, as its updates have described it so far."""
-        if not call.get("traced"):
-            call["traced"] = True
-            self.spec.trace.tool_call(call_id, _label(call), {"title": call.get("title"), "kind": call.get("kind"),
-                                                              "input": call.get("rawInput")})
+        """A tool call for the trace, as its updates have described it so far: again each time
+        that they change what it is."""
+        arguments = {"title": call.get("title"), "kind": call.get("kind"), "input": call.get("rawInput")}
+        if call.get("traced") != arguments:
+            call["traced"] = arguments
+            self.spec.trace.tool_call(call_id, _label(call), arguments)
 
     def _flush(self) -> None:
         if self.text.strip():
