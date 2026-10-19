@@ -46,15 +46,17 @@ A value longer than CAP characters goes to blobs/<sha256>.txt (text) or .json
 occurs. The record then holds {"$blob": "blobs/<sha256>.txt", "size": ..., "start": ...}.
 
 Secrets never go into the trace. A command node's `secret_env` names env values
-that are secret. The function secret_paths() finds the variable paths those
-values come from. These are what their templates read, also through `item` to
-the for_each list, or through a sub-workflow's input to the parent's `with`. A
-value at such a path becomes [secret] in each record that has it there: a read,
-the input, an output, a submit_result call. So does a secret env value, and a
-`with` value that feeds one. Then the text of each such value goes out of every
-later record of the process, wherever it occurs. A wf tool's token never gets in
-(relay.py calls keep_out()). Nor does what a wf tool answers: its tool_result
-holds only the size, as the attempt's transcript does.
+that are secret. The function find() finds the variable paths those values come
+from. These are what their templates read, also through `item` to what the
+for_each list reads. They go through a sub-workflow's input to the parent's
+`with`, and through a workflow node's output to the sub-workflow's end output.
+An `item` path counts only in the templates of its own node. A value at such a
+path becomes [secret] in each record that has it there: a read, the input, an
+output, a submit_result call. So does a secret env value, a `with` value that
+feeds one, and an end output that feeds one. Then the text of each such value,
+however short, goes out of every later record of the process. A wf tool's token
+never gets in (relay.py calls keep_out()). Nor does what a wf tool answers: its
+tool_result holds only the size, as the attempt's transcript does.
 
 Writing the trace never stops a run. When wf can't write it, wf says so once,
 and the run continues.
@@ -68,11 +70,12 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import templates
+from . import output_tool, templates
 from .schemas import EACH
 
 FILE = "trace.jsonl"
@@ -80,7 +83,6 @@ BLOBS = "blobs"
 CAP = 1000  # characters a value may have in a record. A longer one goes to blobs/
 PREVIEW = 80  # characters of a blob shown in its reference
 HIDDEN = "[secret]"
-SHORTEST = 4  # secret text this long or longer is also removed from other text
 _OWN = frozenset({"kind", "id", "parent", "node", "where", "pass", "index", "attempt", "turn", "field", "started", "ended"})
 
 _everywhere: set[str] = set()  # secrets of this process, such as wf tools' tokens
@@ -88,7 +90,7 @@ _everywhere: set[str] = set()  # secrets of this process, such as wf tools' toke
 
 def keep_out(text: str | None) -> None:
     """Keep `text` out of every trace this process writes."""
-    if isinstance(text, str) and len(text) >= SHORTEST:
+    if isinstance(text, str) and text:
         _everywhere.add(text)
 
 
@@ -113,16 +115,20 @@ class Trace:
         elif isinstance(value, (list, tuple)):
             for inner in value:
                 self.hide(inner)
-        elif isinstance(value, (str, int, float)) and not isinstance(value, bool) and len(str(value)) >= SHORTEST:
+        elif isinstance(value, (str, int, float)) and not isinstance(value, bool) and str(value):
             self.hidden.add(str(value))
 
     def write(self, record: dict) -> None:
         try:
             with self._lock:
-                line = json.dumps(self._ready(record), ensure_ascii=False, default=str)
-                with (self.folder / FILE).open("a", encoding="utf-8") as file:
-                    file.write(line + "\n")
-        except OSError as error:
+                ready = self._ready(record)
+                try:
+                    line = (json.dumps(ready, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+                except UnicodeEncodeError:  # text with a lone surrogate, which UTF-8 can't hold: escape all of it
+                    line = (json.dumps(ready, default=str) + "\n").encode("ascii")
+                with (self.folder / FILE).open("ab") as file:
+                    file.write(line)
+        except (OSError, ValueError, TypeError) as error:
             if not self._failed:
                 self._failed = True
                 print(f"wf: can't write the run's trace ({error}). The run continues without it.", file=sys.stderr)
@@ -148,16 +154,22 @@ class Trace:
     def _stored(self, value: Any) -> Any:
         """The value, or a reference to the blob that holds it if it's long."""
         data, suffix = (value, ".txt") if isinstance(value, str) else (json.dumps(value, ensure_ascii=False, default=str), ".json")
-        if len(data) <= CAP:
+        if len(data) <= CAP and not stored(value):  # a value that looks like a reference goes to a blob too
             return value
-        name = f"{BLOBS}/{hashlib.sha256(data.encode()).hexdigest()}{suffix}"
+        encoded = data.encode("utf-8", "backslashreplace")  # a lone surrogate becomes its \\u escape
+        name = f"{BLOBS}/{hashlib.sha256(encoded).hexdigest()}{suffix}"
         path = self.folder / name
         if not path.exists():
             path.parent.mkdir(exist_ok=True)
             temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            temp.write_text(data, encoding="utf-8")
+            temp.write_bytes(encoded)
             temp.replace(path)
         return {"$blob": name, "size": len(data), "start": data[:PREVIEW]}
+
+
+def stored(value: Any) -> bool:
+    """Is `value` a reference to a blob, as a record holds it?"""
+    return isinstance(value, Mapping) and set(value) == {"$blob", "size", "start"}
 
 
 def _scrub(value: Any, secrets: list[str]) -> Any:
@@ -180,53 +192,131 @@ def _scrub(value: Any, secrets: list[str]) -> Any:
 # ---------- what is secret ----------
 
 
-def secret_paths(workflow, load: Callable[[Path], Any], seen: tuple = ()) -> frozenset[tuple]:
+@dataclass(frozen=True)
+class Secrets:
+    """Where a workflow's secret values are. The paths are variable paths anywhere in the
+    workflow. The items are, for each for_each node, the paths under its `item`. Only that
+    node's templates read those. A path is a tuple of names and indexes, with EACH for any
+    element."""
+
+    paths: frozenset[tuple] = frozenset()
+    items: Mapping[str, frozenset[tuple]] = field(default_factory=dict)
+
+    def at(self, node: str | None) -> frozenset[tuple]:
+        """The secret paths in the templates of `node` (None: of no node, such as the input)."""
+        return self.paths | self.items.get(node, frozenset()) if node else self.paths
+
+
+def find(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozenset(), seen: tuple = ()) -> Secrets:
     """The variable paths whose values become an env value that a command node marks secret.
-    These are the paths the env templates read, also through `item` to the for_each list.
-    They include what the parent's `with` reads for a sub-workflow input that feeds one.
-    `load` reads a sub-workflow file. Paths are tuples of names and indexes, with EACH
-    for any element."""
+    These are what the env templates read, through `item` to what the for_each list reads.
+    They go through a sub-workflow's input to what the parent's `with` reads. They also go
+    through a workflow node's output to what the sub-workflow's end output reads. The set
+    `outputs` names the end outputs that feed a secret in the parent workflow. The function
+    `load` reads a sub-workflow file."""
     found: set[tuple] = set()
+    items: dict[str, set[tuple]] = {}
+
+    def add(node_id: str | None, source: str) -> None:
+        anywhere, inside = _sources(workflow, node_id, source)
+        found.update(anywhere)
+        if inside:
+            items.setdefault(node_id, set()).update(inside)
+
     for node_id, node in workflow.nodes.items():
         if node.kind == "command":
             env = workflow.setting(node_id, "env")
             for name in workflow.setting(node_id, "secret_env"):
                 if name in env:
-                    found |= _sources(workflow, node_id, env[name])
-        elif node.kind == "workflow" and workflow.path is not None:
+                    add(node_id, env[name])
+    for name in outputs:
+        value = workflow.end.output.get(name)
+        source = value.get("value") if isinstance(value, dict) else value
+        if isinstance(source, str):
+            add(None, source)
+    subs = []
+    for node_id, node in workflow.nodes.items():
+        if node.kind == "workflow" and workflow.path is not None:
             path = (Path(workflow.path).parent / node.workflow).resolve()
-            if path in seen:
-                continue
-            inputs = secret_inputs(load(path), load, (*seen, path))
+            if path not in seen:
+                subs.append((node_id, node, path, load(path)))
+    while subs:  # what one `with` reads can reach another workflow node's output: go on until nothing new
+        size = len(found) + sum(map(len, items.values()))
+        for node_id, node, path, sub in subs:
+            inputs = secret_inputs(sub, load, outputs_reached(node_id, node, found, sub), (*seen, path))
             for name, value in node.with_.items():
                 if isinstance(value, str) and name in inputs:
-                    found |= _sources(workflow, node_id, value)
+                    add(node_id, value)
+        if len(found) + sum(map(len, items.values())) == size:
+            break
     found |= {("history", path[0], EACH, *path[1:]) for path in found if path[0] in workflow.nodes}
-    return frozenset(found)
+    return Secrets(frozenset(found), {node: frozenset(paths) for node, paths in items.items()})
 
 
-def secret_inputs(workflow, load: Callable[[Path], Any], seen: tuple = ()) -> set[str]:
-    """The start inputs of `workflow` that feed a secret env value."""
-    paths = secret_paths(workflow, load, seen)
+def secret_inputs(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozenset(), seen: tuple = ()) -> set[str]:
+    """The start inputs of `workflow` that feed a secret env value, or one of its `outputs`."""
+    paths = find(workflow, load, outputs, seen).paths
     if ("start",) in paths:
         return set(workflow.start.input)
     return {path[1] for path in paths if len(path) > 1 and path[0] == "start" and isinstance(path[1], str)}
 
 
-def _sources(workflow, node_id: str, source: str) -> set[tuple]:
-    paths = set()
+def outputs_reached(node_id: str, node, paths, sub) -> frozenset[str]:
+    """The end outputs of `sub`, which workflow node `node_id` runs, that a secret path reaches."""
+    every = frozenset(sub.end.output)
+    reached = set()
+    for path in paths:
+        if path[0] == node_id:
+            rest = path[1:]
+        elif path[0] == "history" and len(path) > 2 and path[1] == node_id:
+            rest = path[3:]
+        else:
+            continue
+        if node.for_each is not None:  # the node's output is a list of the sub-workflow's outputs
+            if not rest:
+                return every
+            rest = rest[1:]
+        if not rest or rest[0] is EACH:
+            return every
+        if rest[0] in every:
+            reached.add(rest[0])
+    return frozenset(reached)
+
+
+def _sources(workflow, node_id: str | None, source: str) -> tuple[set[tuple], set[tuple]]:
+    """The paths a template reads: (anywhere in the workflow, under the node's `item`). An item
+    path also counts at what the node's for_each list reads. That is its element when the list
+    is a plain path, or else all that the for_each expression reads."""
+    anywhere, inside = set(), set()
+    each = workflow.nodes[node_id].for_each if node_id else None
+    for path in _read_paths(source):
+        if path[0] in ("item", "index"):
+            if not each:  # only a for_each node has them (validate makes sure)
+                continue
+            inside.add(path)
+            if path[0] == "index":
+                continue
+            listed = templates.pure_path(each, expression=True)
+            if listed:
+                anywhere.add(_general((listed[0], *listed[1], EACH, *path[1:])))
+            else:
+                anywhere |= _read_paths(each, expression=True)
+        else:
+            anywhere.add(path)
+    return anywhere, inside
+
+
+def _read_paths(source: str, expression: bool = False) -> set[tuple]:
     try:
-        refs = templates.references(source)
+        refs = templates.references(source, expression=expression)
     except templates.TemplateError:  # validate refuses it, and the run fails when it renders
-        return paths
-    each = workflow.nodes[node_id].for_each
-    listed = templates.pure_path(each, expression=True) if each else None
-    for ref in refs:
-        path = (ref.name, *(ref.path or ()))
-        paths.add(path)
-        if ref.name == "item" and listed:
-            paths.add((listed[0], *listed[1], EACH, *path[1:]))
-    return paths
+        return set()
+    return {_general((ref.name, *(ref.path or ()))) for ref in refs}
+
+
+def _general(path: tuple) -> tuple:
+    """A negative index, as in x[-1], counts as any element: the list's length isn't known yet."""
+    return tuple(EACH if isinstance(step, int) and not isinstance(step, bool) and step < 0 else step for step in path)
 
 
 def _matches(pattern: tuple, path: tuple) -> bool:
@@ -249,11 +339,13 @@ class Scope:
     ids start with the id of the attempt that runs it (`parent`). Its `where` is the
     sub-workflow's path, like build[1]/."""
 
-    def __init__(self, trace: Trace, workflow, load: Callable[[Path], Any], parent: str = "run", where: str = ""):
+    def __init__(self, trace: Trace, workflow, load: Callable[[Path], Any], parent: str = "run", where: str = "",
+                 outputs: frozenset[str] = frozenset()):
         self.trace, self.parent, self.where = trace, parent, where
         self.prefix = "" if parent == "run" else f"{parent}/"
-        self.load = load
-        self.paths = secret_paths(workflow, load)
+        self.workflow, self.load = workflow, load
+        self.outputs = outputs  # end outputs that feed a secret of the parent workflow
+        self.secrets = find(workflow, load, outputs)
 
     def write(self, kind: str, id: str, parent: str | None, **fields) -> None:
         self.trace.write({"kind": kind, "id": id, "parent": parent, **({"where": self.where} if self.where else {}), **fields})
@@ -271,12 +363,14 @@ class Scope:
 
     # ----- secrets -----
 
-    def at(self, path: tuple, value: Any) -> Any:
-        """`value`, found at the variable path `path`, with every secret part of it [secret]."""
-        if any(len(secret) <= len(path) and _matches(secret, path[:len(secret)]) for secret in self.paths):
+    def at(self, path: tuple, value: Any, node: str | None = None) -> Any:
+        """`value`, found at the variable path `path` in a template of `node`, with every secret
+        part of it [secret]."""
+        secrets = self.secrets.at(node)
+        if any(len(secret) <= len(path) and _matches(secret, path[:len(secret)]) for secret in secrets):
             self.trace.hide(value)
             return HIDDEN
-        inner = [secret[len(path):] for secret in self.paths if len(secret) > len(path) and _matches(secret[:len(path)], path)]
+        inner = [secret[len(path):] for secret in secrets if len(secret) > len(path) and _matches(secret[:len(path)], path)]
         return self._inside(value, inner) if inner else value
 
     def _inside(self, value: Any, rests: list[tuple]) -> Any:
@@ -303,14 +397,17 @@ class Scope:
         """Note the secret values that the run's variables hold now. Then a later record that
         holds one somewhere else has it removed. A run that `wf retry` continues learns them
         again here."""
-        if self.paths:
+        if self.secrets.paths:
             values = variables()
-            for path in self.paths:
+            for path in self.secrets.paths:
                 for found in _walk(values, path):
                     self.trace.hide(found)
 
-    def secret_inputs(self, workflow) -> set[str]:
-        return secret_inputs(workflow, self.load)
+    def sub_secrets(self, node_id: str, sub) -> tuple[set[str], frozenset[str]]:
+        """For workflow node `node_id`, which runs `sub`: the inputs of `sub` that feed a secret,
+        and its end outputs that feed one here."""
+        outputs = outputs_reached(node_id, self.workflow.nodes[node_id], self.secrets.paths, sub)
+        return secret_inputs(sub, self.load, outputs), outputs
 
     # ----- records -----
 
@@ -328,7 +425,7 @@ class Scope:
                    **({"items": items} if items is not None else {}))
 
     def job(self, job: Mapping) -> None:
-        item = {"item": self.at(("item",), job["item"])} if job.get("index") is not None else {}
+        item = {"item": self.at(("item",), job["item"], job["node"])} if job.get("index") is not None else {}
         self.write("job", self.owner(job), self._job_parent(job), **place(job), first_attempt=job["attempt"], **item)
 
     def job_end(self, job: Mapping, finished: Mapping | None) -> None:
@@ -339,7 +436,7 @@ class Scope:
             fields = {"ok": finished["ok"], "attempts": finished["attempts"], "usage": finished["usage"],
                       "workspace": finished["workspace"]}
             if finished["ok"]:
-                fields["output"] = self.at(self.output_path(job), finished["output"])
+                fields["output"] = self.at(self.output_path(job), finished["output"], job["node"])
             else:
                 fields["error"] = finished["error"]
             if finished.get("stopped"):
@@ -366,15 +463,15 @@ class Scope:
     def rendered(self, job: Mapping | None, field: str, source: str, reads: list, **fields) -> None:
         where = place(job) if job is not None else {}
         self.write("render", self.owner(job), self._job_parent(job) if job else self.parent, **where, field=field,
-                   template=source, reads=self.reads(reads), **fields)
+                   template=source, reads=self.reads(reads, job["node"] if job else None), **fields)
 
-    def reads(self, reads: list) -> list[dict]:
-        return [{"path": templates.path_text(read.path), "value": self.at(read.path, read.value)} for read in reads]
+    def reads(self, reads: list, node: str | None) -> list[dict]:
+        return [{"path": templates.path_text(read.path), "value": self.at(read.path, read.value, node)} for read in reads]
 
     def routes(self, job: Mapping, routes: list[dict], taken: int | None) -> None:
         """A node's route decision: `routes` as they were checked (see state.Progress), and the
         index of the one taken (None: a `when` failed)."""
-        checked = [{**route, "reads": self.reads(route.get("reads", []))} for route in routes]
+        checked = [{**route, "reads": self.reads(route.get("reads", []), job["node"])} for route in routes]
         chosen = {"taken": taken, "to": checked[taken]["to"]} if taken is not None else {"taken": None}
         self.write("routes", self.owner(job), self.parent, **place(job), routes=checked, **chosen)
 
@@ -430,6 +527,8 @@ class Attempt:
         self._write("message", self._next("m"), self._turn_id(), text=text)
 
     def tool_call(self, call: str, tool: str, arguments: Any) -> None:
+        if tool == output_tool.NAME:  # the agent's result, which the harness may report before submit_result sees it
+            arguments = self._as_result(arguments)
         self._calls[str(call)] = ours = self._next("c")
         self._write("tool_call", ours, self._turn_id(), tool=tool, arguments=arguments)
 
@@ -442,7 +541,18 @@ class Attempt:
 
     def submitted(self, arguments: Any, problems: list[str], reply: str) -> None:
         self._write("submit_result", self._next("s"), self._turn_id(), accepted=not problems, problems=problems,
-                    reply=reply, arguments=self.scope.at(self.scope.output_path(self.job), arguments))
+                    reply=reply, arguments=self._as_result(arguments))
+
+    def _as_result(self, value: Any) -> Any:
+        """`value` with each map in it read as the job's output, with what's secret in it hidden.
+        A harness's record of a submit_result call holds the result as one of its maps."""
+        if isinstance(value, Mapping):
+            value = self.scope.at(self.scope.output_path(self.job), value, self.job["node"])
+            if isinstance(value, Mapping):
+                return {key: self._as_result(inner) for key, inner in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._as_result(inner) for inner in value]
+        return value
 
     def _turn_id(self) -> str:
         return f"{self.id}.t{self._turn}"

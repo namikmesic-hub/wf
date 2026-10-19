@@ -119,11 +119,14 @@ async def finish(state: RunState, runtime: Runtime[RunContext]) -> dict:
     output, problems = {}, []
     for name, value in workflow.end.output.items():
         try:
+            secret = name in ctx.trace.outputs  # it feeds a secret of the parent workflow
             if isinstance(value, str):
-                output[name] = ctx.trace.render(None, f"end.output.{name}", value, variables, templates.render_value)
+                output[name] = ctx.trace.render(None, f"end.output.{name}", value, variables, templates.render_value,
+                                                secret=secret)
                 continue
             raw = value.get("value")
-            given = ctx.trace.render(None, f"end.output.{name}", raw, variables, templates.render_value) if isinstance(raw, str) else raw
+            given = (ctx.trace.render(None, f"end.output.{name}", raw, variables, templates.render_value, secret=secret)
+                     if isinstance(raw, str) else raw)
             field = {k: v for k, v in value.items() if k != "value"}
             schema = schemas.object_schema({name: field}, workflow.types)["properties"][name]
             given = schemas.without_none(given, schema)

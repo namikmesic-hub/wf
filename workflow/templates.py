@@ -25,9 +25,11 @@ template used, with its value, for the run's trace (trace.py). The environment
 notes every field and index a template reads (getattr and getitem). Jinja looks
 up each name when a template starts, also a name that only an unused branch
 reads. So the code generator wraps each use of a name, and only the uses that
-run are noted. Elements of a list or map that was read are
-known by their path too, so `t.title` in `{% for t in plan.tasks %}` reads
-plan.tasks[0].title.
+run are noted. Elements of a list or map that was read are known by their path
+too, so `t.title` in `{% for t in plan.tasks %}` reads plan.tasks[0].title. A
+list or map that the template only reached into, or looped over, isn't listed
+when the reads inside it are. One that it also used itself, in a test, a filter
+or the output, is.
 
 The second half of this module reads templates without running them.
 references() walks Jinja's syntax tree and lists every outside name a
@@ -62,14 +64,41 @@ class TemplateError(Exception):
 
 
 class _CodeGenerator(CodeGenerator):
-    """Jinja's code generator, except that every use of a name the template gets from its
-    variables goes through environment.used(name, value), as it runs."""
+    """Jinja's code generator, with two changes for watched(). Each use of a name that the
+    template gets from its variables goes through environment.used(name, whole, value), as
+    it runs. A field or an index that the template uses itself goes through
+    environment.whole(value). A use isn't whole when it only reaches inside the value (x in
+    x.y), or loops over it. Then the reads inside it say what the template used."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._through: set[int] = set()  # the nodes whose value is only a way into it
+
+    def visit_For(self, node: nodes.For, frame) -> None:
+        self._through.add(id(node.iter))
+        super().visit_For(node, frame)
+
+    def visit_Getattr(self, node: nodes.Getattr, frame) -> None:
+        self._through.add(id(node.node))
+        self._whole(node, frame, super().visit_Getattr)
+
+    def visit_Getitem(self, node: nodes.Getitem, frame) -> None:
+        self._through.add(id(node.node))
+        self._whole(node, frame, super().visit_Getitem)
+
+    def _whole(self, node, frame, visit) -> None:
+        if id(node) in self._through:
+            visit(node, frame)
+            return
+        self.write("environment.whole(")
+        visit(node, frame)
+        self.write(")")
 
     def visit_Name(self, node: nodes.Name, frame) -> None:
         if node.ctx == "load":
             load = frame.symbols.find_load(frame.symbols.ref(node.name))
             if load is not None and load[0] == VAR_LOAD_RESOLVE:
-                self.write(f"environment.used({node.name!r}, ")
+                self.write(f"environment.used({node.name!r}, {id(node) not in self._through}, ")
                 super().visit_Name(node, frame)
                 self.write(")")
                 return
@@ -79,9 +108,14 @@ class _CodeGenerator(CodeGenerator):
 class _Environment(ImmutableSandboxedEnvironment):
     code_generator_class = _CodeGenerator
 
-    def used(self, name: str, value: Any) -> Any:
+    def used(self, name: str, whole: bool, value: Any) -> Any:
         if (watch := _WATCH.get()) is not None and not isinstance(value, Undefined):
-            watch.used(name, value)
+            watch.used(name, whole, value)
+        return value
+
+    def whole(self, value: Any) -> Any:
+        if (watch := _WATCH.get()) is not None:
+            watch.whole(value)
         return value
 
     def getattr(self, obj: Any, attribute: str) -> Any:
@@ -219,10 +253,17 @@ class _Watch:
         self.paths: dict[int, tuple] = {}  # id of a list or map in the variables -> its path
         self.kept: list = []  # holds those lists and maps, so no other object takes their id meanwhile
         self.found: dict[tuple, Any] = {}  # path -> value, in the order first read
+        self.used_whole: set[tuple] = set()  # paths whose value the template used itself
 
-    def used(self, name: str, value: Any) -> None:
+    def used(self, name: str, whole: bool, value: Any) -> None:
         if name in self.names:
             self._read((name,), value)
+            if whole:
+                self.used_whole.add((name,))
+
+    def whole(self, value: Any) -> None:
+        if isinstance(value, _CONTAINERS) and (path := self.paths.get(id(value))) is not None:
+            self.used_whole.add(path)  # the field or index just read, which registered its id
 
     def accessed(self, parent: Any, key: Any, value: Any) -> None:
         path = self.paths.get(id(parent))
@@ -243,11 +284,12 @@ class _Watch:
                 self.kept.append(child)
 
     def reads(self) -> list[Read]:
-        """What was read. A list or map that was only a way to a field inside it is left out."""
+        """What was read. A list or map that was only a way to a field inside it is left out,
+        unless the template also used it itself, such as with `| length`."""
         paths = list(self.found)
 
         def passed_through(path: tuple) -> bool:
-            return any(len(other) > len(path) and other[:len(path)] == path for other in paths)
+            return path not in self.used_whole and any(len(other) > len(path) and other[:len(path)] == path for other in paths)
 
         return [Read(path, value) for path, value in self.found.items()
                 if not (isinstance(value, _CONTAINERS) and passed_through(path))]

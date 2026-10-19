@@ -408,6 +408,14 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     uses = listed or ()
 
     async def attempt(number: int, name: str, record: Attempt) -> dict:
+        model, effort = chosen[name]
+        source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
+        if source:  # Cursor can't fork: it loads the session itself
+            session_facts = {"start": "load" if name == "cursor" else "fork", "from": source["id"]}
+        else:
+            session_facts = {"start": "fresh", **({"fresh_because": why_not} if why_not else {})}
+        record.begin(model=model, effort=effort, access=wf.setting(node_id, "access"), web=wf.setting(node_id, "web"),
+                     workspace=workspace, session=session_facts, **({"tools": [u.name for u in uses]} if uses else {}))
         # Every attempt but the job's very first starts from the commit the job started from:
         # retries, and attempts after a crash or `wf retry` (which may find half-done edits)
         if start and (number > job["attempt"] or entered_before):
@@ -421,17 +429,15 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         except Unavailable as error:
             raise _Unavailable(str(error)) from error
         async with _attached(uses, number) as tools:
-            return await converse(number, name, agent, tools, record)
+            return await converse(number, name, agent, tools, record, source, why_not, session_facts)
 
-    async def converse(number: int, name: str, agent, tools: list, record: Attempt) -> dict:
-        """One session: the instruction, then reminders, until submit_result has a result."""
+    async def converse(number: int, name: str, agent, tools: list, record: Attempt, source: dict | None,
+                       why_not: str | None, session_facts: dict) -> dict:
+        """One session: the instruction, then reminders, until submit_result has a result.
+        `source` is the session to continue, and `session_facts` the trace's record of it."""
         model, effort = chosen[name]
-        source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
         if why_not:
             emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": why_not})
-        session_facts = {"start": "fresh", **({"fresh_because": why_not} if why_not else {})}
-        record.facts.update(model=model, effort=effort, access=wf.setting(node_id, "access"), web=wf.setting(node_id, "web"),
-                            workspace=workspace, session=session_facts, **({"tools": [u.name for u in uses]} if uses else {}))
         spec = SessionSpec(
             cwd=Path(workspace["path"]),
             access=wf.setting(node_id, "access"),
@@ -459,15 +465,13 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             if source is None:
                 raise _Unavailable(str(error)) from error
             emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": str(error)})
-            session_facts["fresh_because"] = str(error)
+            session_facts.clear()
+            session_facts.update(start="fresh", fresh_because=str(error))
             source, spec = None, replace(spec, fork_from=None, prior_cost_usd=0.0)  # the fork failed: start fresh
             try:
                 session = await agent.session(spec)
             except Unavailable as error:
                 raise _Unavailable(str(error)) from error
-        if source:  # Cursor can't fork: it loads the session itself
-            session_facts.update({"start": "load" if name == "cursor" else "fork", "from": source["id"]})
-        record.begin()
         instruction = render(True) if source else fresh
         if source:
             emit({"event": "session_continued", **_label(job), "attempt": number})
@@ -652,15 +656,16 @@ async def run_shell(command: str, cwd: Path, env: dict, log: Path) -> dict:
     TAIL characters of stdout and stderr, and the log file holding everything. Each
     stream is also kept whole in a file of its own beside the log: attempt-<n>.stdout
     and attempt-<n>.stderr, which the trace names."""
-    process = await asyncio.create_subprocess_exec(
-        "bash", "-c", command, cwd=cwd, env=env,
-        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,  # its own process group, so a timeout can stop everything it started
-    )
     tails = {"stdout": "", "stderr": ""}
+    # The files first: a file that can't be opened fails the attempt before the command starts
     with (log.open("w", encoding="utf-8") as file, log.with_suffix(".stdout").open("w", encoding="utf-8") as out,
           log.with_suffix(".stderr").open("w", encoding="utf-8") as err):
         own = {"stdout": out, "stderr": err}
+        process = await asyncio.create_subprocess_exec(
+            "bash", "-c", command, cwd=cwd, env=env,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,  # its own process group, so a timeout can stop everything it started
+        )
 
         async def pump(stream: asyncio.StreamReader, name: str) -> None:
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -716,7 +721,7 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
     node_id, wf = job["node"], ctx.workflow
     node = wf.nodes[node_id]
     sub = ctx.load((Path(wf.path).parent / node.workflow).resolve())
-    secret = ctx.trace.secret_inputs(sub)  # inputs that become a secret env value inside it
+    secret, outputs = ctx.trace.sub_secrets(node_id, sub)  # its inputs and outputs that carry a secret
     given = {k: ctx.trace.render(job, f"with.{k}", v, variables, templates.render_value, secret=k in secret)
              if isinstance(v, str) else v for k, v in node.with_.items()}
     inputs = _sub_inputs(sub, given, job["attempt"])
@@ -736,7 +741,7 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
         emit({**event, "node": f"{label}/{event['node']}"} if "node" in event else event)
 
     async def attempt(number: int, _harness, record: Attempt) -> dict:
-        child = ctx.child(sub, folder / f"attempt-{number}", home, path, label, record.id)
+        child = ctx.child(sub, folder / f"attempt-{number}", home, path, label, record.id, outputs)
         # The folder nests a level per pass and attempt at every depth, so it names the thread uniquely
         thread = f"{ctx.run.id}/{child.run.dir.relative_to(ctx.root.run.dir)}"
         record.begin(workflow=node.workflow, inputs={k: HIDDEN if k in secret else v for k, v in inputs.items()},

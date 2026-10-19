@@ -380,6 +380,7 @@ class CursorSession:
         if status == "in_progress" and not call.get("shown"):
             call["shown"] = True
             self.spec.emit({"event": "agent_tool", "tool": _label(call), "detail": _detail(call, self.spec.cwd)})
+            self._trace_call(update.get("toolCallId"), call)  # now: a timeout may stop it before it completes
         elif status in ("completed", "failed"):
             self.calls.pop(update.get("toolCallId"), None)
             output = call.get("rawOutput") or call.get("content") or ""
@@ -387,9 +388,15 @@ class CursorSession:
             kept = {"kept": False, "characters": len(json.dumps(output))} if relayed else {"output": short(output, 2000)}
             transcript(self.spec.log, "tool", title=call.get("title"), tool_kind=call.get("kind"), status=status,
                        input=call.get("rawInput"), **kept)
-            self.spec.trace.tool_call(update.get("toolCallId"), _label(call),
-                                      {"title": call.get("title"), "kind": call.get("kind"), "input": call.get("rawInput")})
+            self._trace_call(update.get("toolCallId"), call)
             self.spec.trace.tool_result(update.get("toolCallId"), output, status == "failed", kept=not relayed)
+
+    def _trace_call(self, call_id, call: dict) -> None:
+        """A tool call for the trace, once, as its updates have described it so far."""
+        if not call.get("traced"):
+            call["traced"] = True
+            self.spec.trace.tool_call(call_id, _label(call), {"title": call.get("title"), "kind": call.get("kind"),
+                                                              "input": call.get("rawInput")})
 
     def _flush(self) -> None:
         if self.text.strip():
@@ -406,6 +413,8 @@ class CursorSession:
         return await asyncio.to_thread(git_tool.run, self.spec.cwd, args.get("args") or [])
 
     async def close(self) -> None:
+        for call_id, call in self.calls.items():  # calls still open, as after a timeout: the trace gets them too
+            self._trace_call(call_id, call)
         try:
             if self.rpc is not None:
                 try:

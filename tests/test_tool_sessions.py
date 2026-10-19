@@ -550,6 +550,28 @@ def test_codex_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_
     assert "list_issues answered" not in (run_dir() / "trace.jsonl").read_text()
 
 
+def timed_out(harness: str) -> str:
+    """A workflow whose one agent step has 2 seconds and no retry."""
+    Path("flow.yaml").write_text(dedent(f"""
+        version: 1
+        name: slow
+        defaults: {{harness: {harness}, harnesses: {{cursor: {{model: composer-2.5}}}}}}
+        start: {{input: {{}}}}
+        nodes:
+          work: {{needs: [start], instruction: Look around, timeout: 2s, retry: 0}}
+        end: {{output: {{}}}}
+        """))
+    return "flow.yaml"
+
+
+def test_codex_reports_a_tool_call_that_a_timeout_stops_for_the_trace(repo, monkeypatch):
+    codex(monkeypatch, repo, [{"started": {"type": "commandExecution", "command": "sleep 600", "cwd": "/w"}}, {"hang": True}])
+    assert cli.main(["run", timed_out("codex")]) == 1
+    (call,) = [r for r in trace_records() if r["kind"] == "tool_call"]
+    assert (call["tool"], call["arguments"]) == ("command", {"command": "sleep 600", "cwd": "/w"})
+    assert [r["outcome"] for r in trace_records() if r["kind"] == "attempt_end"] == ["timed_out"]
+
+
 def test_codex_answers_other_requests_while_a_slow_tool_call_runs(repo, monkeypatch):
     vendor = FakeVendor(["list_issues", "get_user"], delays={"list_issues": 1.0}).start()
     monkeypatch.setitem(TOOLS, "linear", vendor.tool("linear"))
@@ -665,6 +687,15 @@ def test_cursor_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool
         ("tool_call", "submit_result", None, True), ("tool_result", None, None, True)]
     assert found[1]["arguments"]["input"] == {"providerIdentifier": "linear", "toolName": "list_issues", "args": {"query": "open"}}
     assert "list_issues answered" not in (run_dir() / "trace.jsonl").read_text()
+
+
+def test_cursor_reports_a_tool_call_that_a_timeout_stops_for_the_trace(repo, monkeypatch):
+    cursor(monkeypatch, repo, [{"permission": {"kind": "execute", "title": "`sleep 600`", "rawInput": {"command": "sleep 600"}}},
+                               {"hang": True}])
+    assert cli.main(["run", timed_out("cursor")]) == 1
+    (call,) = [r for r in trace_records() if r["kind"] == "tool_call"]
+    assert call["arguments"] == {"title": "`sleep 600`", "kind": "execute", "input": {"command": "sleep 600"}}
+    assert [r["outcome"] for r in trace_records() if r["kind"] == "attempt_end"] == ["timed_out"]
 
 
 def test_cursor_refuses_an_mcp_server_wf_did_not_give_the_session(tmp_path):

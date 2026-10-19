@@ -150,6 +150,7 @@ class CodexSession:
         self._total = 0  # the thread's token count, as last reported
         self._turn_start = 0
         self._counted = False  # has a token count come in yet?
+        self._traced: set[str] = set()  # the tool calls the trace already has, from item/started
 
     async def start(self) -> None:
         spec = self.spec
@@ -242,6 +243,7 @@ class CodexSession:
                 break
             if method == "item/started":
                 self._progress(params.get("item") or {})
+                self._trace_call(params.get("item") or {})  # now: a timeout may stop it before it completes
             elif method == "item/completed":
                 self._record(params.get("item") or {})
             elif method == "thread/tokenUsage/updated":
@@ -305,11 +307,17 @@ class CodexSession:
                        kept=False, characters=sum(len(c.get("text") or c.get("imageUrl") or "") for c in item.get("contentItems") or []))
         elif kind in ("fileChange", "webSearch", "mcpToolCall", "dynamicToolCall"):
             transcript(self.spec.log, "tool", item=item)
-        if kind in TOOL_ITEMS:  # the call, and what came of it, as one item
-            call = str(item.get("id") or "")
-            self.spec.trace.tool_call(call, _tool_label(item), {k: v for k, v in item.items() if k not in ANSWER and k not in ("id", "type")})
-            self.spec.trace.tool_result(call, {k: v for k, v in item.items() if k in ANSWER},
+        if kind in TOOL_ITEMS:
+            self._trace_call(item)
+            self.spec.trace.tool_result(str(item.get("id") or ""), {k: v for k, v in item.items() if k in ANSWER},
                                         item.get("status") == "failed" or item.get("success") is False, kept=not relayed)
+
+    def _trace_call(self, item: dict) -> None:
+        """A tool call for the trace, once: its arguments are all of the item but its outcome."""
+        call = str(item.get("id") or "")
+        if item.get("type") in TOOL_ITEMS and call not in self._traced:
+            self._traced.add(call)
+            self.spec.trace.tool_call(call, _tool_label(item), {k: v for k, v in item.items() if k not in ANSWER and k not in ("id", "type")})
 
     async def close(self) -> None:
         try:

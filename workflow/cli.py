@@ -405,7 +405,8 @@ def _trace(args) -> int:
               if args.json else trace_view.values_text(matches, args.var))
         return 0
     if args.json:
-        print(json.dumps({"run": run.id, "dir": str(run.dir), "records": chosen}, indent=2, ensure_ascii=False, default=str))
+        records = [trace_view.expanded(run, record) for record in chosen]
+        print(json.dumps({"run": run.id, "dir": str(run.dir), "records": records}, indent=2, ensure_ascii=False, default=str))
     else:
         print(trace_view.text(run, chosen, args.field) or "no records match")
     return 0

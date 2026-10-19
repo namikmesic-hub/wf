@@ -30,9 +30,9 @@ Every stream opens the same SQLite checkpointer and uses the run id as
 LangGraph's thread_id, so a later `wf retry` process finds the run exactly
 where this one left it.
 
-The run's trace (trace.py) gets a `run` record when a process starts to drive
-the run. It gets a `run_stopped` record with the run's status when the process
-stops.
+The run's trace (trace.py) gets a `run` record just before a process drives the
+run. It gets a `run_stopped` record with the run's status when the process
+stops, so each `run` record has its `run_stopped` record.
 """
 
 import asyncio
@@ -227,7 +227,6 @@ def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | 
         return _drive(ctx, {"input": inputs}, asking)
     ctx.home = _run_home(run, state)
     print(f"{'Continuing' if answers is not None else 'Retrying'} run {run.id}")
-    ctx.trace.run("retried", workflow=ctx.workflow.name, **({"answers": True} if answers is not None else {}))
     if state.interrupts:
         command = _continue(state.interrupts, asking, run, answers, ctx.script)
         if isinstance(command, int):
@@ -240,6 +239,7 @@ def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | 
             return _finished(ctx, state.values)
         print(f"Run {run.id} already {status}.")
         return 0 if status == "succeeded" else 1
+    ctx.trace.run("retried", workflow=ctx.workflow.name, **({"answers": True} if answers is not None else {}))
     return _drive(ctx, command, asking)
 
 

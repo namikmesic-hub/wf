@@ -9,7 +9,7 @@
                                               the value a variable path had in every render that
                                               read it, pass by pass (also when a render read the
                                               whole of it, or only fields inside it)
-    --json                                    the same, as JSON, with stored values read back
+    --json                                    the same, as JSON, with the values in blobs/ read back
 
 It reads only the run folder, so it works on any run, finished or not, and costs nothing.
 """
@@ -20,8 +20,9 @@ from typing import Any
 
 from . import templates
 from .runs import Run
-from .trace import BLOBS, FILE
+from .trace import BLOBS, FILE, stored
 
+_BLOB = re.compile(rf"{BLOBS}/[0-9a-f]{{64}}\.(txt|json)")  # the only files a reference may name
 _STEP = re.compile(r'\.?([A-Za-z_][A-Za-z0-9_]*)|\[(-?\d+)\]|\[("(?:[^"\\]|\\.)*")\]')
 WIDTH = 100  # characters of a value shown on one line
 
@@ -44,15 +45,33 @@ def records(run: Run) -> list[dict]:
 
 
 def full(run: Run, value: Any) -> Any:
-    """A value as it was: read back from blobs/ if the record holds a reference to it (if the
-    blob is gone, the reference stays)."""
-    if isinstance(value, dict) and set(value) == {"$blob", "size", "start"} and str(value["$blob"]).startswith(f"{BLOBS}/"):
-        try:
-            text = (run.dir / value["$blob"]).read_text(encoding="utf-8")
-            return text if value["$blob"].endswith(".txt") else json.loads(text)
-        except (OSError, ValueError):
+    """A value as it was: read back from blobs/ if the record holds a reference to it. A
+    reference to a blob that is gone, or to any other file, stays as it is."""
+    if not stored(value) or not isinstance(value["$blob"], str) or not _BLOB.fullmatch(value["$blob"]):
+        return value
+    path = run.dir / value["$blob"]
+    try:
+        if not path.resolve().is_relative_to(run.dir.resolve() / BLOBS):  # blobs/ is a link to elsewhere
             return value
-    return value
+        text = path.read_text(encoding="utf-8")
+        return text if path.suffix == ".txt" else json.loads(text)
+    except (OSError, ValueError):
+        return value
+
+
+def expanded(run: Run, record: dict) -> dict:
+    """A record with each value that it holds in blobs/ read back."""
+    found = {}
+    for key, value in record.items():
+        if key == "reads":
+            value = [{**read, "value": full(run, read.get("value"))} for read in value]
+        elif key == "routes":
+            value = [{**route, "reads": [{**read, "value": full(run, read.get("value"))} for read in route.get("reads", [])]}
+                     for route in value]
+        else:
+            value = full(run, value)
+        found[key] = value
+    return found
 
 
 def parse_path(text: str) -> tuple:
@@ -160,10 +179,11 @@ def _renders(run: Run, found: list[dict]) -> str:
         if record.get("kind") != "render":
             continue
         template = full(run, record.get("template"))
-        key = (record.get("where"), record.get("node"), record.get("field"), template)
+        text = template if isinstance(template, str) else _short(template)  # a blob that is gone: its reference
+        key = (record.get("where"), record.get("node"), record.get("field"), text)
         if key not in shown:  # the template once, where it first rendered
             shown.add(key)
-            lines += ["", f"{record.get('field')} of {_where(record)}:"] + [f"    {line}" for line in str(template).splitlines()]
+            lines += ["", f"{record.get('field')} of {_where(record)}:"] + [f"    {line}" for line in text.splitlines()]
         lines.append(f"  {record['id']}")
         lines += [f"    {read['path']} = {_short(read['value'])}" for read in record.get("reads", [])]
         lines.append(f"    ✗ {record['error']}" if "error" in record else f"    → {_short(record.get('result'))}")

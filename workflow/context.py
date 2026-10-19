@@ -52,6 +52,7 @@ class RunContext:
     usage: dict = field(default_factory=lambda: {"cost_usd": 0.0, "tokens": 0})  # spent so far, kept live
     max_agents: int | None = None  # the cap on live agent sessions across runs (capacity.py), if any
     trace_parent: str = "run"  # in the trace, the attempt that runs this sub-workflow
+    secret_outputs: frozenset[str] = frozenset()  # its end outputs that feed a secret of the parent
     _clock_start: float = field(default_factory=time.monotonic)
     _elapsed_before: float = 0.0
     _slots: dict = field(default_factory=dict)
@@ -81,12 +82,14 @@ class RunContext:
         return {"id": self.run.id, "dir": str(self.root.run.dir), "base": self.home["base"],
                 "branch": self.home["branch"], "repo": self.home["path"]}
 
-    def child(self, workflow: Workflow, folder: Path, home: dict, path: list[str], label: str, attempt: str) -> "RunContext":
+    def child(self, workflow: Workflow, folder: Path, home: dict, path: list[str], label: str, attempt: str,
+              secret_outputs: frozenset[str] = frozenset()) -> "RunContext":
         """The context for a sub-workflow run in `folder`, working in `home`, for node `label`,
-        by the attempt whose trace id is `attempt`."""
+        by the attempt whose trace id is `attempt`. Its end outputs in `secret_outputs` feed a
+        secret here."""
         return RunContext(workflow=workflow, run=Run(self.run.id, folder, self.run.repo), home=home,
                           parent=self, prefix=(*self.prefix, *path), where=f"{self.where}{label}/", saver=self.saver,
-                          trace_parent=attempt)
+                          trace_parent=attempt, secret_outputs=secret_outputs)
 
     @property
     def trace(self) -> Scope:
@@ -95,7 +98,7 @@ class RunContext:
             root = self.root
             if root._trace_file is None:
                 root._trace_file = Trace(root.run.dir)
-            self._trace = Scope(root._trace_file, self.workflow, self.load, self.trace_parent, self.where)
+            self._trace = Scope(root._trace_file, self.workflow, self.load, self.trace_parent, self.where, self.secret_outputs)
         return self._trace
 
     def load(self, path: Path) -> Workflow:
