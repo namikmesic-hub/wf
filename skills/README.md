@@ -23,3 +23,4 @@ Copy or link the folder wherever your agent loads skills from:
   `wf-workflows/SKILL.md` from its instructions file (`AGENTS.md`).
 
 The skill expects `wf` on the agent's PATH (`uv tool install --editable /path/to/wf`).
+A link follows each wf update. A copy doesn't, so copy the folder again after you update wf.

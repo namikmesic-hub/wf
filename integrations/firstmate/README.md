@@ -43,6 +43,10 @@ The binding points at a copy firstmate keeps in its home. After changing
 `workflow/firstmate.py`, nothing needs rebinding; after `wf integrate` writes a
 new package version, bind it again.
 
+The skill is a copy too, so copy `wf/SKILL.md` into your firstmate checkout
+again after each wf update. An old copy can tell the first mate to use a
+command that the new wf doesn't have.
+
 ## What the first mate gets
 
 | Command | Use |
