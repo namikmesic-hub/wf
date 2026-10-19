@@ -411,6 +411,17 @@ def test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work(repo, mon
     assert "fm/gone" not in capsys.readouterr().out  # a branch that's gone isn't kept
 
 
+def test_discard_says_which_branches_git_would_not_delete(repo, monkeypatch, capsys):
+    use(monkeypatch, submit({"summary": "x"}))
+    write(NAMED, inputs=BRANCH_INPUT)
+    assert cli.main(["run", "flow.yaml", "branch=fm/checked"]) == 0
+    git("checkout", "-q", "fm/checked")  # git can't delete the branch you're on
+    capsys.readouterr()
+    assert cli.main(["discard", only_run().name, "--branches"]) == 0
+    assert "kept branch fm/checked: git couldn't delete it (" in capsys.readouterr().out
+    assert git("branch", "--show-current") == "fm/checked"
+
+
 def test_discard_deletes_the_branch_a_run_made_without_recording_it(repo, monkeypatch):
     use(monkeypatch, talk(), talk(), talk())  # never submits: the worktree stays for wf resume
     write(NAMED.replace("workspace: new", "workspace: new, retry: 0"), inputs=BRANCH_INPUT)

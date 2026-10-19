@@ -30,7 +30,8 @@ hash of its path) keeps two repos' runs apart. Then the repo's working tree and
 worktree records under .git. run.json's `repo` workspace is the repo's path,
 so a run folder found by its path alone (Run.at) still knows its repo. The
 commands wf prints for a run (Run.command) name its runs folder when wf
-wouldn't look there by itself.
+wouldn't look there by itself. A runs folder inside the repo goes into
+.git/info/exclude, as .wf/ does.
 
 The checkpoints are LangGraph's; this module only says where they live.
 
@@ -302,8 +303,7 @@ def create(repo: Path, name: str, files: list[Path], main: Path, inputs: dict, h
     write_json(copies / "manifest.json", {"main": str(main.resolve().relative_to(base))})
     write_json(folder / "input.json", inputs)
     write_json(folder / "run.json", {"workflow": name, "home": home, "dry_run": dry_run, **({"limits": limits} if limits else {})})
-    if parent == repo / ROOT:  # a runs folder outside the repo needs no exclude
-        exclude_from_git(repo)
+    exclude_from_git(repo, None if parent == repo / ROOT else parent)  # a runs folder outside the repo needs none
     run = Run(run_id, folder, repo)
     run.set_status("running")
     return run
@@ -336,7 +336,7 @@ NOT_OURS = "wf can't tell it's still this run's work (no worktree of the run has
 def discard(run: Run, branches: bool) -> dict[str, str]:
     """Delete a run: its worktrees, temp folders, folder, and (with `branches`) its branches.
     Holds the run's lock while it does, so a run being driven can't be discarded (RunBusy).
-    Returns the branches of its that it kept, with why (KEPT, NOT_OURS), to say so.
+    Returns the branches of its that it kept, with why (KEPT, NOT_OURS, or git's error), to say so.
 
     A branch `branch` named is the run's while one of its worktrees has it checked out, or
     while it's on the commit the run left it on (Run.leave_branches). After that, somebody
@@ -351,8 +351,8 @@ def discard(run: Run, branches: bool) -> dict[str, str]:
         workspaces.remove_run(repo, run.id)
         shutil.rmtree(workspaces.temp_root(run.id), ignore_errors=True)
         kept = {b: NOT_OURS for b in named if b not in ours and workspaces.branch_exists(repo, b)}
-        if branches:
-            workspaces.delete_branches(repo, run.id, ours)
+        if branches:  # git keeps a branch that's checked out somewhere: say so
+            kept |= {b: f"git couldn't delete it ({why})" for b, why in workspaces.delete_branches(repo, run.id, ours).items()}
         else:
             kept |= {b: KEPT for b in workspaces.branches(repo, run.id, ours)}
         gone = run.dir.with_name(f".{run.dir.name}.discarded")  # first, so no new process can find the run
@@ -391,18 +391,26 @@ def current_branch(repo: Path) -> str | None:
     return None if branch in (None, "HEAD") else branch  # "HEAD" means detached
 
 
-def exclude_from_git(repo: Path) -> None:
-    """Add .wf/ to the repo's .git/info/exclude, once."""
+def exclude_from_git(repo: Path, folder: Path | None = None) -> None:
+    """Add .wf/ to the repo's .git/info/exclude, once. With `folder` (this repo's folder in a runs
+    folder), add that folder instead, if it's in the repo's working tree, and nothing if not."""
     git_dir = git(repo, "rev-parse", "--git-common-dir")
     if git_dir is None:
         return
+    entry = ".wf/"
+    if folder is not None:
+        top = git(repo, "rev-parse", "--show-toplevel")
+        if top is None or not folder.resolve().is_relative_to(Path(top).resolve()):
+            return
+        inside = folder.resolve().relative_to(Path(top).resolve()).as_posix()
+        entry = "/" + re.sub(r"([\\*?\[])", r"\\\1", inside) + "/"  # from the top, with *?[\ taken as they are
     exclude = (repo / git_dir).resolve() / "info" / "exclude"
     try:  # only tidiness: never fail a run because this can't be written
         exclude.parent.mkdir(parents=True, exist_ok=True)
         lines = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
-        if ".wf/" not in lines:
+        if entry not in lines:
             with exclude.open("a", encoding="utf-8") as file:
-                file.write(("\n" if lines and lines[-1] else "") + ".wf/\n")
+                file.write(("\n" if lines and lines[-1] else "") + entry + "\n")
     except (OSError, UnicodeDecodeError):
         pass
 

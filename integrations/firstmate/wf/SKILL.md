@@ -27,7 +27,7 @@ source does the waiting. Writing, changing or improving a workflow file is the
 Work in the project folder the workflow belongs to: wf keeps runs in that
 folder's `.wf/runs/`, and every later `wf` command for the run must run there.
 With `WF_RUNS_DIR` set (or `--runs-dir <dir>` on every command), the run folders
-go outside the project instead, to `<dir>/<project key>/`. Then the project's
+go outside the project instead, to `<dir>/<repo key>/`. Then the project's
 working tree and `.git/info/exclude` stay as they were: only `workspace: new`
 adds its branches and worktree records under `.git`. Use that for a clone you
 must not write into. The commands wf prints for the run include `--runs-dir`.

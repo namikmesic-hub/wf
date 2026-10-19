@@ -93,8 +93,13 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         return 1
     repo = Path.cwd()
     home = _home(repo)  # once: run.json and the run itself use the same branch and commit
-    run = runs.create(repo, workflow.name, report.files, path, inputs, home=home, dry_run=script is not None,
-                      limits=overrides, runs_dir=runs_dir)
+    try:
+        run = runs.create(repo, workflow.name, report.files, path, inputs, home=home, dry_run=script is not None,
+                          limits=overrides, runs_dir=runs_dir)
+    except OSError as error:  # e.g. --runs-dir names a file
+        print(f"wf run: can't make the run folder in {runs.runs_folder(repo, runs_dir)}: {error.strerror or error}",
+              file=sys.stderr)
+        return 1
     if script is not None:
         script.keep(run.dir / "dry-run")
     if detach:  # a background `wf resume` starts it, with the lock this process takes now

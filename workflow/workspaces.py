@@ -212,10 +212,16 @@ def branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> l
     return found + [name for name in named or [] if branch_exists(repo, name)]
 
 
-def delete_branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> None:
-    """Delete a run's branches (after a dry run: they hold scripted work)."""
+def delete_branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> dict[str, str]:
+    """Delete a run's branches (after a dry run: they hold scripted work). Returns the ones
+    git didn't delete, with its error: one checked out somewhere, say."""
+    refused = {}
     for name in branches(repo, run_id, named):
-        _git(repo, "branch", "--quiet", "-D", name, check=False)
+        try:
+            _git(repo, "branch", "--quiet", "-D", name)
+        except WorkspaceError as error:
+            refused[name] = str(error)
+    return refused
 
 
 # Variables that point git at another repository than the folder it runs in. A git hook

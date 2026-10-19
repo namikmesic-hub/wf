@@ -686,8 +686,9 @@ the context to fix them.
   `branches.json` in the run folder records the branches a run made.
 - `wf discard --branches` deletes a named branch while a worktree of the run has it
   checked out, or while the branch is on the commit that the run left it on. After that,
-  somebody may have made it again or worked on it, so it stays, and discard says so. A dry
-  run that succeeds deletes its named branches.
+  somebody may have made it again or worked on it, so it stays, and discard says so. It
+  also says when git refuses to delete a branch, for example one that is checked out. A
+  dry run that succeeds deletes its named branches.
 - A node keeps the same worktree across passes, so a loop keeps working on one branch.
   Each item gets its own.
 - Worktrees live outside the repo, under `~/.wf/worktrees/`, so agents searching the repo
@@ -729,10 +730,12 @@ the context to fix them.
 - A runs folder keeps run folders outside the repo instead: `--runs-dir <dir>`, or the
   `WF_RUNS_DIR` environment variable (the option wins). Run folders then go to
   `<dir>/<repo key>/<run-id>/`. The repo key is the repo folder's name and a hash of its
-  path, like `wf-3f9a1c2b4d5e`, so the runs of two repos never mix. Nothing is written in
-  the repo, not even `.git/info/exclude`: only the worktrees and branches of `workspace: new`.
-  Later commands for the run need the same setting, in the same folder. A blank value
-  counts as no setting.
+  path, like `wf-3f9a1c2b4d5e`, so the runs of two repos never mix. The repo's working
+  tree and `.git/info/exclude` then stay as they were. `workspace: new` still adds its
+  branches, and git's records of its worktrees in `.git/worktrees/`; the worktree folders
+  are under `~/.wf/worktrees/` (see [Workspaces](#workspaces)). A runs folder inside the
+  repo goes into `.git/info/exclude`, as `.wf/` does. Later commands for the run need the
+  same setting, in the same folder. A blank value counts as no setting.
 - `wf resume` uses the copies in `workflow/`, so editing the YAML doesn't change a run
   that's already in progress.
 

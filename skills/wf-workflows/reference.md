@@ -173,7 +173,7 @@ fails when the code stops doing what the row says.
 | A `for_each` workflow node doesn't give `item` or `index` to a `branch` in its sub-workflow | `wf validate` error | `workflow/validate.py:665` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
 | The run made the branch but stopped before it recorded it | The next pass records it and goes on | `workflow/nodes.py:177` | `tests/test_workspaces.py::test_a_run_that_stopped_before_recording_its_branch_takes_it_up_again` |
 | `wf discard --branches` | Deletes a named branch only while a worktree of the run has it, or while it's on the commit that the run left it on | `workflow/runs.py:348` | `tests/test_workspaces.py::test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work` |
-| A dry run succeeds | Its named branches are deleted | `workflow/runner.py:391` | `tests/test_workspaces.py::test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them` |
+| A dry run succeeds | Its named branches are deleted | `workflow/runner.py:396` | `tests/test_workspaces.py::test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them` |
 | A `command` writes `workspace.<node>.branch` unquoted, and that node's `branch` reads node output | `wf validate` warning | `workflow/validate.py:463` | `tests/test_validate.py::test_a_branch_named_from_agent_output_is_untrusted_in_a_command` |
 
 A `new` worktree has only what's committed: an uncommitted script or fixture a
@@ -264,5 +264,6 @@ person, 3 (`wf wait`) nothing new, 130 Ctrl-C. The commands that make or find
 runs take `--runs-dir DIR` (or `WF_RUNS_DIR`): run folders then go to
 `DIR/<repo key>/` instead of `.wf/runs/`. Then the repo's working tree and
 `.git/info/exclude` stay as they were: only `workspace: new` adds branches and
-worktree records under `.git`. A blank value counts as no setting, and the
+worktree records under `.git` (a runs folder inside the repo goes into the
+exclude, as `.wf/` does). A blank value counts as no setting, and the
 commands wf prints for the run include `--runs-dir`.

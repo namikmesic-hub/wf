@@ -203,3 +203,16 @@ def test_a_run_folder_in_a_runs_folder_must_record_its_repo(repo, tmp_path):
     (folder / "run.json").write_text("{}")
     with pytest.raises(ValueError, match="doesn't say which repo the run is in"):
         runs.Run.at(folder)  # three folders up is the runs folder's parent, not a repo
+
+
+def test_a_runs_folder_inside_the_repo_is_kept_out_of_git_status(repo, tmp_path):
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--runs-dir", "runs"]) == 0
+    assert git("status", "--porcelain") == ""
+    exclude = (repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert f"/runs/{runs.repo_key(repo.resolve())}/" in exclude and ".wf/" not in exclude
+
+
+def test_a_runs_folder_wf_cannot_make_fails_the_run_with_a_message(repo, tmp_path, capsys):
+    (tmp_path / "a-file").write_text("")
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--runs-dir", str(tmp_path / "a-file")]) == 1
+    assert f"wf run: can't make the run folder in {(tmp_path / 'a-file').resolve()}/" in capsys.readouterr().err
