@@ -10,7 +10,7 @@ in wait_for_resume, like a failed run). It isn't over:
     wf run <file> --limit duration=3h           start with a different limit
 
 A limit given this way replaces the file's for the rest of the run: it is kept
-in run.json (runs.Run.set_limits), so every later `wf retry` uses it too. The
+in run.json (runs.Run.keep), so every later `wf retry` uses it too. The
 run then carries on where it stopped: a step the limit kept from retrying gets
 its retry, and a sub-workflow the limit stopped continues its own steps.
 

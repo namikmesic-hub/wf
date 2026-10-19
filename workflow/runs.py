@@ -6,7 +6,7 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
       workflow/                     copies of the workflow files as they were run
       input.json
       run.json                      the workflow's name and `repo` workspace, for starting it later,
-                                    and the --limit and --model values that `wf retry` keeps
+                                    and the --limit and --model values that `wf retry` keeps (keep())
       branches.json                 the branches `branch` named, by node path, and where the run left them
       output.json                   the end output, once the run succeeds
       status.json                   running | waiting | succeeded | failed | limit, with a sequence
@@ -122,21 +122,17 @@ class Run:
         """The limits given with --limit for this run (limits.py), by name; None removes one."""
         return self.info().get("limits") or {}
 
-    def set_limits(self, overrides: dict) -> None:
-        """Keep new --limit values for the rest of the run (call it holding the run's lock)."""
-        info = self.info()
-        info["limits"] = {**(info.get("limits") or {}), **overrides}
-        write_json(self.dir / "run.json", info)
-
     def overrides(self) -> dict[str, dict]:
         """The models given with --model, --harness and --effort (overrides.py), by node or item."""
         return self.info().get("overrides") or {}
 
-    def set_overrides(self, overrides: dict[str, dict]) -> None:
-        """Keep new overrides for the rest of the run, each in place of an earlier one for its target
-        (call it holding the run's lock)."""
+    def keep(self, limits: dict, overrides: dict[str, dict]) -> None:
+        """Keep new --limit values and overrides for the rest of the run, in one write of run.json. Each
+        replaces an earlier one with its name or target (call it holding the run's lock)."""
         info = self.info()
-        info["overrides"] = {**(info.get("overrides") or {}), **overrides}
+        for name, new in (("limits", limits), ("overrides", overrides)):
+            if new:
+                info[name] = {**(info.get(name) or {}), **new}
         write_json(self.dir / "run.json", info)
 
     def branches(self) -> dict[str, str]:
@@ -255,14 +251,27 @@ class Run:
         return False
 
     def add_event(self, event: dict) -> None:
-        self.add_events([event])
-
-    def add_events(self, events: list[dict]) -> None:
-        """Append events to events.jsonl together, in one write."""
-        at = now()
-        lines = "".join(json.dumps({"time": at, **event}, ensure_ascii=False, default=str) + "\n" for event in events)
         with (self.dir / "events.jsonl").open("a", encoding="utf-8") as file:
-            file.write(lines)
+            file.write(json.dumps({"time": now(), **event}, ensure_ascii=False, default=str) + "\n")
+
+    def add_events(self, events: list[dict]) -> int:
+        """Append events to events.jsonl, all of them or none: a write that fails is cut off again.
+        Returns the file's size before, for take_back_events (call it holding the run's lock)."""
+        path, at = self.dir / "events.jsonl", now()
+        lines = "".join(json.dumps({"time": at, **event}, ensure_ascii=False, default=str) + "\n" for event in events)
+        size = path.stat().st_size if path.exists() else 0
+        try:
+            with path.open("a", encoding="utf-8") as file:
+                file.write(lines)
+        except OSError:
+            self.take_back_events(size)
+            raise
+        return size
+
+    def take_back_events(self, size: int) -> None:
+        """Cut events.jsonl back to `size` bytes, the size that add_events returned."""
+        with (self.dir / "events.jsonl").open("r+b") as file:
+            file.truncate(size)
 
     def set_output(self, output: dict) -> None:
         write_json(self.dir / "output.json", output)

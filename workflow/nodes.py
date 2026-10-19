@@ -95,13 +95,14 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
-from . import capacity, dryrun, output_tool, schemas, templates, workspaces
+from . import capacity, dryrun, output_tool, overrides, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
 from .harnesses import SessionSpec, Unavailable, Usage, reaches_keychain
@@ -406,18 +407,12 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
     target, override = ctx.override(node_id, job["index"]) or (None, {})
-    harness = override.get("harness") or wf.setting(node_id, "harness")
-    names = list(harness) if isinstance(harness, list) else [ctx.trace.render(job, "harness", harness, variables).strip()]
-
-    def settings_for(name: str) -> tuple[str | None, str | None]:
-        """The model and effort on one harness: the override's, else the workflow's. A Cursor model
-        id carries its effort, so a Cursor session gets none."""
-        model = override.get("model") or _rendered_setting(job, ctx, name, "model", variables)
-        if name == "cursor":
-            return model, None
-        return model, override.get("effort") or _rendered_setting(job, ctx, name, "effort", variables)
-
-    chosen = {name: settings_for(name) for name in names}
+    render_setting = partial(ctx.trace.render, job)  # the trace records how the harness, model and effort render
+    names = overrides.job_harnesses(wf, node_id, override, variables, render_setting)
+    try:  # the same choice that `wf retry` checks an override with
+        chosen = {name: overrides.job_setting(wf, node_id, name, override, variables, render_setting) for name in names}
+    except overrides.SettingError as error:
+        raise _Failed(str(error), job["attempt"]) from None
     schema = schemas.node_output_schema(wf, node_id)
     listed = None if ctx.root.script else wf.setting(node_id, "tools")  # None: the node doesn't list tools
     uses = listed or ()
@@ -551,22 +546,6 @@ def _in_run(ctx: RunContext, path: Path) -> str:
         return str(path.relative_to(ctx.root.run.dir))
     except ValueError:
         return str(path)
-
-
-def _rendered_setting(job: Job, ctx: RunContext, harness: str, name: str, variables: dict) -> str | None:
-    """`model` or `effort` for one harness, rendered: a template like "{{ item.model }}" gives each item its own."""
-    where, source = ctx.workflow.harness_setting_at(job["node"], harness, name)
-    if source is None:
-        return None
-    try:
-        value = ctx.trace.render(job, name, source, variables, templates.render_value, harness=harness, set_in=where)
-    except templates.TemplateError as error:
-        raise templates.TemplateError(f"{name}: {error}") from error
-    if not isinstance(value, str) or not value.strip():
-        shown = "none" if value is None else json.dumps(value, ensure_ascii=False, default=str)
-        raise _Failed(f"`{name}` of node `{job['node']}` renders to {shown} for {harness}, "
-                      "but it must be a non-empty string", job["attempt"])
-    return value.strip()
 
 
 @asynccontextmanager

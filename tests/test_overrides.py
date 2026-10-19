@@ -339,18 +339,21 @@ def test_an_override_and_a_wrong_answer_are_both_reported_and_change_nothing(rep
     assert given(only_run() / "nodes" / "write" / "1" / "attempt-1.log") == ("claude-code", "sonnet", None)
 
 
+TWO = """
+version: 1
+name: two
+defaults: {harness: claude-code}
+limits: {tokens: 1000}
+start: {input: {}}
+nodes:
+  a: {needs: [start], instruction: x}
+  b: {needs: [a], instruction: y}
+end: {output: {said: "{{ b.summary }}"}}
+"""
+
+
 def test_a_new_limit_is_kept_only_when_the_overrides_are_right(repo, no_real_harness, capsys):
-    write("two.yaml", """
-        version: 1
-        name: two
-        defaults: {harness: claude-code}
-        limits: {tokens: 1000}
-        start: {input: {}}
-        nodes:
-          a: {needs: [start], instruction: x}
-          b: {needs: [a], instruction: y}
-        end: {output: {said: "{{ b.summary }}"}}
-    """)
+    write("two.yaml", TWO)
     steps = {"agents": {"a": [{"summary": "big", "_tokens": 5000}], "b": [{"summary": "done"}]}}
     assert cli.main(["run", "two.yaml", "--dry-run", script(steps)]) == 1  # paused at the limit
     before = record()
@@ -359,6 +362,50 @@ def test_a_new_limit_is_kept_only_when_the_overrides_are_right(repo, no_real_har
     assert cli.main(["retry", only_run().name, "--limit", "tokens=10000", "--model", "b=sonnet"]) == 0
     assert json.loads((only_run() / "run.json").read_text())["limits"] == {"tokens": 10000}
     assert given(only_run() / "nodes" / "b" / "1" / "attempt-1.log") == ("claude-code", "sonnet", None)
+
+
+def test_a_limit_and_an_override_are_kept_together_or_not_at_all(repo, no_real_harness, monkeypatch, capsys):
+    write("two.yaml", TWO)
+    steps = {"agents": {"a": [{"summary": "big", "_tokens": 5000}], "b": [{"summary": "done"}]}}
+    assert cli.main(["run", "two.yaml", "--dry-run", script(steps)]) == 1  # paused at the limit
+    before = record()
+
+    def full_disk(self, limits, overrides):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(runs.Run, "keep", full_disk)
+    capsys.readouterr()
+    assert cli.main(["retry", only_run().name, "--limit", "tokens=10000", "--model", "b=sonnet"]) == 1
+    assert "so the run stays as it was: No space left on device" in capsys.readouterr().err
+    assert record() == before  # its override event went again
+
+
+def test_events_that_cant_all_be_written_are_cut_off(tmp_path, monkeypatch):
+    run = runs.Run("r", tmp_path, tmp_path)
+    run.add_event({"event": "node_started", "node": "a"})
+    before = (tmp_path / "events.jsonl").read_bytes()
+    opened = Path.open
+
+    class HalfWritten:
+        def __init__(self, file):
+            self.file = file
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *details):
+            self.file.close()
+
+        def write(self, text):
+            self.file.write(text[: len(text) // 2])
+            self.file.flush()
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "open", lambda path, mode="r", **options: HalfWritten(opened(path, mode, **options))
+                        if mode == "a" else opened(path, mode, **options))
+    with pytest.raises(OSError):
+        run.add_events([{"event": "override", "node": "a"}, {"event": "override", "node": "b"}])
+    assert (tmp_path / "events.jsonl").read_bytes() == before
 
 
 # ---------- whether the harness can run here ----------
@@ -481,6 +528,80 @@ def test_the_harness_check_comes_last_and_opens_the_harness_outside_the_run(repo
     Path("right.json").write_text(json.dumps({key: {"go": True}}))
     assert cli.main(["retry", only_run().name, "--answers", "right.json", "--harness", "plan=codex"]) == 0
     assert folders[-1] == only_run().resolve()  # the run itself opens it in its own folder, as before
+
+
+def test_a_model_that_a_template_gives_the_failed_item_on_the_new_harness_is_checked(repo, monkeypatch, capsys):
+    cursor = Fake("cursor", submit({"summary": "a"}), submit({"summary": "b"}), models={"grok"})
+    claude = Fake("claude-code", ends("failed", "overloaded"), ends("failed", "overloaded"))
+    for fake in (claude, cursor):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    write("fan.yaml", """
+        version: 1
+        name: fan
+        defaults:
+          harness: claude-code
+          harnesses: {claude-code: {model: "{{ item.model }}"}, cursor: {model: "{{ item.model }}"}}
+        start: {input: {}}
+        nodes:
+          review:
+            needs: [start]
+            for_each: "[{'harness': 'cursor', 'model': 'grok'}, {'harness': 'claude-code', 'model': 'opus'}]"
+            harness: "{{ item.harness }}"
+            instruction: Review the change
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "fan.yaml"]) == 1
+    before = record()
+    capsys.readouterr()
+    assert cli.main(["retry", only_run().name, "--harness", "review[1]=cursor"]) == 1  # its model is opus
+    assert "review[1]: cursor has no model `opus`" in capsys.readouterr().err
+    assert record() == before
+    assert cli.main(["retry", only_run().name, "--harness", "review[1]=cursor", "--model", "review[1]=grok"]) == 0
+    assert [spec.model for spec in cursor.specs] == ["grok", "grok"]
+
+
+def test_a_harness_template_that_reads_the_jobs_own_workspace_gives_its_harness(repo, no_real_harness):
+    write("one.yaml", """
+        version: 1
+        name: one
+        defaults: {harness: claude-code, harnesses: {cursor: {model: grok}}}
+        start: {input: {}}
+        nodes:
+          plan:
+            needs: [start]
+            harness: "{{ 'cursor' if workspace.plan.path else 'codex' }}"
+            instruction: Plan it
+        end: {output: {said: "{{ plan.summary }}"}}
+    """)
+    steps = {"agents": {"plan": [{"_unavailable": "out"}, {"summary": "planned"}]}}
+    assert cli.main(["run", "one.yaml", "--dry-run", script(steps)]) == 1
+    assert cli.main(["retry", only_run().name, "--model", "plan=argon"]) == 0  # no --harness: the job's is cursor
+    assert given(only_run() / "nodes" / "plan" / "1" / "attempt-2.log") == ("cursor", "argon", None)
+
+
+def test_a_workflow_model_with_spaces_around_it_is_checked_as_the_run_uses_it(repo, monkeypatch):
+    cursor = Fake("cursor", submit({"summary": "planned"}), models={"grok"})
+    claude = Fake("claude-code", ends("failed", "overloaded"), ends("failed", "overloaded"))
+    for fake in (claude, cursor):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    write("one.yaml", ONE.replace("codex: {model: gpt-6}", 'cursor: {model: " grok "}'))
+    assert cli.main(["run", "one.yaml"]) == 1
+    assert cli.main(["retry", only_run().name, "--harness", "plan=cursor"]) == 0
+    assert [spec.model for spec in cursor.specs] == ["grok"]
+
+
+def test_no_folder_to_open_the_harnesses_in_changes_nothing(repo, monkeypatch, capsys):
+    run_id = failed_run(monkeypatch, Fake("codex", models={"gpt-6"}))
+    before = record()
+
+    def full_disk(*args, **options):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(overrides.tempfile, "TemporaryDirectory", full_disk)
+    capsys.readouterr()
+    assert cli.main(["retry", run_id, "--harness", "plan=codex"]) == 1
+    assert "wf can't make a folder to open the harnesses in: No space left on device" in capsys.readouterr().err
+    assert record() == before
 
 
 def test_an_override_never_applies_without_its_event(repo, no_real_harness, monkeypatch, capsys):

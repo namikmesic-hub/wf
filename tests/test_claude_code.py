@@ -86,6 +86,14 @@ def test_opening_finds_the_claude_code_program_as_the_sdk_does(tmp_path, monkeyp
     with pytest.raises(Unavailable, match="Claude Code isn't installed: Claude Code not found. Install with:$"):
         asyncio.run(ClaudeCode().open(tmp_path))
 
+    program = tmp_path / "claude"  # a file in a folder where the SDK looks, but not a program you may run
+    program.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(SubprocessCLITransport, "_find_cli", lambda self: str(program))
+    with pytest.raises(Unavailable, match="Claude Code can't run: .*claude isn't a program that you may run"):
+        asyncio.run(ClaudeCode().open(tmp_path))
+    program.chmod(0o755)
+    asyncio.run(ClaudeCode().open(tmp_path))
+
 
 @pytest.mark.harness
 def test_a_real_read_only_agent_node_on_claude_code(tmp_path, monkeypatch, capsys):

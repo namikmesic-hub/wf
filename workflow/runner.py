@@ -187,7 +187,8 @@ def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, ans
             print(f"{name}: run {run.id} is still over a limit ({still[1]}). "
                   f"Continue it with a bigger one: {run.command('retry', limits.hint(still[0]))}", file=sys.stderr)
             return 1
-    found, problems = _checked_overrides(run, state, workflows, new_models)
+    checked = _checked_overrides(run, state, workflows, new_models)
+    problems = checked.problems
     if answers is not None:
         asked = operate.questions(state.interrupts) if state.values else []
         problems += operate.check_answers(asked, answers) if asked else [f"run {run.id} isn't waiting for answers"]
@@ -198,17 +199,19 @@ def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, ans
         if run.status().get("status") == "running":  # a background driver: tell `wf wait` why it stopped
             run.set_status("failed", error=problem)
         return 1
-    if found and ctx.script is None and (problems := asyncio.run(overrides.available(found, workflow))):
+    if checked.found and ctx.script is None and (problems := asyncio.run(overrides.available(checked))):
         return _refused(name, problems)  # the last check, as it opens harnesses (a dry run's script plays them all)
     try:  # every check passed: only now does anything change
-        if found:
-            _keep_overrides(run, state.values or {}, found, as_json)
-        if new_limits:
-            run.set_limits(new_limits)
-            print(f"Limits for the rest of this run: {limits.describe(ctx.limits)}", file=sys.stderr if as_json else sys.stdout)
+        _keep(run, state.values or {}, checked.found, new_limits)
     except OSError as error:
-        print(f"{name}: can't keep the new settings in {run.dir}: {error.strerror or error}", file=sys.stderr)
+        print(f"{name}: can't keep the new settings in {run.dir}, so the run stays as it was: "
+              f"{error.strerror or error}", file=sys.stderr)
         return 1
+    out = sys.stderr if as_json else sys.stdout
+    if new_limits:
+        print(f"Limits for the rest of this run: {limits.describe(ctx.limits)}", file=out)
+    for key, override in checked.found.items():
+        print(f"Override for the rest of this run: {overrides.describe(key, override)}", file=out)
     ctx.overrides = run.overrides()
     if detach:
         args = ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)]
@@ -258,12 +261,12 @@ def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | 
 
 
 def _checked_overrides(run: runs.Run, state: StateSnapshot, workflows: list[spec.Workflow],
-                       given: dict) -> tuple[dict, list[str]]:
+                       given: dict) -> overrides.Checked:
     """The overrides given to `wf retry`, checked against the run, and what's wrong with them."""
     if not given:
-        return {}, []
+        return overrides.Checked()
     if _ended(run, state):
-        return {}, [f"run {run.id} has ended, so no node is left to run with another model"]
+        return overrides.Checked(problems=[f"run {run.id} has ended, so no node is left to run with another model"])
     return overrides.check(given, workflows, state.values or {})
 
 
@@ -273,20 +276,25 @@ def _refused(name: str, problems: list[str]) -> int:
     return 1
 
 
-def _keep_overrides(run: runs.Run, values: dict, found: dict, as_json: bool) -> None:
-    """Record checked overrides in events.jsonl, each with the last error of its target, then keep them
-    for the rest of the run. In this order, an override never applies without its event."""
+def _keep(run: runs.Run, values: dict, found: dict, new_limits: dict) -> None:
+    """Record checked overrides in events.jsonl, each with the last error of its target. Then keep them and the
+    new limits in run.json, in one write. If that write fails, the events go again: events.jsonl and run.json
+    always agree, and either everything changes or nothing does. Raises OSError."""
+    if not found and not new_limits:
+        return
     events = []
     for key, override in found.items():
         node, index = overrides.split(key)
         error = overrides.last_error(values, node, index)
         events.append({"event": "override", "node": node, **({"index": index} if index is not None else {}),
                        **override, **({"last_error": error} if error else {})})
-    run.add_events(events)
-    run.set_overrides(found)
-    for key, override in found.items():
-        print(f"Override for the rest of this run: {overrides.describe(key, override)}",
-              file=sys.stderr if as_json else sys.stdout)
+    size = run.add_events(events) if events else None
+    try:
+        run.keep(new_limits, found)
+    except OSError:
+        if size is not None:
+            run.take_back_events(size)
+        raise
 
 
 def _note_uncommitted(workflows: list[spec.Workflow], read_by_wf: list[Path]) -> None:
