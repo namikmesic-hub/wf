@@ -25,12 +25,32 @@ Then read the evidence behind each note, in the run folder
 - `attempt-<n>.log`: an agent's transcript (JSON lines: `sent`, `text`, `tool`,
   `tool_result`, `result`) or a command's output.
 - `output.json` per pass, and `events.jsonl` for the order of everything.
+- `trace.jsonl`: each step of the run and why it happened, which `wf trace` reads (next section).
+
+## Reading the trace
+
+`wf report` says what happened across runs.
+`wf trace <run-id>` says why it happened in one run, from its `trace.jsonl`.
+Add `--json` to get the answer as data, with long values read back in full.
+
+- `wf trace <run-id> --var <path>` shows the value of a variable in each render that read it, pass after pass.
+  Use it to see if feedback reached the next pass: `--var review.blocking_issues` must show the issues in the `instruction` of `implement` on pass 2.
+- `wf trace <run-id> --field instruction --node <node>` shows the template once, then for each pass the values that it read and the text that it gave.
+  `command`, `env`, `with`, `harness`, `model`, `effort`, `for_each` and `end` work the same way.
+- `wf trace <run-id> --node <node> --field routes` shows why the node went where it went.
+  You see each route with its `when`, the values that it read, its result, and if its `max` was used up.
+- `wf trace <run-id> --node <node> --pass <n>` shows one pass in full.
+  You see each attempt with its harness, model, effort, access and session, each turn and reminder, and each tool call with its arguments and answer.
+  You also see each `submit_result` call with the problems that wf found in it.
+
+A template error shows in its render, with the values that the template read before it failed.
 
 ## Symptoms, causes, changes
 
 **A loop reached its max.** The exit condition didn't hold in time.
 - The author never saw the feedback: check its `instruction.md` on pass 2+ for
   the reviewer's issues and test output; add them, plus `history.<node>` notes.
+  `wf trace <run-id> --var review.blocking_issues` shows which passes read them.
 - The reviewer moves the goalposts: ask it to check that earlier issues were
   fixed and to list only blocking problems (`history.review | tojson`).
 - Tests fail for reasons the author can't fix (environment, flaky tests): fix
@@ -39,8 +59,8 @@ Then read the evidence behind each note, in the run folder
 
 **Retries with "never made a valid submit_result call".** The agent finished
 without submitting, or kept failing the contract.
-- Look for `submit_result` errors in the transcript: a field it keeps getting
-  wrong needs a clearer `description`, an `enum`, or a simpler type.
+- Look for `submit_result` errors: `wf trace <run-id> --node <node>` lists each call with the problems wf found.
+  A field it keeps getting wrong needs a clearer `description`, an `enum`, or a simpler type.
 - A contract with many fields or deep nesting: split the node, or flatten.
 - The task is too big for one turn budget: split it, or raise `max_turns`.
 
@@ -67,9 +87,11 @@ route condition, or move it behind a route so it's asked only when it matters.
 **Runs fail early at the same node.** Read its failure in `status.json` and the
 attempt log; a template error (reading a field of a node that didn't run) means
 a missing guard: validate's "might not have run" warnings point at them.
+`wf trace <run-id> --node <node>` shows the render that failed, with the values it read.
 
 **A route is never taken.** Its condition can't become true, or the case never
 comes up: dry-run it to see which; delete it if the case is truly gone.
+`wf trace <run-id> --field routes` shows the values each `when` read on every pass.
 
 ## The loop
 

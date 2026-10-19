@@ -23,6 +23,7 @@ and every path below ends on them:
   list really run**: wf names them before it starts.
 - `wf report` turns runs into **evidence**: passes, retries, failures, routes
   taken, loops that ran out, where the tokens and dollars went.
+  `wf trace` explains one run: what each template read on each pass, and why each route was taken.
 
 Load [reference.md](reference.md) before writing or editing YAML. `wf examples`
 copies two complete workflows into ./wf-examples/ to read or start from;
@@ -76,11 +77,11 @@ Load [improving.md](improving.md): it maps each symptom in a report to its
 likely causes and the change that fixes each.
 
 1. **Gather evidence.** `wf report --workflow <name> --real --json` over its
-   recent runs (`--version` keeps one version of the file). For each node the
-   notes name, read its attempt logs
-   (`<run folder>/nodes/<node>/<pass>/attempt-<n>.log`; `wf status <run-id> --json`
-   gives the run folder as `dir`). Done when every
-   note in the report has a cause written next to it.
+   recent runs (`--version` keeps one version of the file).
+   For each node the notes name, read its trace: `wf trace <run-id> --node <node>`.
+   It shows what each template read, why each route was taken, and each attempt and tool call.
+   Read its attempt logs too, in `<run folder>/nodes/<node>/<pass>/attempt-<n>.log` (`wf status <run-id> --json` gives the run folder as `dir`).
+   Done when every note in the report has a cause written next to it.
 2. **Change one thing per cause**, the smallest change that removes it.
 3. **Prove it.** Validate, dry-run the paths you touched, and after the next
    real runs compare their report (`--version <new>`) with the one you started
