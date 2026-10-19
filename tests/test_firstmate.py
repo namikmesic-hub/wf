@@ -112,6 +112,14 @@ def test_results_are_classified_and_finished_runs_end_the_source(monkeypatch, ca
     assert call(monkeypatch, capsys, "invoke", invoke("result.silent", **args))["result"] == {"value": False}
 
 
+def test_a_result_too_big_to_slim_keeps_the_command_that_continues_the_run():
+    state = {"run": "r", "status": "failed", "seq": 3, "dir": "/runs/r", "workflow": "w", "node": "n",
+             "error": "x" * (firstmate.MAX_OUTPUT + 1), "retry": "wf retry r"}
+    assert json.loads(firstmate._bounded(state, "wf status r --json")) == {
+        "run": "r", "status": "failed", "seq": 3, "dir": "/runs/r", "workflow": "w", "retry": "wf retry r",
+        "more": "wf status r --json"}
+
+
 def test_bad_requests_fail_with_a_protocol_error(repo, monkeypatch, capsys):
     reply = call(monkeypatch, capsys, "invoke", invoke("source.poll", source_id="s", config_ref="/not/a/wf-run/ref"))
     assert (reply["ok"], reply["result"]) == (False, None)

@@ -242,6 +242,7 @@ def test_a_failed_item_stops_the_run_and_retry_reruns_only_that_item(repo, capsy
 
     Path("broken-2").unlink()
     assert cli.main(["retry", folder.name]) == 0
+    assert f"Retrying run {folder.name}" in capsys.readouterr().out
     assert status(folder) == "succeeded"
     assert output(folder)["results"] == ["item-0\n", "item-1\n", "item-2\n"]
     assert [Path(f"ran-{i}").read_text().count("run") for i in (1, 2, 3)] == [1, 2, 1]
@@ -471,6 +472,19 @@ def test_resume_is_not_a_command(repo, capsys):
         cli.main(["resume", "nope"])
     assert stop.value.code == 1
     assert "invalid choice: 'resume'" in capsys.readouterr().err
+
+
+def test_retry_has_its_help_and_all_its_options(repo, capsys):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["--help"])
+    assert stop.value.code == 0
+    assert "retry continue a failed or paused run from its last checkpoint" in " ".join(capsys.readouterr().out.split())
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["retry", "--help"])
+    assert stop.value.code == 0
+    usage = " ".join(capsys.readouterr().out.split())
+    for option in ("run-id", "--no-input", "--answers FILE", "--detach", "--json", "--limit NAME=VALUE", "--runs-dir DIR"):
+        assert option in usage
 
 
 def test_retry_uses_the_copied_workflow(repo, capsys):
