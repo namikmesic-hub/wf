@@ -22,6 +22,7 @@ the MCP server takes are in `access`; refresh tokens the token endpoint takes ar
     iss_supported=True         the metadata says the sign-in always has `iss`
     metadata_issuer="..."      the metadata names this issuer instead of its own
     resource_slash=True        the resource metadata names the issuer with a last slash, as Google's does
+    hints={"op": {"readOnlyHint": True}}   an operation's MCP annotations
 An operation called "screenshot" answers with an image.
 """
 
@@ -39,7 +40,7 @@ import httpx2
 import uvicorn
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ListToolsResult
+from mcp.types import ListToolsResult, ToolAnnotations
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
@@ -72,6 +73,7 @@ class FakeVendor:
         self.settings = {"issuer_path": "", "page_size": None, "delays": {}, "token_delay": 0, "token_status": None,
                          "mcp_status": None, "reject_all": False, "deny": False, "no_code": False, "iss": None,
                          "iss_supported": False, "metadata_issuer": None, "resource_slash": False, "rotate": True,
+                         "hints": {},
                          **settings}
         self.access: set[str] = set()
         self.refresh: set[str] = set()
@@ -160,7 +162,9 @@ class FakeVendor:
                 return Image(data=PNG, format="png")
             return f"{name} answered {query!r}"
 
-        self.mcp.add_tool(operation, name=name, description=f"The {name} operation")
+        hints = self.settings["hints"].get(name)
+        self.mcp.add_tool(operation, name=name, description=f"The {name} operation",
+                          annotations=ToolAnnotations(**hints) if hints else None)
 
     def issue(self, refresh: bool = True) -> dict:
         """A new access token, and a refresh token for it."""

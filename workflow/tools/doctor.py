@@ -1,11 +1,16 @@
 """Doctor: is a tool ready for agents to use?
 
-check() asks three questions in order and stops at the first one that fails, with the next
+check() asks four questions in order and stops at the first one that fails, with the next
 step in words:
 1. Is there a sign-in in the Keychain?
 2. Is it still good? Connecting refreshes a token that has expired, and the server must take it.
 3. Does a harmless read call work? Each tool's is its `probe` in catalog.py: who you are, or
    your list of labels.
+4. Does wf's list of reads (catalog.py) still fit the server's own list? The report names the
+   operations kept back from read-only nodes and the reads the server no longer offers. An
+   operation the server marks read-only that wf keeps back is noted; one wf counts as a read
+   that the server marks as changing things fails the check. This is how the lists get
+   checked against each server at the first sign-in.
 """
 
 import asyncio
@@ -66,5 +71,26 @@ async def check(tool: Tool) -> Report:
         said = " ".join(" ".join(block.get("text", "") for block in content).split())
         return report.failed(f"the read call `{name}` failed: {said[:300]}",
                              f"check what {tool.title} needs in docs/tools.md, then {again}")
+    report.add("read call", f"`{name}` answered")
+    return _compare(report, tool, server.offered)
+
+
+def _compare(report: Report, tool: Tool, offered: list) -> Report:
+    """Fit wf's list of reads against the operations the server offers, and its own hints."""
+    names = {operation.name for operation in offered}
+    kept = sorted(names - tool.reads)
+    if kept:
+        report.add("kept back", f"{', '.join(kept)}: only for nodes with `write: true`")
+    if missing := sorted(tool.reads - names):
+        report.add("missing", f"{', '.join(missing)}: listed as reads, but not offered")
+    marked = {operation.name: operation.annotations for operation in offered if operation.annotations is not None}
+    if reads := [name for name in kept if getattr(marked.get(name), "read_only_hint", None) is True]:
+        report.add("note", f"{tool.title} marks {', '.join(reads)} read-only, but wf keeps them back: "
+                           "if they only read, add them to workflow/tools/catalog.py")
+    writes = [name for name in sorted(names & tool.reads) if getattr(marked.get(name), "read_only_hint", None) is False
+              or getattr(marked.get(name), "destructive_hint", None) is True]
+    if writes:
+        return report.failed(f"wf counts {', '.join(writes)} as reads, but {tool.title} marks them as changing things",
+                             "update wf: workflow/tools/catalog.py lists them as reads")
     report.status = "pass"
-    return report.add("read call", f"`{name}` answered")
+    return report

@@ -60,6 +60,11 @@ class ToolServer:
         self._connection = connection
 
     @property
+    def offered(self) -> list[Operation]:
+        """Every operation the server lists, the ones this node may not use included."""
+        return self._connection.operations
+
+    @property
     def failure(self) -> Exception | None:
         """Why the tool stopped working during the session, if it did: NotSetUp or Unreachable."""
         return self._connection.failure

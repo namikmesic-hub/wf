@@ -447,6 +447,40 @@ def test_doctor_says_to_update_wf_when_the_server_no_longer_offers_its_read_call
     assert dict(report.lines)["next step"].startswith("update wf")
 
 
+def test_doctor_names_the_operations_it_keeps_back_and_the_reads_not_offered(vendor):
+    sign_in(vendor)
+    report = asyncio.run(doctor.check(TOOLS["linear"]))
+    lines = dict(report.lines)
+    assert report.status == "pass"
+    assert lines["kept back"] == "save_issue: only for nodes with `write: true`"
+    assert lines["missing"].startswith("extract_images, get_agent_skill, ") and "list_issues" not in lines["missing"]
+
+
+def test_doctor_notes_an_operation_the_server_marks_read_only_that_wf_keeps_back(monkeypatch):
+    vendor = FakeVendor(["list_issues", "get_user", "list_reports"], hints={"list_reports": {"readOnlyHint": True}}).start()
+    monkeypatch.setitem(TOOLS, "linear", vendor.tool("linear"))
+    try:
+        sign_in(vendor)
+        report = asyncio.run(doctor.check(TOOLS["linear"]))
+    finally:
+        vendor.stop()
+    assert report.status == "pass"
+    assert dict(report.lines)["note"] == ("Linear marks list_reports read-only, but wf keeps them back: "
+                                          "if they only read, add them to workflow/tools/catalog.py")
+
+
+def test_doctor_fails_when_a_read_on_wfs_list_is_marked_as_changing_things(monkeypatch):
+    vendor = FakeVendor(["list_issues", "get_user"], hints={"list_issues": {"destructiveHint": True}}).start()
+    monkeypatch.setitem(TOOLS, "linear", vendor.tool("linear"))
+    try:
+        sign_in(vendor)
+        report = asyncio.run(doctor.check(TOOLS["linear"]))
+    finally:
+        vendor.stop()
+    assert report.status == "fail"
+    assert dict(report.lines)["problem"] == "wf counts list_issues as reads, but Linear marks them as changing things"
+
+
 def test_doctor_reports_a_server_it_cannot_reach(vendor, monkeypatch):
     sign_in(vendor)
     monkeypatch.setitem(TOOLS, "linear", vendor.tool("linear", url=f"http://127.0.0.1:{free_port()}/mcp"))
