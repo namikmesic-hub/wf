@@ -15,6 +15,8 @@ graph on LangGraph:
 - any run can pause for a person and be answered and resumed later, from a
   terminal or by an autonomous operator.
 
+One cap on live agent sessions holds across all your runs that share a `~/.wf`.
+
 ## Install
 
 Needs Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code or Codex

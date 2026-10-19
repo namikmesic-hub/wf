@@ -1,5 +1,6 @@
 """Shared test setup: wf's own folder (~/.wf) goes to a fresh temp folder in every test,
-outside the test's repo, as the real ~/.wf is. git reads none of your config, so a global
+outside the test's repo, as the real ~/.wf is. A cap on agent sessions set where the
+tests run (WF_MAX_AGENTS) doesn't apply to them. git reads none of your config, so a global
 config that signs commits with a key that waits for a touch doesn't stop the tests' commits."""
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 def wf_home(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("wf-home")
     monkeypatch.setenv("WF_HOME", str(home))
+    monkeypatch.delenv("WF_MAX_AGENTS", raising=False)
     return home
 
 

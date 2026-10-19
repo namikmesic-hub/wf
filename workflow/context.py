@@ -3,8 +3,9 @@
 LangGraph hands this object to every node as `runtime.context` (it's the
 graph's context_schema, see graph.py). Each `wf run` or `wf resume` process
 builds a fresh one: the parsed workflow, the run folder, a clock, live usage
-counters, and a semaphore per node that caps parallel items. None of it goes
-into a checkpoint, which is why it can hold things like asyncio.Semaphore.
+counters, a semaphore per node that caps parallel items, and the cap on live
+agent sessions across runs (capacity.py). None of it goes into a checkpoint,
+which is why it can hold things like asyncio.Semaphore.
 
 State (state.py) is the opposite: plain data that LangGraph saves after every
 step, so it survives the process.
@@ -15,7 +16,8 @@ topology, folder and `repo` workspace, and the path of node ids leading to it
 belongs to the whole run is the top-level context's, reached through `root`:
 the clock, the usage counters and the limits (a sub-workflow's own `limits`
 are ignored; `limits` is the file's, with any `--limit` the run was given on
-top: limits.py), the open harnesses, the git lock and the checkpointer.
+top: limits.py), the agent cap and the attempts waiting for it, the open
+harnesses, the git lock and the checkpointer.
 """
 
 import asyncio
@@ -45,6 +47,7 @@ class RunContext:
     script: object = None  # a dryrun.Script during a dry run
     limits: spec.Limits | None = None  # the run's limits, if not just the workflow file's (--limit)
     usage: dict = field(default_factory=lambda: {"cost_usd": 0.0, "tokens": 0})  # spent so far, kept live
+    max_agents: int | None = None  # the cap on live agent sessions across runs (capacity.py), if any
     _clock_start: float = field(default_factory=time.monotonic)
     _elapsed_before: float = 0.0
     _slots: dict = field(default_factory=dict)
@@ -52,6 +55,7 @@ class RunContext:
     _opening: dict = field(default_factory=dict)  # name -> asyncio.Lock, so a harness opens once
     _git: asyncio.Lock | None = None  # one git operation at a time (see workspaces.py)
     _workflows: dict = field(default_factory=dict)  # sub-workflow files, parsed once
+    _agents_waiting: dict = field(default_factory=dict)  # attempts waiting for an agent slot, for status.json
 
     def __post_init__(self):
         if self.topo is None:
@@ -134,6 +138,19 @@ class RunContext:
         if node not in self._slots:
             self._slots[node] = asyncio.Semaphore(self.workflow.setting(node, "max_parallel"))
         return self._slots[node]
+
+    # ---------- the agent cap ----------
+
+    def note_slot_wait(self, key: str, entry: dict | None) -> None:
+        """Note in status.json, for `wf status`, that an attempt waits for an agent slot
+        (`entry`: {node, attempt, since}), or with None, that it no longer does."""
+        root = self.root  # status.json is the top-level run's
+        if entry is None:
+            root._agents_waiting.pop(key, None)
+        else:
+            root._agents_waiting[key] = entry
+        waiting = list(root._agents_waiting.values())
+        root.run.set_status("running", **({"agents_waiting": waiting} if waiting else {}))
 
     # ---------- harnesses ----------
 

@@ -55,7 +55,7 @@ def state(run: Run) -> dict:
     current = run.status()
     current.setdefault("run", run.id)
     if current.get("status") == "running" and not run.driven() and _age(current) > GRACE_SECONDS:
-        current = {**current, "status": "stopped",
+        current = {**{k: v for k, v in current.items() if k != "agents_waiting"}, "status": "stopped",
                    "reason": "no wf process is driving this run (it crashed or was killed)"}
     status = current.get("status")
     if status == "succeeded" and (run.dir / "output.json").exists():

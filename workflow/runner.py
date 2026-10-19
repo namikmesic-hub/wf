@@ -41,7 +41,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, dryrun, graph, limits, operate, runs, schemas, spec, validate, workspaces
+from . import ask, capacity, dryrun, graph, limits, operate, runs, schemas, settings, spec, validate, workspaces
 from .context import RunContext
 
 RECURSION_LIMIT = 10_000  # LangGraph's cap on steps; each pass of a node takes two
@@ -64,6 +64,11 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         overrides = limits.parse(limit_pairs or [])
     except limits.LimitError as error:
         print(f"wf run: --limit {error}", file=sys.stderr)
+        return 1
+    try:
+        max_agents = capacity.configured()  # a bad cap stops a run before it exists, a detached one too
+    except (capacity.CapError, settings.SettingsError) as error:
+        print(f"wf run: {error}", file=sys.stderr)
         return 1
     report = validate.check(path)
     for problem in report.problems:
@@ -105,7 +110,8 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
             print(f"Dry run: these commands aren't in the script, so they really run if they're reached: {', '.join(real)}")
     try:
         with run.driving():
-            ctx = RunContext(workflow, run, home, script=script, limits=limits.effective(workflow.limits, overrides))
+            ctx = RunContext(workflow, run, home, script=script, limits=limits.effective(workflow.limits, overrides),
+                             max_agents=max_agents)
             return _drive(ctx, {"input": inputs}, asking)
     except runs.RunBusy as error:
         print(f"wf run: {error}", file=sys.stderr)
@@ -127,20 +133,23 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
         workflow = spec.load(run.workflow_file)  # the copy, as it was when the run started
         answers = json.loads(Path(answers_file).read_text(encoding="utf-8")) if answers_file else None
         overrides = limits.parse(limit_pairs or [])
-    except (OSError, spec.SpecError, ValueError, limits.LimitError) as error:  # ValueError: not JSON, or not UTF-8
+        max_agents = capacity.configured()
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, capacity.CapError,
+            settings.SettingsError) as error:  # ValueError: not JSON, or not UTF-8
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:
         with run.driving() as lock:
-            return _checked_resume(run, workflow, name, answers, no_input, detach, as_json, lock, overrides)
+            return _checked_resume(run, workflow, name, answers, no_input, detach, as_json, lock, overrides, max_agents)
     except runs.RunBusy as error:
         print(f"{name}: {error}", file=sys.stderr)
         return 1
 
 
-def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: dict | None,
-                    no_input: bool, detach: bool, as_json: bool, lock: runs.Lock, overrides: dict) -> int:
-    ctx, asking = RunContext(workflow, run, home={}), interactive() and not no_input and not detach
+def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: dict | None, no_input: bool,
+                    detach: bool, as_json: bool, lock: runs.Lock, overrides: dict, max_agents: int | None) -> int:
+    ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
+    asking = interactive() and not no_input and not detach
     if run.info().get("dry_run"):  # a dry run continues with the rest of its script
         try:
             ctx.script = dryrun.Script.resume(run.dir / "dry-run")
@@ -422,6 +431,10 @@ def describe(event: dict) -> str | None:
         return f"  {where}: starting a fresh session: {event['reason']}"
     if kind == "session_continued":
         return f"  {where}: continuing the last pass's session"
+    if kind == "slot_waiting":
+        return f"  {where}: attempt {event['attempt']} waits for an agent slot ({event['max_agents']} of {event['max_agents']} in use)"
+    if kind == "slot_taken":
+        return f"  {where}: attempt {event['attempt']} got an agent slot after {event['waited_s']:g}s"
     if kind == "warning":
         return f"⚠ {event['message']}"
     return None

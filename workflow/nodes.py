@@ -31,6 +31,13 @@ submit_result call. It starts fresh instead, with an event saying why, when
 the harness or model differs from the last pass, the fork fails, or the two
 passes before it both continued.
 
+With a cap on live agent sessions (capacity.py), each agent attempt first takes
+one of the agent slots, and holds it until the attempt ends. An
+attempt that waits for one isn't failing: the wait uses no retry, the node's
+timeout starts once the attempt has its slot, and the wait shows in
+events.jsonl (slot_waiting, slot_taken) and in status.json (agents_waiting).
+A limit reached while it waits ends the wait, and the attempt doesn't start.
+
 Workspaces: `new` is a git worktree (workspaces.py). For an `edit` or `full`
 agent in a worktree the runner made, a retry starts from the commit the job
 started from, and when the agent succeeds the runner commits what it left
@@ -54,7 +61,9 @@ import json
 import os
 import signal
 import threading
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -62,9 +71,9 @@ from typing import Any
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
-from . import dryrun, output_tool, schemas, templates, workspaces
+from . import capacity, dryrun, output_tool, schemas, templates, workspaces
 from .context import RunContext
-from .runs import write_json
+from .runs import now, write_json
 from .harnesses import SessionSpec, Unavailable, Usage
 from .spec import seconds
 from .state import Finished, Job
@@ -174,10 +183,16 @@ def _runner_commits(ctx: RunContext, node_id: str, workspace: dict) -> bool:
 # ---------- attempts ----------
 
 
+def _no_slot(number: int, harness: str | None) -> AbstractAsyncContextManager[None]:
+    return nullcontext()
+
+
 async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str | None], Awaitable[Any]],
-                    harnesses: list[str | None] = [None]) -> tuple[Any, int]:
+                    harnesses: list[str | None] = [None],
+                    slot: Callable[[int, str | None], AbstractAsyncContextManager[None]] = _no_slot) -> tuple[Any, int]:
     """Up to 1 + retry attempts on each harness in turn, each within the node's timeout.
-    attempt(number, harness) makes one. Returns (output, attempt number)."""
+    attempt(number, harness) makes one, inside slot(number, harness): for an agent, its
+    agent slot (_agent_slot). Returns (output, attempt number)."""
     node_id = job["node"]
     retry = ctx.workflow.setting(node_id, "retry")
     timeout = ctx.workflow.setting(node_id, "timeout")
@@ -187,19 +202,24 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
     for position, harness in enumerate(harnesses):
         for tries in range(retry + 1):
             if number > first and (reason := ctx.limit_reached()):
-                raise _Failed(f"{error}; no new attempt because a limit was reached ({reason})", number - 1, stopped="limit")
+                raise _limit_stop(error, number, reason)
             on = {"harness": harness} if harness else {}
-            if number > 1:
-                fallback = {"fallback": True} if position and not tries and not handed_over else {}
-                emit({"event": "attempt_started", **label, **on, **fallback, "attempt": number})
+            fallback = {"fallback": True} if position and not tries and not handed_over else {}
             handed_over = False
-            deadline = asyncio.timeout(seconds(timeout) if timeout else None)
+            deadline = None
             try:
-                async with deadline:
-                    result = await attempt(number, harness)
+                async with slot(number, harness):  # an attempt starts once it has its slot
+                    if number > 1:
+                        emit({"event": "attempt_started", **label, **on, **fallback, "attempt": number})
+                    deadline = asyncio.timeout(seconds(timeout) if timeout else None)
+                    async with deadline:
+                        result = await attempt(number, harness)
                 return result, number
+            except _LimitWhileWaiting as reached:
+                raise _limit_stop(error, number, str(reached)) from None
             except TimeoutError:  # the node's timeout, or a timeout inside the harness
-                error = f"timed out after {timeout}" if deadline.expired() else "a call inside the harness timed out"
+                ours = deadline is not None and deadline.expired()
+                error = f"timed out after {timeout}" if ours else "a call inside the harness timed out"
             except _Unavailable as failure:  # don't retry this harness: go to the next one
                 error = f"{harness} is unavailable: {failure}"
                 following = harnesses[position + 1] if position + 1 < len(harnesses) else None
@@ -217,8 +237,18 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
     raise _Failed(error, number - 1)
 
 
+def _limit_stop(error: str, number: int, reason: str) -> _Failed:
+    """Attempt `number` doesn't start because a limit was reached. `error`: the last attempt's failure, if any."""
+    stop = f"no new attempt because a limit was reached ({reason})"
+    return _Failed(f"{error}; {stop}" if error else stop, number - 1, stopped="limit")
+
+
 class _AttemptFailed(Exception):
     """One attempt failed; another may follow."""
+
+
+class _LimitWhileWaiting(Exception):
+    """A limit was reached while the attempt waited for its agent slot, so it doesn't start."""
 
 
 class _Unavailable(Exception):
@@ -332,7 +362,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             ctx.add_usage(cut_off)
             await session.close()
 
-    result, number = await _attempts(job, ctx, emit, attempt, names)
+    result, number = await _attempts(job, ctx, emit, attempt, names,
+                                     slot=lambda number, name: _agent_slot(job, ctx, emit, number, name))
     if commits:
         await _git(ctx, workspaces.commit_all, workspace["path"], f"wf: {node_id} ({ctx.run.id})")
     return result, number
@@ -355,6 +386,38 @@ def _rendered_setting(job: Job, ctx: RunContext, harness: str, name: str, variab
         raise _Failed(f"`{name}` of node `{job['node']}` renders to {shown} for {harness}, "
                       "but it must be a non-empty string", job["attempt"])
     return value.strip()
+
+
+@asynccontextmanager
+async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str) -> AsyncIterator[None]:
+    """Hold one of the agent slots (capacity.py) for attempt `number`, waiting for one if
+    they're all taken, until a limit is reached (_LimitWhileWaiting). No cap, or a dry run:
+    there's nothing to hold."""
+    root = ctx.root
+    if root.max_agents is None or root.script is not None:
+        yield
+        return
+    where = _path(ctx, job)
+    holder = {"pid": os.getpid(), "run": root.run.id, "node": where, "attempt": number}
+    slot = capacity.take(root.max_agents, holder)
+    try:
+        if slot is None:
+            on = {**_label(job), "attempt": number, "harness": harness}
+            emit({"event": "slot_waiting", **on, "max_agents": root.max_agents})
+            began, key = time.monotonic(), f"{where}#{number}"
+            ctx.note_slot_wait(key, {"node": where, "attempt": number, "since": now()})
+            try:
+                slot = await capacity.wait(root.max_agents, holder, stop=lambda: ctx.limit_reached() is not None)
+            finally:
+                ctx.note_slot_wait(key, None)
+            reason = ctx.limit_reached()  # asked again: the slot may have come free just as a limit was reached
+            if slot is None or reason:
+                raise _LimitWhileWaiting(reason)
+            emit({"event": "slot_taken", **on, "waited_s": round(time.monotonic() - began, 1)})
+        yield
+    finally:
+        if slot is not None:
+            slot.release()
 
 
 async def _start_commit(ctx: RunContext, folder: Path, workspace: dict) -> tuple[str, bool]:
