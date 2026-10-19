@@ -85,14 +85,16 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
             print(f"wf run: the dry-run script has problems:\n{error}", file=sys.stderr)
             return 1
     _note_uncommitted(workflows, [*report.files, *([dry_run] if dry_run else [])])
+    repo = Path.cwd()
+    home = _home(repo)  # once: run.json and the run itself use the same branch and commit
+    if not _can_sign(workflows, home, "wf run"):
+        return 1
     asking = interactive() and not no_input and not detach
     try:
         inputs = collect_inputs(workflow, pairs, input_file, asking, base=script.inputs if script else None)
     except InputError as error:
         print(f"wf run: {error}", file=sys.stderr)
         return 1
-    repo = Path.cwd()
-    home = _home(repo)  # once: run.json and the run itself use the same branch and commit
     try:
         run = runs.create(repo, workflow.name, report.files, path, inputs, home=home, dry_run=script is not None,
                           limits=overrides, runs_dir=runs_dir)
@@ -135,7 +137,8 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
     name = "wf answer" if answers_file else "wf resume"
     try:
         run = runs.find(Path.cwd(), run_id, runs_dir)
-        workflow = spec.load(run.workflow_file)  # the copy, as it was when the run started
+        # The copies, as they were when the run started: the workflow and its sub-workflows
+        workflows = [spec.load(f) for f in validate.check(run.workflow_file).files]
         answers = json.loads(Path(answers_file).read_text(encoding="utf-8")) if answers_file else None
         overrides = limits.parse(limit_pairs or [])
         max_agents = capacity.configured()
@@ -145,16 +148,17 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
         return 1
     try:
         with run.driving() as lock:
-            return _checked_resume(run, workflow, name, answers, no_input, detach, as_json, lock, overrides, max_agents,
-                                   runs_dir)
+            return _checked_resume(run, workflows, name, answers, no_input, detach, as_json, lock, overrides,
+                                   max_agents, runs_dir)
     except runs.RunBusy as error:
         print(f"{name}: {error}", file=sys.stderr)
         return 1
 
 
-def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: dict | None, no_input: bool,
+def _checked_resume(run: runs.Run, workflows: list[spec.Workflow], name: str, answers: dict | None, no_input: bool,
                     detach: bool, as_json: bool, lock: runs.Lock, overrides: dict, max_agents: int | None,
                     runs_dir: Path | None) -> int:
+    workflow = workflows[0]
     ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
     asking = interactive() and not no_input and not detach
     if run.info().get("dry_run"):  # a dry run continues with the rest of its script
@@ -181,6 +185,8 @@ def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: 
             for problem in problems:
                 print(f"{name}: {problem}", file=sys.stderr)
             return 1
+    if not _can_sign(workflows, run.info().get("home") or {}, name):
+        return 1
     if detach:
         args = ["resume", run.id, "--no-input", *_runs_dir_args(runs_dir)]
         if answers is not None:  # keep the answers with the run, for the background process
@@ -245,6 +251,23 @@ def _runs_dir_args(runs_dir: Path | None) -> list[str]:
     """A background driver inherits WF_RUNS_DIR, but not --runs-dir: pass that on, resolved,
     so the driver finds the run where this process put it."""
     return ["--runs-dir", str(runs_dir.expanduser().resolve())] if runs_dir else []
+
+
+def _can_sign(workflows: list[spec.Workflow], home: dict, name: str) -> bool:
+    """Can git sign the commits this run may make, with nobody there? Asked before any agent
+    works, so a key that needs a person stops the run before its first agent, not at its first commit."""
+    nodes = [(w, node_id) for w in workflows for node_id in w.nodes]
+    # The runner commits only after an `edit` or `full` agent, in a worktree it made
+    commits = any(w.setting(n, "workspace") == "new" for w, n in nodes) and \
+        any(w.nodes[n].kind == "agent" and w.setting(n, "access") in ("edit", "full") for w, n in nodes)
+    if not commits or not home.get("base"):  # no commit: `workspace: new` fails with its own error
+        return True
+    try:
+        workspaces.check_signing(home["path"])
+    except workspaces.WorkspaceError as error:
+        print(f"{name}: {error}", file=sys.stderr)
+        return False
+    return True
 
 
 def _say(data: dict, text: str, as_json: bool) -> None:

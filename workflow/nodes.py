@@ -209,15 +209,21 @@ _GIT = threading.Lock()  # held by the thread itself: see _git
 async def _git(ctx: RunContext, operation, *args):
     """Run a blocking workspaces.* git operation in a thread, one at a time.
 
-    A thread can't be cancelled. If this job is (a timeout, Ctrl-C), the await ends but the
-    git command keeps running, so the thread holds a lock of its own until git is done, and
-    the next git operation waits for it."""
+    A thread can't be cancelled. If this job is (a timeout, Ctrl-C), the await ends at once,
+    and `stop` tells the thread to stop its git command and start no more. The thread holds
+    a lock of its own until then, so the next git operation waits for it."""
+    stop = threading.Event()
+
     def locked():
-        with _GIT:
+        with _GIT, workspaces.stopped_by(stop):
             return operation(*args)
 
     async with ctx.git_lock():
-        return await asyncio.to_thread(locked)
+        try:
+            return await asyncio.to_thread(locked)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
 
 
 def _runner_commits(ctx: RunContext, node_id: str, workspace: dict) -> bool:
@@ -411,7 +417,10 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     result, number = await _attempts(job, ctx, emit, attempt, names,
                                      slot=lambda number, name: _agent_slot(job, ctx, emit, number, name))
     if commits:
-        await _git(ctx, workspaces.commit_all, workspace["path"], f"wf: {node_id} ({ctx.run.id})")
+        try:
+            await _git(ctx, workspaces.commit_all, workspace["path"], f"wf: {node_id} ({ctx.run.id})")
+        except workspaces.WorkspaceError as error:  # attempt `number` ran: a resumed job starts at the next one
+            raise _Failed(f"workspace: {error}", number) from error
     return result, number
 
 

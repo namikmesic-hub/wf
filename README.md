@@ -60,3 +60,5 @@ Claude Code, Codex and Cursor are supported.
 uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
+
+The tests need git 2.32 or later, which reads `GIT_CONFIG_GLOBAL`: they use it to hide your own git config.
