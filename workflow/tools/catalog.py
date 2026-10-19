@@ -32,6 +32,8 @@ class Tool:
     write_scopes: tuple[str, ...] = ()  # added to `scopes` by `setup --write`
     authorize: dict = field(default_factory=dict)  # extra parameters for the authorization request
     resource: bool = True  # send RFC 8707's `resource`, as MCP clients do (Google's OAuth predates it)
+    issuer: str = ""  # the authorization server to use, written as its metadata writes it, when the
+    # resource metadata writes it otherwise (Google's names https://accounts.google.com/, with a last slash)
     token: str = ""  # a token the vendor gives out that `setup --token` takes instead, in words
 
     @property
@@ -120,7 +122,7 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in [
         token="Notion MCP token (Business and Enterprise plans: a workspace owner makes one in Notion's Developer portal)",
         probe=("notion-get-self", {}),
         reads=frozenset({
-            "notion-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-teams",
+            "notion-search", "notion-ai-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-teams",
             "notion-get-groups", "notion-get-comments", "notion-get-tool-access", "notion-get-async-task",
             "notion-list-private-pages", "notion-list-shared-pages", "notion-list-favorite-pages",
             "notion-list-recent-pages", "notion-list-page-backlinks", "notion-query-data-sources",
@@ -142,6 +144,7 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in [
         scopes=("https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose"),
         authorize={"access_type": "offline", "prompt": "consent"},  # Google gives a refresh token only then
         resource=False,
+        issuer="https://accounts.google.com",
         probe=("list_labels", {}),
         reads=frozenset({"search_threads", "get_thread", "get_message", "list_labels", "list_drafts", "get_draft"}),
     ),

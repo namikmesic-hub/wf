@@ -145,8 +145,9 @@ class FakeVendor:
         return self.base + self.settings["issuer_path"]
 
     def tool(self, name: str = "linear", **changes):
-        """The catalog's tool, pointed at this vendor."""
-        return replace(TOOLS[name], **{"url": f"{self.base}/mcp", **changes})
+        """The catalog's tool, pointed at this vendor (its issuer too, for a tool that pins one)."""
+        pinned = {"issuer": self.issuer} if TOOLS[name].issuer else {}
+        return replace(TOOLS[name], **{"url": f"{self.base}/mcp", **pinned, **changes})
 
     # ---------- what tests set up ----------
 

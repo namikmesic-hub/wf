@@ -255,13 +255,16 @@ def test_metadata_that_names_another_issuer_isnt_used(fake_keyring):
     assert not vendor.requests("/authorize")
 
 
-def test_a_root_issuer_with_its_last_slash_is_the_same_issuer():
+def test_an_issuer_written_with_another_last_slash_is_another_issuer_unless_the_catalog_pins_it(fake_keyring):
     vendor = FakeVendor(resource_slash=True).start()  # as Google's resource metadata names https://accounts.google.com/
     try:
-        stored = setup(vendor.tool("notion"))
+        with pytest.raises(signin.Unreachable, match="metadata names http://127.0.0.1:[0-9]+, not http://127.0.0.1:[0-9]+/,"):
+            setup(vendor.tool("notion"))
+        stored = setup(vendor.tool("notion", issuer=vendor.issuer))  # as the catalog pins Google's
     finally:
         vendor.stop()
     assert stored["access_token"] in vendor.access
+    assert TOOLS["gmail"].issuer == "https://accounts.google.com"
 
 
 def test_setup_gives_up_when_no_sign_in_comes_back(vendor, monkeypatch):

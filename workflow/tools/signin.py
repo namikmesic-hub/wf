@@ -17,7 +17,8 @@ setup() is OAuth 2.1's authorization code flow with PKCE, as MCP's authorization
    http://localhost:<port>/callback and takes only one that brings back its `state`. Its `iss`
    must be the authorization server's issuer, exactly, before anything else in it counts (and
    it must be there when the server's metadata says it sends it). Then wf trades the code for
-   tokens. The metadata's own `issuer` must be the one the resource metadata named.
+   tokens. The metadata's own `issuer` must be the one wf asked about, exactly (RFC 8414): the one
+   the resource metadata named, or the catalog's, for a vendor that writes it two ways (Google).
 With `--token`, setup takes a token you paste instead, for the vendors that give one out (a
 Linear API key, a Notion MCP token, a Slack user token). Such a token has no refresh.
 
@@ -161,7 +162,6 @@ async def discover(http: httpx2.AsyncClient, tool: Tool, write: bool = False) ->
         build_protected_resource_metadata_discovery_urls,
         extract_resource_metadata_from_www_auth,
         extract_scope_from_www_auth,
-        issuers_match,
     )
 
     challenge = await _send(http, "POST", tool.url, headers={"Accept": "application/json, text/event-stream"},
@@ -172,14 +172,13 @@ async def discover(http: httpx2.AsyncClient, tool: Tool, write: bool = False) ->
     issuers = resource.get("authorization_servers") or []
     if not issuers or not isinstance(issuers[0], str):
         raise Unreachable(f"{tool.title}'s resource metadata names no authorization server")
-    meta = await _first_json(http, build_oauth_authorization_server_metadata_discovery_urls(issuers[0], tool.url),
+    issuer = tool.issuer or issuers[0]
+    meta = await _first_json(http, build_oauth_authorization_server_metadata_discovery_urls(issuer, tool.url),
                              f"{tool.title}'s authorization server metadata")
     if not meta.get("authorization_endpoint") or not meta.get("token_endpoint"):
         raise Unreachable(f"{tool.title}'s authorization server doesn't list its endpoints")
-    # RFC 8414's rule, with the SDK's one exception: a root issuer with and without its last slash
-    # (Google's resource metadata names https://accounts.google.com/, its metadata says no slash)
-    if not issuers_match(str(meta.get("issuer") or ""), issuers[0]):
-        raise Unreachable(f"{tool.title}'s authorization server metadata names {meta.get('issuer')}, not {issuers[0]}, "
+    if meta.get("issuer") != issuer:  # RFC 8414: identical, or the metadata isn't this server's
+        raise Unreachable(f"{tool.title}'s authorization server metadata names {meta.get('issuer')}, not {issuer}, "
                           "so wf doesn't use it")
     if tool.scopes:
         scopes = tool.scopes + (tool.write_scopes if write else ())
