@@ -18,7 +18,10 @@ the MCP server takes are in `access`; refresh tokens the token endpoint takes ar
     reject_all=True            the MCP server takes no token at all
     deny=True                  the sign-in comes back with error=access_denied
     no_code=True               the sign-in comes back without a code
-    iss="https://elsewhere"    the sign-in comes back with this `iss`
+    iss="https://elsewhere"    the sign-in comes back with this `iss` ("" leaves it out)
+    iss_supported=True         the metadata says the sign-in always has `iss`
+    metadata_issuer="..."      the metadata names this issuer instead of its own
+    resource_slash=True        the resource metadata names the issuer with a last slash, as Google's does
 An operation called "screenshot" answers with an image.
 """
 
@@ -68,7 +71,8 @@ class FakeVendor:
         self.clients = dict(clients or {})  # client id -> secret ("" for a public client)
         self.settings = {"issuer_path": "", "page_size": None, "delays": {}, "token_delay": 0, "token_status": None,
                          "mcp_status": None, "reject_all": False, "deny": False, "no_code": False, "iss": None,
-                         "rotate": True, **settings}
+                         "iss_supported": False, "metadata_issuer": None, "resource_slash": False, "rotate": True,
+                         **settings}
         self.access: set[str] = set()
         self.refresh: set[str] = set()
         self.codes: dict[str, dict] = {}
@@ -176,11 +180,14 @@ class FakeVendor:
     # ---------- OAuth ----------
 
     async def _resource(self, request: Request):
-        return JSONResponse({"resource": f"{self.base}/mcp", "authorization_servers": [self.issuer],
+        named = self.issuer + ("/" if self.settings["resource_slash"] else "")
+        return JSONResponse({"resource": f"{self.base}/mcp", "authorization_servers": [named],
                              "scopes_supported": ["read", "write"]})
 
     async def _server(self, request: Request):
-        return JSONResponse({"issuer": self.issuer, "authorization_endpoint": f"{self.base}/authorize",
+        return JSONResponse({"issuer": self.settings["metadata_issuer"] or self.issuer,
+                             "authorization_response_iss_parameter_supported": self.settings["iss_supported"],
+                             "authorization_endpoint": f"{self.base}/authorize",
                              "token_endpoint": f"{self.base}/token",
                              **({"registration_endpoint": f"{self.base}/register"} if self.register else {})})
 
@@ -197,7 +204,8 @@ class FakeVendor:
         self.log.append({"path": "/authorize", "query": query})
         code = f"code-{next(self._numbers)}"
         self.codes[code] = query
-        back = {"state": query.get("state", ""), "iss": self.settings["iss"] or self.issuer}
+        iss = self.issuer if self.settings["iss"] is None else self.settings["iss"]
+        back = {"state": query.get("state", ""), **({"iss": iss} if iss else {})}
         if self.settings["deny"]:
             back.update(error="access_denied", error_description="you said no")
         elif not self.settings["no_code"]:

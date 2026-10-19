@@ -174,12 +174,11 @@ class _Bearer(httpx2.Auth):
         self.problem: Exception | None = None  # why there's no token to send
 
     async def async_auth_flow(self, request):
-        if self.token is None:
-            self.token = await self._token()
-        request.headers["Authorization"] = f"Bearer {self.token}"
+        sent = self.token = self.token or await self._token()
+        request.headers["Authorization"] = f"Bearer {sent}"
         response = yield request
-        if response.status_code == 401:
-            self.token = await self._token(refused=self.token)
+        if response.status_code == 401:  # refused: what this request sent, which may be refreshed already
+            self.token = await self._token(refused=sent)
             request.headers["Authorization"] = f"Bearer {self.token}"
             response = yield request
         if response.status_code >= 400 and request.method == "POST":  # a GET is only the optional event stream

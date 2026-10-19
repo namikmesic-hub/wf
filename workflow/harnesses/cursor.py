@@ -466,7 +466,10 @@ def _paths(call: dict) -> list[str]:
 
 
 def _label(call: dict) -> str:
-    tool = (call.get("rawInput") or {}).get("toolName")  # an MCP tool: submit_result, git
+    data = call.get("rawInput") or {}
+    tool, server = data.get("toolName"), data.get("providerIdentifier")  # an MCP tool: submit_result, git, ...
+    if tool and server not in (None, SERVER):
+        return f"{server}.{tool}"  # a wf tool's is linear.list_issues, as on the other harnesses
     return tool or LABELS.get(call.get("kind"), call.get("kind") or "tool")
 
 

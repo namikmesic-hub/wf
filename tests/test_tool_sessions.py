@@ -217,6 +217,18 @@ def test_a_token_refused_in_the_middle_of_a_session_is_refreshed_once(vendor):
     assert attached([ToolUse(name="linear")], call) == ([{"type": "text", "text": "list_issues answered 'open'"}], False)
 
 
+def test_requests_refused_with_the_same_token_share_one_refresh(vendor):
+    sign_in(vendor)
+
+    async def calls(servers):
+        vendor.access.clear()  # both requests go out with the token the server no longer takes
+        return await asyncio.gather(servers[0].call("list_issues", {"query": "a"}), servers[0].call("get_user", {"query": "b"}))
+
+    answers = attached([ToolUse(name="linear")], calls)
+    assert [is_error for _, is_error in answers] == [False, False]
+    assert len(vendor.requests("/token")) == 1
+
+
 def test_a_sign_in_refused_in_the_middle_of_a_session_says_what_to_run(vendor):
     sign_in(vendor)
 
@@ -343,6 +355,15 @@ def test_claude_code_transcripts_leave_out_what_a_wf_tool_returned(tmp_path):
     assert any(line == {"kind": "tool", "name": "mcp__linear__whoami", "input": {"q": "me"}} for line in lines)
 
 
+def test_progress_names_a_wf_tools_operation_the_same_on_every_harness():
+    from workflow.harnesses import claude_code, cursor as cursor_harness
+
+    assert claude_code._tool_name("mcp__linear__list_issues") == "linear.list_issues"
+    assert claude_code._tool_name("mcp__wf__submit_result") == "submit_result"
+    assert cursor_harness._label({"kind": "other", "rawInput": {"providerIdentifier": "linear", "toolName": "list_issues"}}) == "linear.list_issues"
+    assert cursor_harness._label({"kind": "other", "rawInput": {"providerIdentifier": "wf", "toolName": "git"}}) == "git"
+
+
 # ---------- Codex ----------
 
 
@@ -446,6 +467,7 @@ def test_codex_transcripts_leave_out_what_a_wf_tool_returned(vendor, repo, monke
     (recorded,) = [json.loads(line) for line in logs.splitlines() if json.loads(line)["kind"] == "tool"]
     assert recorded["item"]["arguments"] == {"query": "open"} and recorded["kept"] is False
     assert recorded["characters"] == len("private: the CEO's notes")
+    assert [e["tool"] for e in events() if e["event"] == "agent_tool"][0] == "linear.list_issues"
 
 
 # ---------- Cursor ----------

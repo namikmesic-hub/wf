@@ -62,8 +62,18 @@ It follows MCP's authorization spec, revision 2026-07-28:
    For the other vendors, one sign-in does both, and only wf keeps a node to reads.
 4. It opens your browser at the vendor's sign-in page.
    It waits for the redirect back on `http://localhost:47152/callback`, and `--port` picks another port.
-   It takes only a redirect that brings back the `state` it sent.
-5. It trades the code for tokens, keeps them in the macOS Keychain, and runs doctor.
+5. It checks the redirect, trades the code for tokens, keeps them in the macOS Keychain, and runs doctor.
+
+The tests named below are in `tests/test_tools.py`.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| The authorization server's metadata names another issuer than the resource metadata did | Setup stops, and uses nothing from it. A root issuer with and without its last slash counts as one, as Google's needs. | `workflow/tools/signin.py:181` | `test_metadata_that_names_another_issuer_isnt_used`, `test_a_root_issuer_with_its_last_slash_is_the_same_issuer` |
+| A request reaches the callback without the `state` that setup sent | It gets an error page, and setup keeps waiting. | `workflow/tools/signin.py:396` | `test_a_request_to_the_callback_without_the_sign_ins_state_is_turned_away_and_the_wait_goes_on` |
+| The redirect's `iss` isn't the issuer, exactly | Setup stops, and doesn't read the rest of the redirect, an error included. | `workflow/tools/signin.py:139` | `test_the_sign_ins_iss_must_be_the_issuer_exactly`, `test_a_sign_in_from_another_issuer_isnt_read_even_for_its_error` |
+| The redirect has no `iss`, and the metadata says the server sends one | Setup stops. | `workflow/tools/signin.py:141` | `test_a_sign_in_without_the_iss_the_server_says_it_sends_is_ignored` |
+| The vendor says no (`error=access_denied`), or sends no code | Setup stops, and asks for no token. | `workflow/tools/signin.py:144`, `workflow/tools/signin.py:146` | `test_a_sign_in_that_comes_back_wrong_gets_no_token` |
+| No redirect comes back within 5 minutes | Setup stops. | `workflow/tools/signin.py:138` | `test_setup_gives_up_when_no_sign_in_comes_back` |
 
 With `--token`, setup asks you to paste a token instead, for the vendors that give one out.
 A pasted token has no refresh: when the vendor stops taking it, run setup again.
@@ -150,7 +160,7 @@ The tests named below are in `tests/test_tools.py`.
 |---|---|---|---|
 | The Keychain holds no sign-in for the tool, or one wf didn't write | `not set up`, with `run wf tools <name> setup`. `wf tools doctor` doesn't fail for it, and `wf tools <name> doctor` exits with 1. | `workflow/tools/doctor.py:45`, `workflow/cli.py:457` | `test_doctor_for_every_tool_reports_one_that_is_not_set_up_without_failing`, `test_a_stored_item_wf_didnt_write_counts_as_not_set_up` |
 | The Keychain can't be read | `fail`, with "unlock your login Keychain". | `workflow/tools/doctor.py:43` | `test_doctor_says_when_the_keyring_cannot_be_read` |
-| The access token has expired | It's refreshed, and the checks go on. | `workflow/tools/signin.py:217` | `test_doctor_refreshes_a_sign_in_that_has_expired` |
+| The access token has expired | It's refreshed, and the checks go on. | `workflow/tools/signin.py:229` | `test_doctor_refreshes_a_sign_in_that_has_expired` |
 | The vendor refuses the sign-in, or the refresh | `fail`, with `run wf tools <name> setup`. | `workflow/tools/doctor.py:60` | `test_doctor_says_to_sign_in_again_when_the_vendor_refuses` |
 | The server can't be reached | `fail`, with "check your network connection". | `workflow/tools/doctor.py:64` | `test_doctor_reports_a_server_it_cannot_reach` |
 | The server no longer offers the read call | `fail`, with "update wf". | `workflow/tools/doctor.py:56` | `test_doctor_says_to_update_wf_when_the_server_no_longer_offers_its_read_call` |
@@ -190,7 +200,7 @@ The tests named below are in `tests/test_tools.py` for validation, and in `tests
 These are the operations a node gets without `write: true`.
 An operation a server offers that isn't listed counts as a write, and so does a new one.
 The agent isn't told about it, and wf refuses a call to it.
-The lists are in `workflow/tools/catalog.py`.
+The lists are in `workflow/tools/catalog.py`, and `test_the_documented_reads_are_the_catalogs` checks that this table matches them.
 They follow the names each server listed on 2026-10-19.
 The Gmail and Notion lists are checked against each server's live tool list at the first sign-in.
 
@@ -235,21 +245,21 @@ The agent's own messages and its result can still quote what it read.
 
 The Keychain item has the service `wf tools` and the tool's name as its account.
 It holds the tokens, and what refreshing them needs: the token endpoint, and the client ID and secret.
-Linear and Notion replace the refresh token on every refresh, so two refreshes at once would break the sign-in.
+Some vendors replace the refresh token on every refresh, so two refreshes at once would break the sign-in.
 The tests named below are in `tests/test_tools.py`, unless another file is named.
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| A session asks for a token that expires within 60 seconds | wf refreshes it first. A token that expires later is used as it is. | `workflow/tools/signin.py:217` | `test_a_token_is_refreshed_within_a_minute_of_expiring` |
-| The server refuses a token during a session | wf refreshes it once, and sends the request again. | `workflow/tools/relay.py:181` | `test_a_token_refused_in_the_middle_of_a_session_is_refreshed_once` (`tests/test_tool_sessions.py`) |
-| Two sessions need a refresh at once | There's one refresh, and the second session gets the new token. | `workflow/tools/signin.py:196` | `test_two_refreshes_at_once_take_turns` |
-| wf processes with different `WF_HOME` folders refresh one tool | They take turns: the lock is in a folder of the user's, in the temporary folder. | `workflow/tools/signin.py:256` | `test_the_refresh_lock_is_the_users_whatever_wf_home_says` |
-| The session that asked for a refresh is cancelled, by a timeout for example | The refresh finishes in a task of its own, and saves the new tokens. | `workflow/tools/signin.py:198` | `test_a_refresh_finishes_and_is_saved_when_the_session_that_asked_is_cancelled` |
-| The Keychain refuses to save new tokens | wf keeps them in memory, and saves them before the next refresh. | `workflow/tools/signin.py:235` | `test_new_tokens_the_keychain_refuses_are_kept_and_saved_before_another_refresh` |
-| The vendor refuses a refresh, and the Keychain now holds a newer sign-in | wf uses the newer one. | `workflow/tools/signin.py:230` | `test_a_refused_refresh_reads_the_keychain_again_for_one_saved_meanwhile` |
-| The vendor refuses a refresh | The sign-in is gone, and the message says to run setup. | `workflow/tools/signin.py:247` | `test_doctor_says_to_sign_in_again_when_the_vendor_refuses` |
-| The token endpoint answers 5xx or 429 | The refresh can be tried again later: the attempt fails, and `retry` applies. | `workflow/tools/signin.py:249` | `test_a_refresh_the_vendor_is_too_busy_for_can_be_tried_again` |
-| The vendor answers a refresh without a new refresh token | wf keeps the one it has, and uses it again. | `workflow/tools/signin.py:251` | `test_a_vendor_that_keeps_the_refresh_token_is_refreshed_with_it_again` |
+| A session asks for a token that expires within 60 seconds | wf refreshes it first. A token that expires later is used as it is. | `workflow/tools/signin.py:229` | `test_a_token_is_refreshed_within_a_minute_of_expiring` |
+| The server refuses a token during a session | wf refreshes it once, and sends the request again. | `workflow/tools/relay.py:180` | `test_a_token_refused_in_the_middle_of_a_session_is_refreshed_once` (`tests/test_tool_sessions.py`) |
+| Two sessions need a refresh at once | There's one refresh, and the second session gets the new token. | `workflow/tools/signin.py:208` | `test_two_refreshes_at_once_take_turns` |
+| wf processes with different `WF_HOME` folders refresh one tool | They take turns: the lock is in a folder of the user's, in the temporary folder. | `workflow/tools/signin.py:268` | `test_the_refresh_lock_is_the_users_whatever_wf_home_says` |
+| The session that asked for a refresh is cancelled, by a timeout for example | The refresh finishes in a task of its own, and saves the new tokens. | `workflow/tools/signin.py:210` | `test_a_refresh_finishes_and_is_saved_when_the_session_that_asked_is_cancelled` |
+| The Keychain refuses to save new tokens | wf keeps them in memory, and saves them before the next refresh. | `workflow/tools/signin.py:247` | `test_new_tokens_the_keychain_refuses_are_kept_and_saved_before_another_refresh` |
+| The vendor refuses a refresh, and the Keychain now holds a newer sign-in | wf uses the newer one. | `workflow/tools/signin.py:242` | `test_a_refused_refresh_reads_the_keychain_again_for_one_saved_meanwhile` |
+| The vendor refuses a refresh | The sign-in is gone, and the message says to run setup. | `workflow/tools/signin.py:259` | `test_doctor_says_to_sign_in_again_when_the_vendor_refuses` |
+| The token endpoint answers 5xx or 429 | The refresh can be tried again later: the attempt fails, and `retry` applies. | `workflow/tools/signin.py:261` | `test_a_refresh_the_vendor_is_too_busy_for_can_be_tried_again` |
+| The vendor answers a refresh without a new refresh token | wf keeps the one it has, and uses it again. | `workflow/tools/signin.py:263` | `test_a_vendor_that_keeps_the_refresh_token_is_refreshed_with_it_again` |
 
 ### Why wf has its own OAuth client
 
@@ -267,10 +277,18 @@ But three needs of wf are outside it:
 
 The Keychain keeps the secret out of files and out of the agent's view, but it doesn't fence it from other programs you run.
 macOS lets the program that saved an item read it again without asking.
-So an agent with `edit` or `full` access, which can run commands as you, could read it with the same Python that wf runs on.
-A `read-only` agent has no shell.
+So an agent whose commands run as you, outside a sandbox, could read it with the same Python that wf runs on.
+Which agents can do that depends on the harness and the access level:
+
+| Access | Claude Code | Codex | Cursor |
+|---|---|---|---|
+| `read-only` | No: no shell, only file tools and wf's `git` tool | No: commands run in Codex's read-only sandbox, which keeps them from the Keychain | No: commands are refused |
+| `edit` | Yes: commands run without a sandbox | No: commands run in Codex's workspace-write sandbox, which keeps them from the Keychain | Yes: commands run without a sandbox |
+| `full` | Yes | Yes: there's no sandbox | Yes |
+
+On 2026-10-19, `security show-keychain-info` failed in Codex's read-only and workspace-write sandboxes, and worked in `danger-full-access`.
 Setup asks Slack and Linear for read scopes only, unless you give `--write`.
-So by default a token that leaked could only read.
+So by default, a token that an agent read could only read too.
 
 ## Sources
 

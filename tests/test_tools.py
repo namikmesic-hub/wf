@@ -214,6 +214,56 @@ def test_a_sign_in_that_comes_back_wrong_gets_no_token(settings, message, fake_k
     assert not vendor.requests("/token") and not fake_keyring.items
 
 
+def test_the_sign_ins_iss_must_be_the_issuer_exactly(fake_keyring):
+    vendor = FakeVendor().start()
+    vendor.settings["iss"] = vendor.issuer + "/"  # the same server to a lax reader, not to RFC 9207
+    try:
+        with pytest.raises(signin.SetupFailed, match="came back from .*/, not "):
+            setup(vendor.tool("notion"))
+    finally:
+        vendor.stop()
+    assert not vendor.requests("/token")
+
+
+def test_a_sign_in_from_another_issuer_isnt_read_even_for_its_error(fake_keyring):
+    vendor = FakeVendor(deny=True, iss="https://elsewhere.example").start()
+    try:
+        with pytest.raises(signin.SetupFailed) as failed:
+            setup(vendor.tool("notion"))
+    finally:
+        vendor.stop()
+    assert "came back from https://elsewhere.example" in str(failed.value) and "access_denied" not in str(failed.value)
+
+
+def test_a_sign_in_without_the_iss_the_server_says_it_sends_is_ignored(fake_keyring):
+    vendor = FakeVendor(iss="", iss_supported=True).start()
+    try:
+        with pytest.raises(signin.SetupFailed, match="came back without `iss`"):
+            setup(vendor.tool("notion"))
+    finally:
+        vendor.stop()
+    assert not vendor.requests("/token")
+
+
+def test_metadata_that_names_another_issuer_isnt_used(fake_keyring):
+    vendor = FakeVendor(metadata_issuer="https://attacker.example").start()
+    try:
+        with pytest.raises(signin.Unreachable, match="metadata names https://attacker.example, not "):
+            setup(vendor.tool("notion"))
+    finally:
+        vendor.stop()
+    assert not vendor.requests("/authorize")
+
+
+def test_a_root_issuer_with_its_last_slash_is_the_same_issuer():
+    vendor = FakeVendor(resource_slash=True).start()  # as Google's resource metadata names https://accounts.google.com/
+    try:
+        stored = setup(vendor.tool("notion"))
+    finally:
+        vendor.stop()
+    assert stored["access_token"] in vendor.access
+
+
 def test_setup_gives_up_when_no_sign_in_comes_back(vendor, monkeypatch):
     monkeypatch.setattr(signin, "WAIT", 0.2)
     with pytest.raises(signin.SetupFailed, match="no sign-in came back within 0.2 seconds"):
@@ -414,6 +464,19 @@ def test_doctor_says_when_the_keyring_cannot_be_read(fake_keyring, monkeypatch):
     report = asyncio.run(doctor.check(TOOLS["slack"]))
     assert report.status == "fail"
     assert dict(report.lines)["problem"] == "can't read the slack sign-in from the keyring: the Keychain is locked"
+
+
+# ---------- docs/tools.md ----------
+
+
+def test_the_documented_reads_are_the_catalogs():
+    table = Path(__file__).parent.parent.joinpath("docs", "tools.md").read_text().split("## What counts as a read")[1]
+    documented = {}
+    for row in table.splitlines():
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        if row.startswith("| `") and len(cells) == 3:
+            documented[cells[0].strip("`")] = {name.strip(" `") for name in cells[1].split(",")}
+    assert documented == {name: set(tool.reads) for name, tool in TOOLS.items()}
 
 
 # ---------- wf tools list ----------

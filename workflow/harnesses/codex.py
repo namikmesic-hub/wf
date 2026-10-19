@@ -250,7 +250,9 @@ class CodexSession:
         elif kind == "webSearch":
             self.spec.emit({"event": "agent_tool", "tool": "web search", "detail": short(item.get("query") or "", 80)})
         elif kind in ("mcpToolCall", "dynamicToolCall"):
-            self.spec.emit({"event": "agent_tool", "tool": item.get("tool") or kind, "detail": ""})
+            name = item.get("tool") or kind  # a wf tool's is linear.list_issues, as on the other harnesses
+            self.spec.emit({"event": "agent_tool", "tool": f"{item['namespace']}.{name}" if item.get("namespace") else name,
+                            "detail": ""})
 
     def _record(self, item: dict) -> None:
         kind = item.get("type")

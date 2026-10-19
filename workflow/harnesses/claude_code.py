@@ -262,7 +262,12 @@ def _login_problem(result: ResultMessage) -> bool:
 
 
 def _tool_name(name: str) -> str:
-    return name.removeprefix(f"mcp__{SERVER}__")
+    """For progress lines: mcp__wf__submit_result is submit_result, and a wf tool's
+    mcp__linear__list_issues is linear.list_issues, as on the other harnesses."""
+    if name.startswith(f"mcp__{SERVER}__") or not name.startswith("mcp__"):
+        return name.removeprefix(f"mcp__{SERVER}__")
+    server, _, operation = name.removeprefix("mcp__").partition("__")
+    return f"{server}.{operation}"
 
 
 def _detail(block: ToolUseBlock, cwd) -> str:

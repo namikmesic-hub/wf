@@ -14,8 +14,10 @@ setup() is OAuth 2.1's authorization code flow with PKCE, as MCP's authorization
 3. Scopes: a tool's read scopes, unless setup is asked for writes (`--write`), for the vendors
    whose scopes tell reads from writes (Slack, Linear). Other vendors give one sign-in for both.
 4. Your browser opens the vendor's sign-in page. wf waits for the redirect on
-   http://localhost:<port>/callback, takes only one that brings back its `state`, checks `iss`
-   when the server sends it, and trades the code for tokens.
+   http://localhost:<port>/callback and takes only one that brings back its `state`. Its `iss`
+   must be the authorization server's issuer, exactly, before anything else in it counts (and
+   it must be there when the server's metadata says it sends it). Then wf trades the code for
+   tokens. The metadata's own `issuer` must be the one the resource metadata named.
 With `--token`, setup takes a token you paste instead, for the vendors that give one out (a
 Linear API key, a Notion MCP token, a Slack user token). Such a token has no refresh.
 
@@ -86,6 +88,7 @@ class AuthServer:
     """What discovery found: the endpoints, the resource to ask for, and the scopes."""
 
     issuer: str
+    iss_required: bool  # the server says it puts `iss` in its redirect (RFC 9207)
     authorization_endpoint: str
     token_endpoint: str
     registration_endpoint: str | None
@@ -133,10 +136,12 @@ async def setup(tool: Tool, *, port: int, token: bool, write: bool, say: Callabl
                 back = await asyncio.wait_for(answer, WAIT)
             except TimeoutError:
                 raise SetupFailed(f"no sign-in came back within {WAIT} seconds") from None
+        if "iss" in back and back["iss"] != server.issuer:  # before reading anything else in it
+            raise SetupFailed(f"the sign-in came back from {back['iss']}, not {server.issuer}, so it was ignored")
+        if "iss" not in back and server.iss_required:
+            raise SetupFailed(f"the sign-in came back without `iss`, which {tool.title} says it sends, so it was ignored")
         if back.get("error"):
             raise SetupFailed(f"{tool.title} didn't sign you in: {_described(back)}")
-        if back.get("iss") and back["iss"].rstrip("/") != server.issuer.rstrip("/"):
-            raise SetupFailed(f"the sign-in came back from {back['iss']}, not {server.issuer}, so it was ignored")
         if not back.get("code"):
             raise SetupFailed("the sign-in came back without a code: try again")
         form = {"grant_type": "authorization_code", "code": back["code"], "redirect_uri": redirect,
@@ -156,6 +161,7 @@ async def discover(http: httpx2.AsyncClient, tool: Tool, write: bool = False) ->
         build_protected_resource_metadata_discovery_urls,
         extract_resource_metadata_from_www_auth,
         extract_scope_from_www_auth,
+        issuers_match,
     )
 
     challenge = await _send(http, "POST", tool.url, headers={"Accept": "application/json, text/event-stream"},
@@ -170,6 +176,11 @@ async def discover(http: httpx2.AsyncClient, tool: Tool, write: bool = False) ->
                              f"{tool.title}'s authorization server metadata")
     if not meta.get("authorization_endpoint") or not meta.get("token_endpoint"):
         raise Unreachable(f"{tool.title}'s authorization server doesn't list its endpoints")
+    # RFC 8414's rule, with the SDK's one exception: a root issuer with and without its last slash
+    # (Google's resource metadata names https://accounts.google.com/, its metadata says no slash)
+    if not issuers_match(str(meta.get("issuer") or ""), issuers[0]):
+        raise Unreachable(f"{tool.title}'s authorization server metadata names {meta.get('issuer')}, not {issuers[0]}, "
+                          "so wf doesn't use it")
     if tool.scopes:
         scopes = tool.scopes + (tool.write_scopes if write else ())
     else:  # the server's choice: what its 401 asks for, else what its metadata lists
@@ -177,7 +188,8 @@ async def discover(http: httpx2.AsyncClient, tool: Tool, write: bool = False) ->
         scopes = tuple(asked.split()) if asked else tuple(resource.get("scopes_supported") or ())
         if "offline_access" in (meta.get("scopes_supported") or ()) and "offline_access" not in scopes:
             scopes += ("offline_access",)  # how some servers hand out a refresh token
-    return AuthServer(issuer=meta.get("issuer") or issuers[0], authorization_endpoint=meta["authorization_endpoint"],
+    return AuthServer(issuer=meta["issuer"], iss_required=meta.get("authorization_response_iss_parameter_supported") is True,
+                      authorization_endpoint=meta["authorization_endpoint"],
                       token_endpoint=meta["token_endpoint"], registration_endpoint=meta.get("registration_endpoint"),
                       resource=resource.get("resource") or tool.url, scopes=scopes)
 
