@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from textwrap import dedent, indent
@@ -229,21 +230,26 @@ def new_key(folder: Path) -> Path:
 
 
 def sign_with_program(folder: Path, script: str) -> None:
-    """Sign with a shell script instead of ssh-keygen. It writes its pid to folder/pid first."""
+    """Sign with a shell script instead of ssh-keygen. Each time it runs, it adds its pid to folder/pids first."""
     program = folder / "signer"
-    program.write_text(f"#!/bin/sh\necho $$ > {folder / 'pid'}\n{script}\n")
+    program.write_text(f"#!/bin/sh\necho $$ >> {folder / 'pids'}\n{script}\n")
     program.chmod(0o755)
     sign_with(folder / "key.pub")
     git("config", "gpg.ssh.program", str(program))
 
 
-def started(folder: Path) -> int:
-    """The signing program's pid, once it runs."""
-    for _ in range(100):
-        if (folder / "pid").exists() and (pid := (folder / "pid").read_text().strip()):
-            return int(pid)
+def signers(folder: Path) -> list[int]:
+    """The pids of the signing program, each time it ran so far."""
+    return [int(pid) for pid in (folder / "pids").read_text().split()] if (folder / "pids").exists() else []
+
+
+def started(folder: Path, times: int = 1) -> list[int]:
+    """The signing program's pids, once it has run `times` times."""
+    for _ in range(200):
+        if len(pids := signers(folder)) >= times:
+            return pids
         time.sleep(0.05)
-    pytest.fail("the signing program never ran")
+    pytest.fail(f"the signing program ran {len(signers(folder))} time(s), not {times}")
 
 
 def gone(pid: int) -> bool:
@@ -275,6 +281,7 @@ def test_checking_the_key_leaves_nothing_in_the_repository(repo, tmp_path):
     before = git("count-objects", "-v")
     workspaces.check_signing(repo)
     assert git("count-objects", "-v") == before
+    assert not workspaces._running  # every git it ran has left the list of running ones
 
 
 def test_a_run_whose_key_cant_sign_fails_at_its_start_and_says_how_to_fix_it(repo, monkeypatch, tmp_path, capsys):
@@ -288,15 +295,93 @@ def test_a_run_whose_key_cant_sign_fails_at_its_start_and_says_how_to_fix_it(rep
     assert fake.sent == []  # no agent worked for it
 
 
-def test_a_run_the_runner_makes_no_commits_in_doesnt_check_the_key(repo, monkeypatch, tmp_path):
+@pytest.mark.parametrize("nodes", [
+    "look: {needs: [start], instruction: look, workspace: new}",  # read-only, in a worktree
+    "look: {needs: [start], instruction: look, workspace: new}\nfix: {needs: [look], instruction: fix, access: edit}",
+    "build: {needs: [start], command: 'true', workspace: new}\nfix: {needs: [build], instruction: fix, access: edit}",
+])  # the `edit` agents work in your checkout, where the runner never commits
+def test_a_run_the_runner_makes_no_commits_in_doesnt_check_the_key(repo, monkeypatch, tmp_path, nodes):
     sign_with(tmp_path / "missing.pub")
-    use(monkeypatch, submit({"summary": "looked"}))
-    assert run("look: {needs: [start], instruction: look, workspace: new}") == 0  # a read-only agent
+    use(monkeypatch, submit({"summary": "done"}), submit({"summary": "done"}))
+    assert run(nodes) == 0
+
+
+def test_an_agent_that_edits_another_nodes_worktree_needs_a_key_that_signs(repo, monkeypatch, tmp_path, capsys):
+    sign_with(tmp_path / "missing.pub")
+    fake = use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run("build: {needs: [start], command: 'true', workspace: new}\n"
+               "fix: {needs: [build], instruction: fix, access: edit, workspace: build}") == 1
+    assert "wf run: git can't sign commits in" in capsys.readouterr().err
+    assert fake.sent == []
+
+
+SUB = """version: 1
+name: sub
+defaults: {harness: claude-code}
+start: {input: {}}
+nodes:
+  impl: {needs: [start], instruction: work, access: edit}
+end:
+  output: {}
+"""
+
+
+@pytest.mark.parametrize("workspace, checked", [("new", True), ("repo", False)])
+def test_an_edit_agent_in_a_sub_workflow_needs_a_key_that_signs_when_it_works_in_a_worktree(
+        repo, monkeypatch, tmp_path, capsys, workspace, checked):
+    Path("sub.yaml").write_text(SUB)  # its agent works in the parent node's workspace
+    sign_with(tmp_path / "missing.pub")
+    fake = use(monkeypatch, submit({"summary": "done"}))
+    assert run(f"build: {{needs: [start], workflow: sub.yaml, workspace: {workspace}}}") == (1 if checked else 0)
+    assert ("wf run: git can't sign commits in" in capsys.readouterr().err) == checked
+    assert (fake.sent == []) == checked
+
+
+def test_a_run_from_an_unborn_branch_with_a_base_of_its_own_checks_the_key(repo, monkeypatch, tmp_path, capsys):
+    first = git("branch", "--show-current")
+    git("checkout", "-q", "--orphan", "fresh")  # HEAD has no commit, but `base` names one
+    sign_with(tmp_path / "missing.pub")
+    fake = use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run(f"impl: {{needs: [start], instruction: work, access: edit, workspace: new, base: {first}}}") == 1
+    assert "wf run: git can't sign commits in" in capsys.readouterr().err
+    assert fake.sent == []
+
+
+def test_a_relative_signing_key_fails_the_run_at_its_start(repo, monkeypatch, capsys):
+    sign_with(Path("keys/key.pub"))  # git would look for it in each worktree, not in this checkout
+    fake = use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run(IMPL) == 1
+    err = capsys.readouterr().err
+    assert "wf run: user.signingkey is a relative path (keys/key.pub)" in err
+    assert f"git -C {repo.resolve()} config user.signingkey <absolute key file>" in err
+    assert fake.sent == []
 
 
 def test_a_resumed_run_checks_the_key_again_before_any_agent_works(repo, monkeypatch, tmp_path, capsys):
     fake = use(monkeypatch, *[talk()] * 6)  # both attempts end without a result
     assert run(IMPL) == 1
+    sign_with(tmp_path / "missing.pub")
+    sent = len(fake.sent)
+    assert cli.main(["resume", only_run().name]) == 1
+    assert "wf resume: git can't sign commits in" in capsys.readouterr().err
+    assert len(fake.sent) == sent
+
+
+def test_a_resumed_run_without_its_run_json_checks_the_key_where_it_ran(repo, monkeypatch, tmp_path, capsys):
+    fake = use(monkeypatch, *[talk()] * 6)
+    assert run(IMPL) == 1
+    (only_run() / "run.json").unlink()  # the run's checkpoints still say where it ran
+    sign_with(tmp_path / "missing.pub")
+    sent = len(fake.sent)
+    assert cli.main(["resume", only_run().name]) == 1
+    assert "wf resume: git can't sign commits in" in capsys.readouterr().err
+    assert len(fake.sent) == sent
+
+
+def test_a_resumed_run_checks_the_key_for_an_edit_agent_in_a_sub_workflow(repo, monkeypatch, tmp_path, capsys):
+    Path("sub.yaml").write_text(SUB)
+    fake = use(monkeypatch, *[talk()] * 6)
+    assert run("build: {needs: [start], workflow: sub.yaml, workspace: new}") == 1
     sign_with(tmp_path / "missing.pub")
     sent = len(fake.sent)
     assert cli.main(["resume", only_run().name]) == 1
@@ -339,6 +424,26 @@ def test_a_commit_that_cant_be_signed_says_so(repo, tmp_path):
         f"can't sign the commit with {tmp_path / 'missing.pub'} (commit.gpgsign is on): git commit failed: ")
 
 
+def test_a_commit_whose_signing_test_cant_write_either_doesnt_blame_signing(repo, monkeypatch, tmp_path):
+    sign_with(tmp_path / "missing.pub")
+    Path("new.txt").write_text("made\n")
+    git("add", "new.txt")
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))  # where the signing test writes
+    folders = [tmp_path / "tmp", *(p for p in [repo / ".git" / "objects", *(repo / ".git" / "objects").rglob("*")]
+                                   if p.is_dir())]
+    for folder in folders:  # like a full disk: no object can be written anywhere
+        folder.chmod(0o555)
+    try:
+        with pytest.raises(workspaces.WorkspaceError) as error:
+            workspaces.commit_all(repo, "wf: impl (run)")
+    finally:
+        for folder in folders:
+            folder.chmod(0o755)
+    assert str(error.value).startswith("git commit failed: ")
+    assert "insufficient permission" in str(error.value)
+
+
 def test_a_key_waiting_for_a_touch_fails_the_run_at_its_start_within_the_timeout(repo, monkeypatch, tmp_path, capsys):
     sign_with_program(tmp_path, "exec sleep 60")  # like ssh-keygen waiting for a security key to be touched
     monkeypatch.setattr(workspaces, "SIGNING_TIMEOUT", 2)
@@ -347,7 +452,7 @@ def test_a_key_waiting_for_a_touch_fails_the_run_at_its_start_within_the_timeout
     assert run(IMPL) == 1
     assert 2 <= time.monotonic() - start < 10
     assert "git commit-tree took longer than 2 seconds" in capsys.readouterr().err
-    assert gone(started(tmp_path))  # stopped with git, not left waiting
+    assert gone(started(tmp_path)[0])  # stopped with git, not left waiting
 
 
 def test_a_signing_timeout_lets_git_remove_its_temporary_file(repo, monkeypatch, tmp_path):
@@ -359,6 +464,7 @@ def test_a_signing_timeout_lets_git_remove_its_temporary_file(repo, monkeypatch,
     with pytest.raises(workspaces.WorkspaceError, match="git commit took longer than 1 seconds"):
         workspaces.commit_all(repo, "wf: impl (run)")
     assert list((tmp_path / "tmp").iterdir()) == []  # git got SIGTERM first, not SIGKILL
+    assert not workspaces._running
 
 
 def test_a_signing_program_that_ignores_sigterm_is_killed(repo, monkeypatch, tmp_path):
@@ -370,18 +476,24 @@ def test_a_signing_program_that_ignores_sigterm_is_killed(repo, monkeypatch, tmp
     with pytest.raises(workspaces.WorkspaceError, match="git commit took longer than 1 seconds"):
         workspaces.commit_all(repo, "wf: impl (run)")
     assert time.monotonic() - start < 5
-    assert gone(started(tmp_path))
+    assert gone(started(tmp_path)[0])
+
+
+def a_job(repo: Path) -> SimpleNamespace:
+    """What nodes._git needs from a job's context."""
+    lock = asyncio.Lock()
+    return SimpleNamespace(git_lock=lambda: lock)
 
 
 def test_cancelling_a_job_stops_its_git_command_and_the_signing_program(repo, tmp_path):
     sign_with_program(tmp_path, "exec sleep 60")
     Path("new.txt").write_text("made\n")
-    lock = asyncio.Lock()
-    ctx = SimpleNamespace(git_lock=lambda: lock)
 
     async def cancel():
-        job = asyncio.create_task(nodes._git(ctx, workspaces.commit_all, repo, "wf: impl (run)"))
-        while not (tmp_path / "pid").exists():
+        job = asyncio.create_task(nodes._git(a_job(repo), workspaces.commit_all, repo, "wf: impl (run)"))
+        for _ in range(200):
+            if signers(tmp_path) or job.done():
+                break
             await asyncio.sleep(0.05)
         job.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -390,7 +502,50 @@ def test_cancelling_a_job_stops_its_git_command_and_the_signing_program(repo, tm
     start = time.monotonic()
     asyncio.run(cancel())  # it waits for the thread that ran git, as wf does when it stops
     assert time.monotonic() - start < 10  # well before SIGNING_TIMEOUT
-    assert gone(started(tmp_path))
+    assert len(signers(tmp_path)) == 1  # and nothing ran after it, not even a test of the key
+    assert gone(started(tmp_path)[0])
+    assert not workspaces._running
+
+
+def test_a_job_cancelled_while_it_waits_for_git_starts_none(repo, tmp_path):
+    sign_with_program(tmp_path, "exec sleep 60")
+    Path("new.txt").write_text("made\n")
+
+    async def cancel():
+        nodes._GIT.acquire()  # another job's git operation runs
+        try:
+            job = asyncio.create_task(nodes._git(a_job(repo), workspaces.commit_all, repo, "wf: impl (run)"))
+            await asyncio.sleep(0.2)
+            job.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await job
+        finally:
+            nodes._GIT.release()
+
+    asyncio.run(cancel())
+    assert signers(tmp_path) == []
+    assert git("status", "--porcelain") == "?? new.txt"  # not even `git add` ran
+
+
+def test_a_stopped_commit_isnt_called_a_signing_failure(repo, tmp_path):
+    sign_with_program(tmp_path, "exec sleep 60")
+    Path("new.txt").write_text("made\n")
+    stop, errors = threading.Event(), []
+
+    def commit():
+        with workspaces.stopped_by(stop):
+            try:
+                workspaces.commit_all(repo, "wf: impl (run)")
+            except workspaces.WorkspaceError as error:
+                errors.append(str(error))
+
+    thread = threading.Thread(target=commit)
+    thread.start()
+    started(tmp_path)
+    stop.set()
+    thread.join(timeout=20)
+    assert errors == ["git commit was stopped: its caller was cancelled"]
+    assert len(signers(tmp_path)) == 1  # no test of the key after the stop
 
 
 def test_ctrl_c_stops_git_and_the_signing_program(repo, tmp_path):
@@ -400,7 +555,7 @@ def test_ctrl_c_stops_git_and_the_signing_program(repo, tmp_path):
     with pytest.raises(KeyboardInterrupt):
         workspaces.check_signing(repo)  # in the main thread, as before a run starts
     assert time.monotonic() - start < 10
-    assert gone(started(tmp_path))
+    assert gone(started(tmp_path)[0])
 
 
 WF = "import sys; from workflow.cli import main; sys.exit(main(sys.argv[1:]))"
@@ -418,10 +573,25 @@ def start_wf(code: str = WF) -> subprocess.Popen:
 def test_wf_stops_git_and_the_signing_program_when_its_terminal_closes_or_it_is_killed(repo, tmp_path, signum):
     sign_with_program(tmp_path, "exec sleep 60")
     wf = start_wf()
-    pid = started(tmp_path)
+    (pid,) = started(tmp_path)  # in the signing check before the run, in wf's main thread
     wf.send_signal(signum)
     assert wf.wait(timeout=20) == -signum  # wf still exits as that signal makes it
     assert gone(pid)
+
+
+@needs_ssh_keygen
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM])
+def test_wf_stops_the_runners_commit_and_starts_no_more_git_when_it_is_killed(repo, tmp_path, signum):
+    new_key(tmp_path)
+    sign_with_program(tmp_path, f'[ -e {tmp_path / "signed"} ] && exec sleep 60\n'  # the commit waits for a touch
+                                f'touch {tmp_path / "signed"}\nexec ssh-keygen "$@"')  # the check before the run signs
+    wf = start_wf()
+    started(tmp_path, times=2)  # the second: the runner's commit, in a worker thread
+    wf.send_signal(signum)
+    assert wf.wait(timeout=20) == -signum
+    time.sleep(1)  # time for a git that wf left behind to start its signing program
+    assert len(signers(tmp_path)) == 2  # the failed commit wasn't followed by a test of the key
+    assert all(gone(pid) for pid in signers(tmp_path))
 
 
 def test_a_hangup_that_wf_ignores_stays_ignored(repo, tmp_path):
