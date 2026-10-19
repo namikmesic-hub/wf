@@ -10,10 +10,6 @@ create() builds a harness by name. FACTORIES maps names to constructors and
 imports each adapter only when it's first used, so a workflow that never runs
 Claude Code never imports the Claude Agent SDK. Tests swap in fakes by patching
 FACTORIES.
-
-ATTACH_TOOLS names the adapters that attach wf tools (SessionSpec.tools) to a
-session. A node with `tools` doesn't run on any other: `wf validate` says so,
-and at run time such a harness counts as unavailable.
 """
 
 from collections.abc import Callable
@@ -40,7 +36,6 @@ def _cursor() -> Harness:
 
 
 FACTORIES: dict[str, Callable[[], Harness]] = {"claude-code": _claude_code, "codex": _codex, "cursor": _cursor}
-ATTACH_TOOLS = ("claude-code", "codex")
 
 
 def create(name: str) -> Harness:
@@ -49,4 +44,4 @@ def create(name: str) -> Harness:
     return FACTORIES[name]()
 
 
-__all__ = ["ATTACH_TOOLS", "FACTORIES", "Harness", "Session", "SessionSpec", "TurnEnd", "Unavailable", "Usage", "create"]
+__all__ = ["FACTORIES", "Harness", "Session", "SessionSpec", "TurnEnd", "Unavailable", "Usage", "create"]

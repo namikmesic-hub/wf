@@ -16,7 +16,8 @@ It speaks the part of MCP's Streamable HTTP transport an agent uses:
 - GET, which would open a stream for messages the server starts, gets 405, as
   the transport allows: this server never starts any;
 - initialize, ping, tools/list and tools/call. A tool's own failure comes back
-  as a result with isError, so the agent reads it and can try again.
+  as a result with isError, so the agent reads it and can try again. A tool
+  answers with text, or with MCP content blocks (a wf tool's text and images).
 HTTP/1.1 with keep-alive, and bodies with Content-Length or chunked, which is
 all an MCP client sends.
 """
@@ -39,7 +40,7 @@ class Tool:
     name: str
     description: str
     schema: dict
-    call: Callable[[dict], Awaitable[tuple[str, bool]]]  # arguments -> (text for the agent, is_error)
+    call: Callable[[dict], Awaitable[tuple[str | list[dict], bool]]]  # arguments -> (text or content blocks, is_error)
 
 
 class Server:
@@ -117,13 +118,14 @@ async def _answer(message: dict, tools: list[Tool]) -> dict:
     elif method == "tools/call":
         tool = next((t for t in tools if t.name == params.get("name")), None)
         if tool is None:
-            text, is_error = f"Error: there's no tool called `{params.get('name')}` here.", True
+            content, is_error = f"Error: there's no tool called `{params.get('name')}` here.", True
         else:
             try:
-                text, is_error = await tool.call(params.get("arguments") or {})
+                content, is_error = await tool.call(params.get("arguments") or {})
             except Exception as error:  # never leave the agent without a reply
-                text, is_error = f"Error: {type(error).__name__}: {error}", True
-        result = {"content": [{"type": "text", "text": text}], "isError": is_error}
+                content, is_error = f"Error: {type(error).__name__}: {error}", True
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        result = {"content": blocks, "isError": is_error}
     else:
         return _error(request_id, -32601, f"wf doesn't handle {method}")
     return {"jsonrpc": "2.0", "id": request_id, "result": result}

@@ -63,7 +63,7 @@ wf tools doctor                          # check that every tool you set up work
 ## Status
 
 Claude Code, Codex and Cursor are supported.
-Tools attach to Claude Code and Codex sessions.
+Tools attach to sessions on all three.
 
 ## Development
 

@@ -86,7 +86,7 @@ from langgraph.types import interrupt
 from . import capacity, dryrun, output_tool, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
-from .harnesses import ATTACH_TOOLS, SessionSpec, Unavailable, Usage
+from .harnesses import SessionSpec, Unavailable, Usage
 from .spec import seconds
 from .state import Finished, Job
 
@@ -351,8 +351,6 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         # retries, and attempts after a crash or `wf resume` (which may find half-done edits)
         if start and (number > job["attempt"] or entered_before):
             await _git(ctx, workspaces.reset, workspace["path"], start)
-        if uses and name not in ATTACH_TOOLS:
-            raise _Unavailable(f"{name} can't attach wf tools yet")
         try:
             agent = await ctx.harness(name)
         except Unavailable as error:

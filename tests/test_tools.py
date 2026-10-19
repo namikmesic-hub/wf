@@ -27,12 +27,14 @@ from workflow import cli, harnesses, runner, schemas, validate
 from workflow.harnesses.base import SessionSpec
 from workflow.harnesses.claude_code import options
 from workflow.harnesses.codex import Codex
+from workflow.harnesses.cursor import Cursor, allows
 from workflow.output_tool import ResultTool
 from workflow.spec import ToolUse
 from workflow.tools import doctor, keychain, relay, signin
 from workflow.tools.catalog import TOOLS
 
 FAKE_CODEX = Path(__file__).parent / "fake_codex.py"
+FAKE_ACP = Path(__file__).parent / "fake_acp.py"
 SECRET = "s3cret-access-token-only-wf-may-see"
 
 
@@ -76,7 +78,7 @@ def flow(tools: str = "[linear]", harness: str = "claude-code", nodes: str = "")
         name: tooled
         defaults:
           harness: {harness}
-          harnesses: {{claude-code: {{model: opus}}, cursor: {{model: composer}}}}
+          harnesses: {{claude-code: {{model: opus}}, cursor: {{model: composer-2.5}}}}
         start: {{input: {{}}}}
         nodes:
           read:
@@ -302,13 +304,6 @@ def test_tools_in_defaults_reach_every_agent_node(repo):
                                                                     "when it runs: run `wf tools notion setup`")]
 
 
-def test_a_node_that_can_run_on_cursor_cannot_have_tools(repo):
-    keychain.save("linear", {"method": "token", "access_token": "x"})
-    assert problems(flow("[linear]", harness="[codex, cursor]")) == [
-        ("error", "nodes.read.tools", "this node can run on cursor, which can't attach wf tools yet (only claude-code and codex can)"),
-    ]
-
-
 @pytest.mark.parametrize("tools, where, message", [
     ("[{name: linear, wirte: true}]", "nodes.read.tools[0].wirte", "unknown key"),
     ("[3]", "nodes.read.tools[0]", "expected a tool name, or {name: ..., write: true}"),
@@ -378,24 +373,6 @@ def test_a_server_that_does_not_answer_fails_the_attempt_and_the_retry_tries_aga
     assert failed[0]["error"].startswith("can't use Linear's server at http://127.0.0.1:")
 
 
-def test_a_harness_that_cannot_attach_tools_is_skipped(repo, capsys):
-    Path("flow.yaml").write_text(dedent("""
-        version: 1
-        name: tooled
-        start: {input: {harness: {type: string, default: cursor}}}
-        nodes:
-          read:
-            needs: [start]
-            harness: "{{ start.harness }}"
-            model: composer
-            instruction: Read the open issues
-            tools: [linear]
-        end: {output: {}}
-        """))
-    assert cli.main(["run", "flow.yaml"]) == 1
-    assert "cursor is unavailable: cursor can't attach wf tools yet" in capsys.readouterr().err
-
-
 def test_a_dry_run_attaches_no_tools(repo, monkeypatch):
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", lambda: pytest.fail("a dry run called a real harness"))
     Path("script.yaml").write_text(yaml.safe_dump({"agents": {"read": [{"summary": "read them"}]}}))
@@ -455,6 +432,45 @@ def test_codex_gets_a_namespace_per_tool_and_its_calls_are_relayed(vendor, repo,
     assert vendor.calls == [("list_issues", {"query": "open"})]
 
 
+def cursor(monkeypatch, tmp_path: Path, *turns) -> Path:
+    """Use the fake `cursor-agent`; returns the log of everything wf sent it and answered."""
+    scenario, log = tmp_path / "acp-scenario.json", tmp_path / "acp-requests.jsonl"
+    scenario.write_text(json.dumps({"turns": list(turns)}))
+    monkeypatch.setitem(harnesses.FACTORIES, "cursor",
+                        lambda: Cursor(command=[sys.executable, str(FAKE_ACP), str(scenario), str(log)], request_timeout=10))
+    return log
+
+
+def logged(log: Path, kind: str) -> list:
+    return [json.loads(line)["data"] for line in log.read_text().splitlines() if json.loads(line)["kind"] == kind]
+
+
+def test_cursor_gets_an_mcp_server_per_tool_and_its_calls_are_relayed(vendor, repo, monkeypatch):
+    signed_in(vendor)
+    log = cursor(monkeypatch, repo, [{"tool": {"server": "linear", "name": "list_issues", "arguments": {"query": "open"}}},
+                                     {"tool": {"server": "linear", "name": "save_issue", "arguments": {"query": "x"}}},
+                                     {"tool": {"arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[linear]", harness="cursor")]) == 0
+    (new,) = [e["params"] for e in logged(log, "request") if e["method"] == "session/new"]
+    wf_server, linear = new["mcpServers"]
+    assert (wf_server["name"], linear["name"], linear["type"]) == ("wf", "linear", "http")
+    assert linear["url"].startswith("http://127.0.0.1:") and linear["url"] != wf_server["url"]
+    assert logged(log, "server_tools") == [{"server": "linear", "names": ["list_issues", "get_user"]}]
+    assert [answer["outcome"]["optionId"] for answer in logged(log, "permission")] == ["allow-once"] * 3
+    read, write, result = logged(log, "reply")
+    assert read == {"content": [{"type": "text", "text": "list_issues answered 'open'"}], "isError": False}
+    assert write["isError"] is True  # not among the operations this read-only node may use
+    assert result["isError"] is False
+    assert vendor.calls == [("list_issues", {"query": "open"})]
+
+
+def test_cursor_refuses_an_mcp_server_wf_did_not_give_the_session(tmp_path):
+    call = {"kind": "other", "rawInput": {"providerIdentifier": "slack", "toolName": "slack_send_message"}}
+    assert allows("full", False, tmp_path, call, {"wf", "slack"})  # full allows everything anyway
+    assert not allows("read-only", False, tmp_path, call, {"wf", "linear"})
+    assert allows("read-only", False, tmp_path, call, {"wf", "slack"})
+
+
 def test_no_secret_reaches_an_agent_or_the_run_folder(vendor, repo, wf_home, monkeypatch, tmp_path):
     signed_in(vendor, access_token=SECRET)
     stored = keychain.load("linear")
@@ -462,13 +478,16 @@ def test_no_secret_reaches_an_agent_or_the_run_folder(vendor, repo, wf_home, mon
     log = codex(monkeypatch, repo, [{"tool": {"namespace": "linear", "name": "list_issues", "arguments": {"query": "open"}}},
                                     {"tool": {"arguments": {"summary": "done"}}}])
     assert cli.main(["run", flow("[linear]", harness="codex")]) == 0
-    assert vendor.requests("/mcp")[-1]["authorization"] == f"Bearer {SECRET}"  # wf used it, on the agent's behalf
-    sent_to_codex = log.read_text()
-    assert "list_issues answered" in sent_to_codex
+    acp = cursor(monkeypatch, repo, [{"tool": {"server": "linear", "name": "list_issues", "arguments": {"query": "open"}}},
+                                     {"tool": {"arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[linear]", harness="cursor")]) == 0
+    assert vendor.requests("/mcp")[-1]["authorization"] == f"Bearer {SECRET}"  # wf used it, on the agents' behalf
+    sent_to_agents = log.read_text() + acp.read_text()
+    assert sent_to_agents.count("list_issues answered") == 2
     written = [path.read_bytes() for path in [*Path(".wf").rglob("*"), *wf_home.rglob("*")] if path.is_file()]
     for secret in secrets:
-        assert secret not in sent_to_codex  # thread settings, tool replies: everything Codex got
-        assert not any(secret.encode() in data for data in written)  # the run folder and ~/.wf
+        assert secret not in sent_to_agents  # session settings, environments, tool replies: everything Codex and Cursor got
+        assert not any(secret.encode() in data for data in written)  # the run folders and ~/.wf
         assert not any(secret in value for value in os.environ.values())
 
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
@@ -483,14 +502,14 @@ def test_no_secret_reaches_an_agent_or_the_run_folder(vendor, repo, wf_home, mon
 
 
 @pytest.mark.harness
-@pytest.mark.parametrize("harness", ["claude-code", "codex"])
+@pytest.mark.parametrize("harness", ["claude-code", "codex", "cursor"])
 def test_a_real_agent_reads_through_a_tool(harness, vendor, repo):
     signed_in(vendor)
     Path("flow.yaml").write_text(dedent("""
         version: 1
         name: real-tools
         defaults:
-          harnesses: {claude-code: {model: claude-haiku-5-5, effort: low}, codex: {effort: low}}
+          harnesses: {claude-code: {model: claude-haiku-5-5, effort: low}, codex: {effort: low}, cursor: {model: composer-2.5}}
         start: {input: {}}
         nodes:
           read:

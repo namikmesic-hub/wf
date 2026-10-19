@@ -675,7 +675,8 @@ Each call arrives tied to its session: a process, a thread id or a session's URL
 So a result can only reach the attempt it belongs to.
 
 A node's `tools` reach the agent the same way.
-wf connects to each vendor's MCP server itself, and offers the agent the operations the node may use as tools of its own: an SDK MCP server per tool on Claude Code, a namespace of dynamic tools on Codex.
+wf connects to each vendor's MCP server itself, and offers the agent the operations the node may use as tools of its own.
+That's an SDK MCP server per tool on Claude Code, a namespace of dynamic tools on Codex, and an MCP server over HTTP per tool on Cursor.
 Each call comes back to the runner, which passes it on with the stored sign-in, so the secret never reaches the agent.
 
 The runner uses this tool instead of each harness's own structured-output feature because
@@ -822,7 +823,6 @@ Errors:
     `review/{{ start.task }}` are apart, and so are `fm/{{ start.task }}/author` and
     `fm/{{ start.task }}/review`. The run refuses a clash that the check can't see.
 13. Each `tools` entry names a known tool, and no tool is listed twice.
-    A node with `tools` can't run on `cursor`, which can't attach them yet.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`
@@ -912,7 +912,7 @@ start, and sends the runner to the next harness. The attempt loop is written onc
 | Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | the turn's last message: a sign-in, plan or payment notice, or `[resource_exhausted]` |
 | Usage | tokens and dollars | tokens | none |
 | `session: continue` | fork with `fork_session` | fork with `thread/fork` | `session/load` (no fork) |
-| wf tools | an SDK MCP server per tool | a namespace of dynamic tools per tool | not yet |
+| wf tools | an SDK MCP server per tool | a namespace of dynamic tools per tool | an MCP server over HTTP per tool, a URL per session |
 
 Notes:
 - Every setting is passed on every session. Codex fills any gap from your

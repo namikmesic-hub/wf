@@ -2,8 +2,8 @@
 
 wf is the vendor server's only MCP client. The agent sees the tool the way it sees
 submit_result, as a server wf hosts in its own process: an SDK MCP server for Claude Code, a
-namespace of dynamic tools for Codex. Every call comes back to wf, which passes it on with the
-stored sign-in. That keeps two promises on every harness alike:
+namespace of dynamic tools for Codex, an MCP server on 127.0.0.1 for Cursor (mcp_http.py).
+Every call comes back to wf, which passes it on with the stored sign-in. That keeps two promises on every harness alike:
 - The secret stays in wf's process. Handing the vendor's URL and token to the harness instead
   would put the token on Claude Code's command line (the Agent SDK passes MCP servers there),
   where any command the agent runs could read it with `ps`.

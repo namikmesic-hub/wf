@@ -3,8 +3,8 @@
 An agent node can read Slack, Granola meeting notes, Linear, Notion and Gmail through tools that wf brings itself.
 Each tool is the vendor's own MCP server.
 You sign in to it once per machine with `wf tools <name> setup`, which keeps the secret in the macOS Keychain.
-A node lists the tools its agent may use, and wf attaches them to that agent's session on Claude Code or Codex.
-Your own Claude Code connectors don't matter here: wf's headless sessions don't load them, and Codex has none.
+A node lists the tools its agent may use, and wf attaches them to that agent's session on Claude Code, Codex or Cursor.
+Your own connectors and MCP servers don't matter here, because wf's sessions don't load them.
 
 ```sh
 wf tools list              # each tool, how it signs in, and whether it's set up
@@ -130,8 +130,6 @@ Or it's `{name: ..., write: true}`, which gives the agent every operation the se
 Posting, sending and creating reach other people, so a node only gets them when it asks for them by name.
 
 `wf validate` checks that each tool exists and is listed once, and warns about one that isn't set up on this machine.
-A node with tools can't run on Cursor yet.
-So validate refuses a node that could, and a run skips Cursor for it as it would an unavailable harness.
 
 When a node runs, each attempt connects to its tools first.
 A tool that isn't set up, or whose sign-in the vendor refuses, fails the node at once with what to run, since a retry would find the same.
@@ -161,6 +159,7 @@ wf is the vendor server's only MCP client.
 The agent sees each tool the way it sees `submit_result`: as a server that wf hosts in its own process.
 On Claude Code that's an SDK MCP server named after the tool (`mcp__linear__list_issues`).
 On Codex it's a namespace of dynamic tools (`linear`).
+On Cursor it's an MCP server named after the tool, at a URL on 127.0.0.1 that only this session gets, next to the one that serves `submit_result`.
 Each call comes back to wf, which passes it on to the vendor with the stored token.
 This keeps two promises the same way on every harness:
 
