@@ -61,9 +61,10 @@ none for human and workflow), `retry` (1 for agents, else 0), `description`.
 
 Agents also: `harness`, `model`, `effort` (maps by harness when `harness` is a
 list), `access`, `web` (false), `session` (fresh | continue), `max_turns`,
-`budget_usd`, `project_instructions` (true). Commands also: `env` (template values), `check` (true: non-zero
+`budget_usd`. Commands also: `env` (template values), `check` (true: non-zero
 exit fails the node; false: route on `exit_code`).
 
+Agent nodes also take `project_instructions` (true).
 `project_instructions: false`, on a node or in `defaults`, keeps the repo's own agent instruction files out of the node's sessions.
 These are `CLAUDE.md`, `AGENTS.md`, Cursor's rules, the repo's skills, and Claude Code's project settings.
 The instruction still reaches the agent.

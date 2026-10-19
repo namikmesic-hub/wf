@@ -887,7 +887,8 @@ Warnings:
 - A node uses a tool that isn't set up on this machine (`wf tools <name> setup`).
 - A node has `write: true` for a tool that is set up for reads only (`wf tools <name> setup --write`).
 - A node sets `tools_with_shell: true`: its agent could read every stored sign-in.
-- A node with `project_instructions: false` can run on a harness that still loads an instruction file: Codex loads your global `~/.codex/AGENTS.md`, and Cursor your account's User Rules and the repo's hooks.
+- A node with `project_instructions: false` can run on a harness that still loads an instruction file.
+  Codex loads your global `~/.codex/AGENTS.md`, and Cursor loads your account's User Rules and the repo's hooks.
 - An agent with `access: full` reads output from an agent with `tools`.
   Messages, notes and mail that other people write can carry instructions aimed at agents.
 
