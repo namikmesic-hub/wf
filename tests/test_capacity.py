@@ -9,11 +9,13 @@ each session was live.
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
 
@@ -257,6 +259,22 @@ def test_each_wf_home_has_its_own_slots(monkeypatch, tmp_path):
     held.release()
 
 
+def test_a_wait_tries_again_every_0_2_seconds(monkeypatch, wf_home):
+    taken = capacity.take(1, {"n": 0})
+    pauses, real_sleep = [], asyncio.sleep
+
+    async def sleep(seconds):
+        pauses.append(seconds)
+        if len(pauses) == 3:
+            taken.release()
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    slot = asyncio.run(capacity.wait(1, {"n": 1}, stop=lambda: False))
+    assert pauses == [0.2, 0.2, 0.2]  # three tries found the slot taken, the fourth got it
+    slot.release()
+
+
 def test_a_slot_has_one_holder_at_a_time(wf_home):
     first = capacity.take(2, {"node": "a"})
     second = capacity.take(2, {"node": "b"})
@@ -270,6 +288,33 @@ def test_a_slot_has_one_holder_at_a_time(wf_home):
 
 
 # ---------- runs ----------
+
+
+def test_a_slot_file_names_its_holder(repo, monkeypatch, wf_home):
+    monkeypatch.setenv("WF_MAX_AGENTS", "1")
+    holder = {}
+
+    async def look(session):  # while the session is live
+        holder.update(json.loads((wf_home / "agent-slots" / "0").read_text()))
+        session.spec.tool.submit({"summary": "done"})
+        return TurnEnd("done", usage=Usage())
+
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", look).factory)
+    assert cli.main(["run", agent_flow()]) == 0
+    assert holder == {"pid": os.getpid(), "run": run_of("work").name, "node": "work", "attempt": 1}
+
+
+def test_wf_run_and_wf_resume_read_the_cap_once_when_they_start(repo, monkeypatch):
+    monkeypatch.setenv("WF_MAX_AGENTS", "2")
+    reads, real = [], capacity.configured
+    monkeypatch.setattr(capacity, "configured", lambda: reads.append(1) or real())
+    fake = Fake("claude-code", submit({"summary": "first"}), submit({"summary": "done"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    two = 'first: {needs: [start], instruction: First.}\n  work: {needs: [first], instruction: Work.}'
+    assert cli.main(["run", agent_flow(node=two)]) == 0
+    assert len(fake.sent) == 2 and len(reads) == 1  # two agent attempts, one read
+    assert cli.main(["resume", run_of("work").name]) == 0  # already succeeded
+    assert len(reads) == 2
 
 
 def test_without_a_cap_nothing_waits_and_no_slot_is_made(repo, monkeypatch, wf_home):
@@ -303,6 +348,7 @@ def test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slo
     assert [e["waited_s"] for e in events("work") if e["event"] == "slot_taken"][0] >= 1.4
     assert seen["status"] == "running"
     assert [(w["node"], w["attempt"]) for w in seen["agents_waiting"]] == [("work", 1)]
+    assert datetime.fromisoformat(seen["agents_waiting"][0]["since"]) <= datetime.now().astimezone()
     assert live["status"] == "running" and "agents_waiting" not in live
 
 
