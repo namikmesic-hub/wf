@@ -4,11 +4,11 @@
 
 Run YAML workflows of coding-agent steps.
 
-A workflow is a graph of steps: tasks for coding agents (Claude Code or Codex),
-shell commands, questions for a person, and other workflows. Every step declares
-what it outputs, and routes decide what runs next, so loops like "implement,
-test, review, and go round until clean" are a few lines of YAML. wf runs the
-graph on LangGraph:
+A workflow is a graph of steps.
+Its steps are tasks for coding agents (Claude Code, Codex or Cursor), shell commands, questions for a person, and other workflows.
+Every step declares what it outputs, and routes decide what runs next.
+So loops like "implement, test, review, and go round until clean" are a few lines of YAML.
+wf runs the graph on LangGraph:
 - parallel steps work in their own git worktrees;
 - a failed attempt is retried, or falls back to another agent;
 - limits cap a run's cost, tokens and time;
@@ -19,8 +19,7 @@ One cap on live agent sessions holds across all your runs that share a `~/.wf`.
 
 ## Install
 
-Needs Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code or Codex
-logged in.
+Needs Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code, Codex or Cursor (`cursor-agent`) logged in.
 
 ```sh
 uv tool install --editable .
@@ -53,11 +52,11 @@ results, for free. `wf --help` lists every command.
 
 ## Status
 
-Claude Code and Codex are supported; Cursor is planned.
+Claude Code, Codex and Cursor are supported.
 
 ## Development
 
 ```sh
 uv run pytest                  # fake agents, no cost
-uv run pytest -m harness       # real agents: uses your Claude Code and Codex quota
+uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```

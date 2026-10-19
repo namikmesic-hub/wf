@@ -1,7 +1,7 @@
 [project]
 name = "wf"
 version = "0.1.0"
-description = "wf: run YAML workflows of coding-agent steps (Claude Code and Codex; Cursor planned) on LangGraph."
+description = "wf: run YAML workflows of coding-agent steps (Claude Code, Codex and Cursor) on LangGraph."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -16,11 +16,6 @@ dependencies = [
 
 [project.scripts]
 wf = "workflow.cli:main"
-
-[project.optional-dependencies]
-cursor = [
-    "cursor-sdk>=1.0.38",
-]
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]

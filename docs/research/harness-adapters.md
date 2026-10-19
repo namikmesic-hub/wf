@@ -21,6 +21,7 @@ Versions checked:
      as a *dynamic tool*. The server sends each call back to the runner as an `item/tool/call`
      request.
    - **Cursor:** the `cursor-sdk` Python package, with `submit_result` as a `custom_tools` entry.
+     Superseded on 2026-10-19: wf drives `cursor-agent acp` on the local login instead, see [section 6](#6-cursor-through-acp).
 2. **Keep `session: fresh` as the default.** `session: continue` stays opt-in. It forks the
    previous pass's session where the harness can, sends only the new feedback, and drops
    back to fresh when it can't continue cleanly.
@@ -31,6 +32,9 @@ Versions checked:
 The spec changes this implies are listed at the [end](#4-proposed-spec-changes).
 
 ## 1. The three harnesses side by side
+
+The Cursor column describes the `cursor-sdk` design.
+[Section 6](#6-cursor-through-acp) replaced it on 2026-10-19 with `cursor-agent acp`, which runs on the local login.
 
 | | Claude Code | Codex | Cursor |
 |---|---|---|---|
@@ -194,6 +198,8 @@ Why this shape:
 
 ### Cursor adapter
 
+Superseded on 2026-10-19 by [section 6](#6-cursor-through-acp): this design needs a dashboard API key, and `cursor-agent acp` doesn't.
+
 - **Setup.** `pip install cursor-sdk`. The wheel is about 50 MB and bundles Node. It needs an
   API key from the Cursor dashboard [V]. Read `CURSOR_API_KEY` once, pass it as `api_key=`,
   and remove it from the environment before starting the bridge. Agent shell commands inherit
@@ -313,7 +319,7 @@ All seven were applied to `docs/workflow-spec.md` on 2026-10-18.
 
 ## 5. To check before or while building
 
-- **Cursor** (needs an API key):
+- **Cursor**, which needs an API key ([section 6](#6-cursor-through-acp) covers the ACP adapter):
   - Does `setting_sources=["project"]` load `AGENTS.md`, `.cursor/rules` and `CLAUDE.md`?
   - Can a sandboxed `edit` agent run git in a worktree?
   - How does a usage limit actually show up?
@@ -325,3 +331,26 @@ All seven were applied to `docs/workflow-spec.md` on 2026-10-18.
   - How many threads can one app-server run at once?
   - Run `generate-json-schema --experimental` in CI to catch protocol drift.
 - **Claude:** does an explicit `model` on a resumed session override the recorded one?
+
+## 6. Cursor through ACP
+
+Checked 2026-10-19 with `cursor-agent` 2026.10.14-0f9edde and 2026.10.16-e3cb207, for `workflow/harnesses/cursor.py`.
+`cursor-agent acp` speaks the Agent Client Protocol, JSON-RPC 2.0 over stdio, on the local Cursor login, so it needs no API key and no `cursor-sdk`.
+Each row says what Cursor does, what the adapter does about it, where, and which test fails when the two disagree.
+Tests marked `-m harness` run the real `cursor-agent`.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| `authenticate` with `cursor_login` returns at once when the CLI is logged in [V live]. | Every session authenticates that way, with `CURSOR_API_KEY` and `CURSOR_AUTH_TOKEN` removed from cursor-agent's environment. | `cursor.py:262`, `cursor.py:123` | `test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config` |
+| When the CLI isn't logged in, `authenticate` starts a browser login and `--list-models` fails [V]. | The adapter runs `--list-models` before any session, sets `NO_OPEN_BROWSER`, and reports Cursor unavailable. | `cursor.py:188`, `cursor.py:181` | `test_a_cursor_agent_that_is_not_logged_in_is_unavailable` |
+| The agent keeps one model per process. `--model <id>` takes the effort in the id only when `initialize` sends `clientCapabilities._meta.parameterizedModelPicker: true`: then `gpt-5.6-sol-max-fast` runs with `reasoning: max, fast: true` [V live]. | One process per session, started with `--model`. `initialize` declares parameterized models, and the transcript records the model and parameters the session reports. | `cursor.py:249`, `cursor.py:261`, `cursor.py:280` | `test_a_real_cursor_session_takes_the_effort_in_the_model_id` (`-m harness`), `test_the_transcript_records_the_model_and_effort_cursor_uses` |
+| Cursor saves the model, and the parameters it last used for it, into its config folder (`CURSOR_CONFIG_DIR`), and writes the account's details there [V live]. | Each process gets a new folder in `~/.wf/temp/<run-id>/cursor-agent/`, outside the repo, and the folder goes when its session closes. | `cursor.py:172` | `test_each_cursor_agent_gets_a_new_config_folder_and_none_is_left` |
+| cursor-agent merges the permissions of `.cursor/cli.json` files from the git root down to its folder. An invalid one stops it at start, and the hidden flag `--disable-project-configs` stops the merge [V live]. | cursor-agent always starts with `--disable-project-configs`. | `cursor.py:107` | `test_a_real_cursor_session_ignores_the_repos_cursor_settings` (`-m harness`) |
+| An HTTP MCP server named in `session/new` loads without approval. Each call asks `session/request_permission` (kind `other`), then comes as `tools/call` [V live]. | `submit_result`, and `git` for read-only, are served on a URL of the session's own, which ends when the session closes. | `cursor.py:248` | `test_a_real_read_only_agent_node_on_cursor` (`-m harness`), `test_closing_a_session_ends_its_mcp_url` |
+| With `approvalMode: allowlist` and an empty allowlist, every command, MCP tool, web search and web fetch asks, and writes inside the workspace don't [V live]. | Each request is answered from the node's access level, with "allow once" or "reject". | `cursor.py:408` | `test_permission_requests_are_answered_from_the_access_level` |
+| Outside the workspace, Cursor writes to temp folders and to Markdown files in `~/.cursor` without asking. A deny rule, where `*` matches any text, blocks such a write: `Write(/private/tmp/*)` blocked one in `/private/tmp` [V live]. | `read-only` denies `Write(**)`, and `edit` denies the temp folders and `~/.cursor`. | `cursor.py:117`, `cursor.py:121` | `test_edit_and_full_run_in_agent_mode_with_writes_allowed`, `test_edit_denies_the_writes_cursor_makes_outside_the_workspace_without_asking` |
+| With the sandbox on, a command still asks, and one the client allows runs outside the sandbox: it wrote a file outside the workspace and reached the network [V live]. | `--sandbox disabled` at every level, since the sandbox confines nothing the adapter doesn't already decide. | `cursor.py:107` | `test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config` |
+| `session/prompt` returns only a `stopReason`, and no update carries tokens or cost [V]. | Cursor turns count zero tokens and zero dollars. | `cursor.py:282` | `test_cursor_reports_no_usage` |
+| A failed request ends the turn with `end_turn` and a last paragraph `Error: [code] ...`, `Error: SomeError: ...` or an account notice such as `Upgrade your plan to continue`, sent in one or more chunks [V]. | The message since the last tool call is read. A notice, `[unauthenticated]` or `[resource_exhausted]` makes Cursor unavailable, another error fails the turn, and other text is the agent's. | `cursor.py:391` | `test_a_usage_limit_or_a_login_problem_makes_cursor_unavailable`, `test_a_notice_sent_in_several_chunks_is_still_read`, `test_a_paragraph_that_only_starts_with_error_is_the_agents_own_text` |
+| Sessions are saved in the config folder. `session/load` replays the conversation as `session/update` notifications, then answers. There's no fork [V]. | The saved session moves into the new process's folder and loads there. Replayed updates are ignored, and after a continued attempt fails the retry starts fresh. | `cursor.py:255`, `cursor.py:264`, `cursor.py:381` | `test_continue_loads_the_last_passs_session`, `test_after_a_continued_attempt_fails_the_retry_starts_fresh`, `test_a_continued_attempt_that_times_out_after_its_result_is_not_continued_again` |
+| `acp` and `--disable-project-configs` aren't in `cursor-agent --help`, and the messages above can change between versions [V]. | wf is tested with one version and warns once when another is installed. | `cursor.py:105`, `cursor.py:152` | `test_a_cursor_agent_other_than_the_tested_one_gets_one_warning` |

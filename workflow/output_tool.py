@@ -17,8 +17,8 @@ The rules, from "The output tool" in the spec:
   REMINDERS times, in the same session (see nodes.py).
 
 ResultTool.submit() is plain Python. Each harness adapter wraps it in its own
-tool type (an SDK MCP tool for Claude Code, a dynamic tool for Codex, a custom
-tool for Cursor), so this logic exists once.
+tool type (an SDK MCP tool for Claude Code, a dynamic tool for Codex, a tool on
+an MCP server over HTTP for Cursor), so this logic exists once.
 """
 
 from typing import Any

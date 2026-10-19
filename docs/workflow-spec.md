@@ -153,10 +153,10 @@ Each harness needs its own login, and only the harnesses a workflow uses need to
 - **Codex**: the `codex` CLI, signed in with `codex login`. `wf` is tested against one Codex
   version and warns when the installed one differs, because the parts of Codex it uses are
   marked experimental.
-- **Cursor**: the `cursor-sdk` package (an optional dependency) and an API key from the
-  Cursor dashboard in `CURSOR_API_KEY`. Cursor's browser login isn't enough. The runner
-  passes the key to the SDK directly and removes it from the environment agents see, so
-  their shell commands can't read it.
+- **Cursor**: `cursor-agent`, signed in with `cursor-agent login`.
+  Runs use that login, not an API key: the runner removes `CURSOR_API_KEY` from the environment Cursor and its agents see.
+  Each cursor-agent process gets a settings folder of its own, outside the repo, so your `~/.cursor` settings don't apply and aren't changed.
+  `wf` is tested against one cursor-agent version and warns when the installed one differs, because it reads the messages Cursor writes.
 
 `wf init my-flow` writes:
 
@@ -327,15 +327,16 @@ Each harness adapter maps these levels to its own permission settings (see
 [Harness adapters](#harness-adapters)). Nodes never stop to ask for permission: anything
 outside the level is refused.
 
-With `edit`, agents can't write to `.git` under Codex's sandbox, and probably not under
-Cursor's either. So the runner makes the commits (see [Workspaces](#workspaces)), and a
-node that runs git commands that write, such as `git merge` or `git rebase`, needs
-`access: full`.
+With `edit`, agents can't write to `.git` under Codex's sandbox.
+So the runner makes the commits (see [Workspaces](#workspaces)).
+A node that runs git commands that write, such as `git merge` or `git rebase`, needs `access: full`.
 
 Agents run with the harness's normal coding setup: its own system prompt, plus the repo's
 instruction files (`CLAUDE.md`, `AGENTS.md`). Where the harness allows it, user-level
-settings and memory aren't loaded, so a workflow behaves the same on every machine. Codex
-is the exception: it always loads your global `~/.codex/AGENTS.md`.
+settings and memory aren't loaded, so a workflow behaves the same on every machine.
+Codex and Cursor are the exceptions.
+Codex always loads your global `~/.codex/AGENTS.md`.
+Cursor loads your Cursor account's User Rules and the skills in your home folder, such as `~/.claude/skills` and `~/.agents/skills`.
 
 #### Command nodes
 
@@ -408,7 +409,7 @@ defaults:
   harnesses:
     claude-code: {model: claude-opus-5-5, effort: high}
     codex: {}                       # the default model from Codex's model list
-    cursor: {model: composer-2.5}   # Cursor requires a model
+    cursor: {model: gpt-5.6-sol-high}   # Cursor requires a model; the id carries its effort
   access: read-only
   workspace: repo
   max_parallel: 4
@@ -424,6 +425,10 @@ The runner always passes the model and effort to the harness explicitly, so your
 harness config never decides them. When nothing is set, it uses the harness's own default:
 for Codex, the default model in the app server's model list. Cursor has no default, so any
 node that can run on Cursor needs a `model`.
+A Cursor model id carries its own effort, as in `gpt-5.6-sol-max-fast`, `gemini-4-argon-high` or `claude-fable-5-1-thinking-max`.
+So `effort` doesn't apply to Cursor, and `wf validate` warns when it's set.
+The id must be one that `cursor-agent --list-models` lists.
+Any other makes Cursor unavailable for that attempt, so the next harness in the node's list runs.
 
 ### limits
 
@@ -444,10 +449,14 @@ and says which limit is still reached. `wf run <file> --limit ...` starts a run 
 different limit.
 
 - **Tokens** are input plus output tokens, as each harness reports them (cached input
-  included). All three harnesses report them, so `tokens` is the limit that works everywhere.
-- **Cost** only counts harnesses that report it in dollars: Claude Code always does, Cursor
-  only if it's enabled for your account, and Codex never does. A harness that doesn't report
-  cost adds nothing, and `wf validate` warns about it.
+  included).
+  Claude Code and Codex report them.
+  Cursor doesn't.
+- **Cost** only counts harnesses that report it in dollars.
+  Claude Code does.
+  Codex and Cursor don't.
+- A harness that doesn't report tokens or cost adds nothing to them, and `wf validate` warns when a limit or a template counts them.
+  `duration` caps every harness.
 
 ## Templates and expressions
 
@@ -583,7 +592,8 @@ gets depends on `session`:
   - The runner records each pass's session id in its pass folder.
   - The next pass *forks* that session: Claude Code with `fork_session`, Codex with
     `thread/fork`. The earlier session is never changed, so a retry forks from the same
-    point again. Cursor can't fork, so it resumes the previous agent instead.
+    point again.
+    Cursor can't fork, so it loads the previous session itself (`session/load`).
   - The rendered instruction is sent as the next message. `session.continued` is true while
     it renders, so the template can send just the new feedback instead of the whole task.
     The runner adds that a new `submit_result` call is needed.
@@ -608,18 +618,18 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | Runs of the user that use the same `~/.wf` | They share one set of slots, in `~/.wf/agent-slots/`. Runs with another `WF_HOME` have slots of their own. | `workflow/capacity.py:54` | `test_two_runs_in_separate_processes_share_the_cap`, `test_each_wf_home_has_its_own_slots`, `test_a_slot_file_names_its_holder` |
-| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:441` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
+| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:443` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
 | `WF_MAX_AGENTS` is set | It sets the same cap, and wins over `max_agents` in the file, which is still checked. | `workflow/capacity.py:64`, `workflow/capacity.py:66` | `test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home`, `test_a_bad_cap_stops_wf_run_before_the_run_exists` |
 | The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:141` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
 | `config.yaml` names a setting wf doesn't know, or doesn't hold settings by name | The same. So a misspelt `max_agents` can't quietly mean no cap. | `workflow/settings.py:50` | `test_a_wrong_file_fails_every_read` in `tests/test_settings.py`, `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
-| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:446`, `workflow/nodes.py:464` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
+| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:448`, `workflow/nodes.py:466` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
 | An attempt holds a slot | The slot is the file `~/.wf/agent-slots/<n>`, which the attempt's process locks with `flock`. The file names its holder: pid, run, node and attempt. | `workflow/capacity.py:96`, `workflow/capacity.py:98`, `workflow/capacity.py:107` | `test_a_slot_has_one_holder_at_a_time`, `test_a_slot_file_names_its_holder` |
-| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:255` | `test_a_retry_and_a_fallback_take_a_slot_again` |
-| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:230`, `workflow/nodes.py:441` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
+| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:257` | `test_a_retry_and_a_fallback_take_a_slot_again` |
+| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:232`, `workflow/nodes.py:443` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
 | Several attempts wait for one slot | Each tries again every `POLL_SECONDS` (0.2 seconds), and the first try after the slot comes free gets it. So they get it one at a time, in an order that is not defined. | `workflow/capacity.py:46`, `workflow/capacity.py:117`, `workflow/capacity.py:120` | `test_a_wait_tries_again_every_0_2_seconds`, `test_attempts_that_wait_for_one_slot_take_it_one_at_a_time` |
-| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:454`, `workflow/nodes.py:257`, `workflow/nodes.py:258` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
-| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:450`, `workflow/nodes.py:460`, `workflow/context.py:153`, `workflow/cli.py:298` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
-| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:458` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
+| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:456`, `workflow/nodes.py:259`, `workflow/nodes.py:260` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
+| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:452`, `workflow/nodes.py:462`, `workflow/context.py:153`, `workflow/cli.py:298` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
+| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:460` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
 | A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:98` | `test_a_killed_process_frees_its_slot` |
 | A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:58` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
 | Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. | `workflow/capacity.py:95` | `test_a_smaller_cap_uses_only_the_first_slots` |
@@ -645,17 +655,17 @@ Each agent attempt gets one tool, `submit_result`. Its input schema is the node'
   submit_result yet. Call it now with your result." as another message in the same
   session. It does this up to 2 times. If there's still no result, the attempt fails.
 
-`submit_result` is a Python function in the runner, and every harness can call one
-directly. No separate server is needed:
+`submit_result` is a Python function in the runner, and each harness reaches it its own way:
 - **Claude Code**: an SDK MCP server inside the runner process, like
   `claude_code_chat/native_tools.py`.
 - **Codex**: a dynamic tool, declared when the thread starts. The app server sends each call
   to the runner as an `item/tool/call` request on the same connection.
-- **Cursor**: a custom tool (`LocalAgentOptions.custom_tools`), which the SDK calls in the
-  runner's process.
+- **Cursor**: an MCP server the runner serves over HTTP on 127.0.0.1, given to Cursor when the session starts.
+  Each session gets its own URL, with an unguessable token in it.
+  A request from a web page (an Origin header that isn't 127.0.0.1 or localhost) gets no answer.
 
-Each call arrives tied to its session (a process, a thread id or an agent id), so a result
-can only reach the attempt it belongs to.
+Each call arrives tied to its session: a process, a thread id or a session's URL.
+So a result can only reach the attempt it belongs to.
 
 The runner uses this tool instead of each harness's own structured-output feature because
 it works the same everywhere, and the agent gets validation errors back while it still has
@@ -788,8 +798,8 @@ Warnings:
   contain instructions aimed at agents, and this passes them to one with no restrictions.
 - Two `edit` nodes could run at the same time in the same workspace.
 - A `for_each` reads a list whose schema has no `maxItems`.
-- The workflow uses `run.cost_usd` or `limits.cost_usd` with a harness that doesn't
-  report cost.
+- The workflow uses `run.cost_usd` or `limits.cost_usd` with a harness that doesn't report cost, or `run.tokens` or `limits.tokens` with one that doesn't report tokens.
+- A node that can run on `cursor` sets `effort`.
 
 ## Implementation notes (Python, LangGraph)
 
@@ -807,7 +817,8 @@ workflow/
     base.py         the Harness and Session interfaces
     claude_code.py  Claude Agent SDK
     codex.py        codex app-server, JSON-RPC over stdio
-    cursor.py       cursor-sdk
+    cursor.py       cursor-agent acp, the Agent Client Protocol over stdio
+    mcp_http.py     submit_result as an MCP server over HTTP, for Cursor
   settings.py       ~/.wf/config.yaml: wf's own settings, and the names it knows
   capacity.py       the agent slots: one cap on live agent sessions across all runs
   nodes.py          runs one attempt of each node kind, including the reminder loop
@@ -821,9 +832,9 @@ The `wf` command is a `[project.scripts]` entry in `pyproject.toml`:
 `wf = "workflow.cli:main"`.
 
 Dependencies to add to `pyproject.toml`: `jinja2`, `pyyaml`, `jsonschema` and
-`langgraph-checkpoint-sqlite`, plus `cursor-sdk` as an optional extra. (`pyyaml` and
-`jsonschema` are already installed through LangChain, but the package should list what it
-imports.) Codex needs no Python package: the runner talks to the `codex` CLI's app server.
+`langgraph-checkpoint-sqlite`.
+(`pyyaml` and `jsonschema` are already installed through LangChain, but the package should list what it imports.)
+Codex and Cursor need no Python package: the runner talks to the `codex` and `cursor-agent` CLIs.
 
 ### Harness adapters
 
@@ -853,16 +864,16 @@ start, and sends the runner to the next harness. The attempt loop is written onc
 
 | | Claude Code | Codex | Cursor |
 |---|---|---|---|
-| Runs as | `claude-agent-sdk`: one process per session | one `codex app-server --disable hooks --disable apps` per run, JSON-RPC over stdio, one thread per session | `cursor-sdk`: one bridge per run, with its state in the run folder, one agent per session |
-| `submit_result` | SDK MCP server | dynamic tool (`experimentalApi`) | custom tool |
-| `read-only` | Read, Grep, Glob, and Bash limited to read-only git commands | sandbox `read-only` | read and search tools, plus a runner tool that runs `git diff`, `log`, `show` or `blame`; no shell |
-| `edit` | Read, Edit, Write, Bash with `permission_mode="dontAsk"` | sandbox `workspace-write` | default tools, sandbox on |
-| `full` | `permission_mode="bypassPermissions"` | sandbox `danger-full-access` | sandbox off |
-| `web: false` | no WebSearch or WebFetch | `web_search: "disabled"` (the default is `cached`) | `webSearch` and `webFetch` disallowed |
-| Repo instructions | `setting_sources=["project"]`, `claude_code` system prompt | `AGENTS.md`, always loaded | `setting_sources=["project"]` |
-| Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | `RateLimitError`, or an error status whose message mentions a usage or rate limit |
-| Usage | tokens and dollars | tokens | tokens, and dollars where enabled |
-| `session: continue` | fork with `fork_session` | fork with `thread/fork` | resume (no fork) |
+| Runs as | `claude-agent-sdk`: one process per session | one `codex app-server --disable hooks --disable apps` per run, JSON-RPC over stdio, one thread per session | `cursor-agent --model <model> acp`, JSON-RPC over stdio: one process per session, because the agent keeps one model per process, each with a settings folder of its own, outside the repo |
+| `submit_result` | SDK MCP server | dynamic tool (`experimentalApi`) | MCP server over HTTP, a URL per session |
+| `read-only` | Read, Grep, Glob, and Bash limited to read-only git commands | sandbox `read-only` | ask mode and a `Write(**)` deny rule; reads and the runner's `git` tool allowed, commands refused |
+| `edit` | Read, Edit, Write, Bash with `permission_mode="dontAsk"` | sandbox `workspace-write` | agent mode; writes inside the workspace and commands allowed, writes to temp folders and `~/.cursor` denied |
+| `full` | `permission_mode="bypassPermissions"` | sandbox `danger-full-access` | everything allowed |
+| `web: false` | no WebSearch or WebFetch | `web_search: "disabled"` (the default is `cached`) | web search and fetch requests refused |
+| Repo instructions | `setting_sources=["project"]`, `claude_code` system prompt | `AGENTS.md`, always loaded | the repo's rules and `AGENTS.md`, but not its `.cursor/cli.json` |
+| Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | the turn's last message: a sign-in, plan or payment notice, or `[resource_exhausted]` |
+| Usage | tokens and dollars | tokens | none |
+| `session: continue` | fork with `fork_session` | fork with `thread/fork` | `session/load` (no fork) |
 
 Notes:
 - Every setting is passed on every session. Codex fills any gap from your
@@ -874,6 +885,27 @@ Notes:
   timeout of its own. So the runner always replies, even on errors.
 - Codex's app-server login is for local use on your own account. Don't run `wf` as a hosted
   service on someone else's ChatGPT login.
+- Cursor asks before what it may not do by itself.
+  The runner answers from the node's access level with "allow once" or "reject".
+  It never answers "allow always", which Cursor would save.
+- Cursor saves the model it was started with, and the parameters it last used for that model, into its settings folder.
+  It also reads its permissions from there.
+  So each cursor-agent process gets a new folder in `~/.wf/temp/<run-id>/cursor-agent/`.
+  It's outside the repo because Cursor also writes your account's details there.
+  A session that a later pass may continue is kept there until the run succeeds.
+- Outside the workspace, Cursor writes to temp folders and to Markdown files in `~/.cursor` without asking.
+  For `edit`, deny rules block those writes.
+  For `read-only`, a deny rule blocks every write.
+- Cursor's sandbox is off at every level.
+  With it on, a command still asks first, and one the runner allows runs outside the sandbox.
+  In a live check, such a command wrote outside the workspace and reached the network.
+  So the sandbox would confine nothing the runner doesn't already decide.
+- The effort in a Cursor model id applies only when the client says it takes parameterized models, which the adapter does.
+  Each attempt's transcript records the model and parameters Cursor reports for the session.
+- `--disable-project-configs` keeps the repo's `.cursor/cli.json` from changing Cursor's permissions.
+- Cursor reports a failed request as a paragraph at the end of the turn's last message, not as an error.
+  So the adapter reads that message to tell a usage limit or a login problem from other failures.
+- What Cursor can't switch off: a web fetch that Cursor's server marks as needing no approval runs even with `web: false`.
 
 How it maps onto LangGraph:
 - **It's not one LangGraph node per YAML node.** The settle rule needs to know what's
@@ -919,8 +951,7 @@ How it maps onto LangGraph:
 ## Open questions
 
 None right now. How to drive Codex and Cursor, and whether loops should continue sessions,
-were answered in `docs/research/harness-adapters.md`. Its last section lists what to check
-while building.
+were answered in `docs/research/harness-adapters.md`.
 
 ## Appendix: plan, build in parallel, merge
 
