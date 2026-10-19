@@ -100,7 +100,7 @@ On Codex it runs commands, git included, in Codex's read-only sandbox.
 
 A human node pauses the run. At a terminal wf asks the questions; otherwise the
 run waits (`wf status <run-id>` shows them) until `wf answer <run-id>
-<answers.json>` or `wf resume <run-id>` answers them.
+<answers.json>` or `wf retry <run-id>` answers them.
 
 ## When a node runs
 
@@ -182,7 +182,7 @@ fails when the code stops doing what the row says.
 | A `workspace: new` node has `branch` | Its worktree's branch is the rendered name, stripped, instead of `wf/<run-id>/...` | `workflow/nodes.py:180` | `tests/test_workspaces.py::test_branch_names_the_worktrees_branch` |
 | `branch` is on a node whose workspace isn't `new` | `wf validate` error | `workflow/validate.py:699` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
 | A later pass of the node | The name that the first pass gave stays | `workflow/nodes.py:178` | `tests/test_workspaces.py::test_a_loop_keeps_the_branch_its_first_pass_named` |
-| The run is resumed, and its worktree is gone | It takes up the branch that `branches.json` records for the node | `workflow/nodes.py:197` | `tests/test_workspaces.py::test_a_resumed_run_keeps_the_branch_it_made` |
+| `wf retry` continues the run, and its worktree is gone | It takes up the branch that `branches.json` records for the node | `workflow/nodes.py:197` | `tests/test_workspaces.py::test_a_retried_run_keeps_the_branch_it_made` |
 | A `for_each` item, or an item of a `for_each` node that runs a sub-workflow, on a later pass | The name renders again; a name that differs from the one its index had fails the item | `workflow/nodes.py:179` | `tests/test_workspaces.py::test_an_item_keeps_its_branch_only_while_its_index_holds_the_same_item`, `tests/test_subworkflows.py::test_a_sub_workflow_item_fails_when_its_index_names_another_branch_on_a_later_pass` |
 | The rendered name is empty, or only spaces | The node fails | `workflow/workspaces.py:119` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
 | The name is `wf`, or under `wf/`, in any case | The node fails | `workflow/workspaces.py:121` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
@@ -216,7 +216,7 @@ won't continue: folder, worktrees, temp folders (`--branches`: branches too).
 
 `limits` cap the whole run, sub-workflows included. Reaching one starts nothing
 new and pauses the run with status `limit`: `wf report <run-id>` shows how far
-it got, and `wf resume <run-id> --limit cost_usd=20` continues it with a bigger
+it got, and `wf retry <run-id> --limit cost_usd=20` continues it with a bigger
 budget (`NAME=none` removes a limit; the new limit holds for the rest of the
 run). It carries on where it stopped, sub-workflows included, and then writes
 its end output as usual. `wf run <file> --limit ...` starts with a different
@@ -279,14 +279,14 @@ deploys, pushes or costs money. Keep scripts in `<name>.dry/` next to the
 workflow: they are its tests.
 
 A dry run that succeeds removes its worktrees and branches; one that pauses or
-fails continues with `wf resume`, or goes with `wf discard <run-id>`. Its
+fails continues with `wf retry`, or goes with `wf discard <run-id>`. Its
 `_fail` and `_tokens` show up in `wf report` like real ones: `--real` leaves
 dry runs out.
 
 ## Commands
 
 `wf init`, `examples`, `validate`, `graph`, `run [--detach] [--dry-run] [--limit
-NAME=VALUE]`, `resume [--limit NAME=VALUE]`, `answer`, `wait`, `status`, `list` (newest first), `report [--real |
+NAME=VALUE]`, `retry [--limit NAME=VALUE]`, `answer`, `wait`, `status`, `list` (newest first), `report [--real |
 --dry-runs] [--version V]`, `discard [<run-id>... | --workflow NAME
 [--dry-runs]]`. Exit codes: 0 succeeded, 1 failed or limit, 2 waiting for a
 person, 3 (`wf wait`) nothing new, 130 Ctrl-C. The commands that make or find

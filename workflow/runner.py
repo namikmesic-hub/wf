@@ -1,7 +1,7 @@
 """Runner: start a run or continue one, and drive the graph until it stops.
 
     start(file, pairs, input_file, no_input) -> exit code     (wf run)
-    resume(run_id, no_input) -> exit code                     (wf resume)
+    retry(run_id, no_input) -> exit code                      (wf retry, wf answer)
 
 Driving a run alternates between two things:
 1. Streaming the graph (_stream, inside asyncio.run): graph.astream() with
@@ -14,20 +14,20 @@ Driving a run alternates between two things:
      Command(resume={interrupt id: answers}). That's how LangGraph continues
      after interrupt(): the node runs again, and interrupt() returns the value
      sent for its id. Without a terminal (or with --no-input), the run is left
-     `waiting` and `wf resume` asks later. Exit code 2.
-   - A failure (graph.wait_for_resume): the run is `failed`. `wf resume`
+     `waiting` and `wf retry` asks later. Exit code 2.
+   - A failure (graph.wait_for_resume): the run is `failed`. `wf retry`
      continues it with Command(resume=...), and the failed jobs run again.
-   - A limit (graph.wait_for_resume too): the run is `limit`, paused. `wf resume
+   - A limit (graph.wait_for_resume too): the run is `limit`, paused. `wf retry
      --limit NAME=VALUE` keeps the bigger limit in run.json and continues it the
      same way (limits.py); without one big enough, it says so and stays put.
    - END: write output.json, or record why the run failed or hit a limit.
 
 Questions are asked between streams, not inside the event loop, so Ctrl-C
 and Ctrl-D at a prompt behave as they do in any terminal program: the run is
-left `waiting`, and `wf resume` asks again.
+left `waiting`, and `wf retry` asks again.
 
 Every stream opens the same SQLite checkpointer and uses the run id as
-LangGraph's thread_id, so a later `wf resume` process finds the run exactly
+LangGraph's thread_id, so a later `wf retry` process finds the run exactly
 where this one left it.
 """
 
@@ -105,9 +105,9 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         return 1
     if script is not None:
         script.keep(run.dir / "dry-run")
-    if detach:  # a background `wf resume` starts it, with the lock this process takes now
+    if detach:  # a background `wf retry` starts it, with the lock this process takes now
         with run.driving() as lock:
-            pid = operate.detach(run, ["resume", run.id, "--no-input", *_runs_dir_args(runs_dir)], lock)
+            pid = operate.detach(run, ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)], lock)
         _say({"run": run.id, "dir": str(run.dir), "pid": pid}, f"Run {run.id} started in the background. "
              f"Follow it with: {run.command('wait')}", as_json)
         return 0
@@ -126,8 +126,8 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         return 1
 
 
-def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach: bool = False,
-           as_json: bool = False, limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
+def retry(run_id: str, no_input: bool, answers_file: Path | None = None, detach: bool = False,
+          as_json: bool = False, limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
     """Continue a run: retry what failed, answer what's waiting (from `answers_file`, or by
     asking at a terminal), or carry on after a crash. With `detach`, check everything here,
     then let a background process do it. `limit_pairs` (--limit) set new limits for the
@@ -135,7 +135,7 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
 
     The run's lock is taken before anything is checked, so two operators answering
     at once can't both answer the same questions: the second gets RunBusy."""
-    name = "wf answer" if answers_file else "wf resume"
+    name = "wf answer" if answers_file else "wf retry"
     try:
         run = runs.find(Path.cwd(), run_id, runs_dir)
         # The copies, as they were when the run started: the workflow and its sub-workflows
@@ -149,16 +149,16 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
         return 1
     try:
         with run.driving() as lock:
-            return _checked_resume(run, workflows, name, answers, no_input, detach, as_json, lock, overrides,
-                                   max_agents, runs_dir)
+            return _checked_retry(run, workflows, name, answers, no_input, detach, as_json, lock, overrides,
+                                  max_agents, runs_dir)
     except runs.RunBusy as error:
         print(f"{name}: {error}", file=sys.stderr)
         return 1
 
 
-def _checked_resume(run: runs.Run, workflows: list[spec.Workflow], name: str, answers: dict | None, no_input: bool,
-                    detach: bool, as_json: bool, lock: runs.Lock, overrides: dict, max_agents: int | None,
-                    runs_dir: Path | None) -> int:
+def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, answers: dict | None, no_input: bool,
+                   detach: bool, as_json: bool, lock: runs.Lock, overrides: dict, max_agents: int | None,
+                   runs_dir: Path | None) -> int:
     workflow = workflows[0]
     ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
     asking = interactive() and not no_input and not detach
@@ -174,7 +174,7 @@ def _checked_resume(run: runs.Run, workflows: list[spec.Workflow], name: str, an
         still = limits.check(ctx.limits, state.values.get("usage") or {}, state.values.get("elapsed_s", 0.0))
         if still:
             print(f"{name}: run {run.id} is still over a limit ({still[1]}). "
-                  f"Continue it with a bigger one: {run.command('resume', limits.hint(still[0]))}", file=sys.stderr)
+                  f"Continue it with a bigger one: {run.command('retry', limits.hint(still[0]))}", file=sys.stderr)
             return 1
     if overrides:
         run.set_limits(overrides)
@@ -192,7 +192,7 @@ def _checked_resume(run: runs.Run, workflows: list[spec.Workflow], name: str, an
             run.set_status("failed", error=problem)
         return 1
     if detach:
-        args = ["resume", run.id, "--no-input", *_runs_dir_args(runs_dir)]
+        args = ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)]
         if answers is not None:  # keep the answers with the run, for the background process
             kept = run.dir / "answers" / f"{run.status().get('seq', 0)}.json"  # one per state: we hold the lock
             kept.parent.mkdir(exist_ok=True)
@@ -202,10 +202,10 @@ def _checked_resume(run: runs.Run, workflows: list[spec.Workflow], name: str, an
         _say({"run": run.id, "pid": pid}, f"Run {run.id} continues in the background. Follow it with: {run.command('wait')}",
              as_json)
         return 0
-    return _resume(ctx, state, asking, answers)
+    return _retry(ctx, state, asking, answers)
 
 
-def _resume(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | None) -> int:
+def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | None) -> int:
     run = ctx.run
     if not state.values:  # created but never started (a detached start, or a crash before the first step)
         if (run.dir / "output.json").exists():
@@ -215,12 +215,12 @@ def _resume(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict |
         try:
             inputs = json.loads((run.dir / "input.json").read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:  # a run killed while it was being created
-            print(f"wf resume: can't read the run's input: {error}", file=sys.stderr)
+            print(f"wf retry: can't read the run's input: {error}", file=sys.stderr)
             return 1
         print(f"Starting run {run.id}")
         return _drive(ctx, {"input": inputs}, asking)
     ctx.home = _run_home(run, state)
-    print(f"Resuming run {run.id}")
+    print(f"{'Continuing' if answers is not None else 'Retrying'} run {run.id}")
     if state.interrupts:
         command = _continue(state.interrupts, asking, run, answers, ctx.script)
         if isinstance(command, int):
@@ -256,7 +256,7 @@ def _runs_dir_args(runs_dir: Path | None) -> list[str]:
 
 
 def _ended(run: runs.Run, state: StateSnapshot) -> bool:
-    """Has the run ended, so `wf resume` only says how, and no agent works?"""
+    """Has the run ended, so `wf retry` only says how, and no agent works?"""
     if not state.values:
         return (run.dir / "output.json").exists()
     return not state.interrupts and not state.next
@@ -322,12 +322,12 @@ def _drive(ctx: RunContext, command, asking: bool) -> int:
             state = asyncio.run(_stream(ctx, command))
         except KeyboardInterrupt:  # asyncio.run cancels the graph's tasks first, then raises this
             run.set_status("failed", error="stopped by the user")
-            print(f"\nStopped. Continue with: {run.command('resume')}", file=sys.stderr)
+            print(f"\nStopped. Continue with: {run.command('retry')}", file=sys.stderr)
             return STOPPED
         except Exception as error:  # a bug, or the checkpoint store failing: never leave the run `running`
             run.set_status("failed", error=f"{type(error).__name__}: {error}")
             print(f"Run failed: {type(error).__name__}: {error}", file=sys.stderr)
-            print(f"Continue with: {run.command('resume')}", file=sys.stderr)
+            print(f"Continue with: {run.command('retry')}", file=sys.stderr)
             return 1
         if not state.interrupts:
             return _finished(ctx, state.values)
@@ -365,7 +365,7 @@ async def _stream(ctx: RunContext, command) -> StateSnapshot:
 
 
 def _continue(interrupts, asking: bool, run: runs.Run, answers: dict | None = None, script=None):
-    """`wf resume`: retry what failed, and answer what's waiting for a person (from an
+    """`wf retry`: retry what failed, and answer what's waiting for a person (from an
     answers file already checked against these questions, a dry run's script, or by asking)."""
     resume = {i.id: "retry" for i in interrupts if i.value.get("kind") == "failed"}
     resume |= {i.id: "continue" for i in interrupts if i.value.get("kind") == "limit"}  # checked: there's room now
@@ -384,19 +384,19 @@ def _continue(interrupts, asking: bool, run: runs.Run, answers: dict | None = No
 
 
 def _answer(interrupts, asking: bool, run: runs.Run, script=None):
-    """The graph paused during a run: ask now, or stop and leave it to `wf resume`."""
+    """The graph paused during a run: ask now, or stop and leave it to `wf retry`."""
     limited = [i.value for i in interrupts if i.value.get("kind") == "limit"]
     if limited:
         reason, name = limited[0].get("reason"), limited[0].get("limit")
         run.set_status("limit", reason=reason, limit=name)
         print(f"Run {run.id} paused: a limit was reached ({reason}).", file=sys.stderr)
-        print(f"Continue it with a bigger one: {run.command('resume', limits.hint(name))}", file=sys.stderr)
+        print(f"Continue it with a bigger one: {run.command('retry', limits.hint(name))}", file=sys.stderr)
         return 1
     failed = [i.value for i in interrupts if i.value.get("kind") == "failed"]
     if failed:
         run.set_status("failed", node=failed[0]["node"], error=failed[0]["error"])
         print(f"Run failed: {failed[0]['node']}: {failed[0]['error']}", file=sys.stderr)
-        print(f"Fix the cause, then continue with: {run.command('resume')}")
+        print(f"Fix the cause, then continue with: {run.command('retry')}")
         return 1
     scripted = _scripted_answers(interrupts, script) if script else None
     if scripted is not None:
@@ -424,12 +424,12 @@ def _ask_all(questions, asking: bool, run: runs.Run) -> dict | int:
     names = sorted({name for q in questions for name in _askers(q.value)})
     run.set_status("waiting", nodes=names, questions=operate.questions(questions))
     if not asking:
-        print(f"Waiting for a person ({', '.join(names)}). Answer with: {run.command('resume')}")
+        print(f"Waiting for a person ({', '.join(names)}). Answer with: {run.command('retry')}")
         return 2
     try:
         return {question.id: _answer_one(question.value) for question in questions}
     except (ask.NoAnswer, KeyboardInterrupt) as stop:
-        print(f"\nNo answer yet. Answer later with: {run.command('resume')}")
+        print(f"\nNo answer yet. Answer later with: {run.command('retry')}")
         return STOPPED if isinstance(stop, KeyboardInterrupt) else 2
 
 

@@ -5,7 +5,7 @@
     wf validate <file>               check a file and every sub-workflow it uses
     wf graph <file>                  print the workflow as a Mermaid diagram
     wf run <file> [name=value ...]   validate, then run it (runner.py)
-    wf resume <run-id>               continue a paused or failed run
+    wf retry <run-id>                continue a failed or paused run from its last checkpoint
 
 Tools that agent nodes can use (`tools: [slack, ...]`; workflow/tools/):
     wf tools list                    each tool, how it signs in, and whether it's set up
@@ -28,7 +28,7 @@ main() parses the arguments and returns the exit code. The pyproject entry
 point (`wf = "workflow.cli:main"`) passes that code to the shell.
 
 Exit codes: 0 success, 1 failure (including bad arguments), 2 paused waiting
-for a person (wf run and wf resume, only with --no-input or without a
+for a person (wf run and wf retry, only with --no-input or without a
 terminal), 3 nothing new before the timeout (wf wait), 130 stopped with
 Ctrl-C. Bad arguments exit with 1, not argparse's usual 2, so a script can
 tell a pause from a typo.
@@ -109,16 +109,16 @@ def main(argv: list[str] | None = None) -> int:
     run.set_defaults(handler=lambda a: runner.start(a.file, a.inputs, a.input_file, a.no_input, a.detach, a.json,
                                                     a.dry_run, a.limits, a.runs_dir))
 
-    resume = commands.add_parser("resume", help="continue a paused or failed run")
-    resume.add_argument("run_id", metavar="run-id")
-    resume.add_argument("--no-input", **no_input)
-    resume.add_argument("--answers", type=Path, metavar="FILE", help="answers for the questions it waits on")
-    resume.add_argument("--detach", action="store_true", help="continue in the background")
-    resume.add_argument("--json", action="store_true", help="with --detach: print the run id as JSON")
-    resume.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
-    resume.add_argument("--runs-dir", **runs_dir)
-    resume.set_defaults(handler=lambda a: runner.resume(a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits,
-                                                        a.runs_dir))
+    retry = commands.add_parser("retry", help="continue a failed or paused run from its last checkpoint")
+    retry.add_argument("run_id", metavar="run-id")
+    retry.add_argument("--no-input", **no_input)
+    retry.add_argument("--answers", type=Path, metavar="FILE", help="answers for the questions it waits on")
+    retry.add_argument("--detach", action="store_true", help="continue in the background")
+    retry.add_argument("--json", action="store_true", help="with --detach: print the run id as JSON")
+    retry.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
+    retry.add_argument("--runs-dir", **runs_dir)
+    retry.set_defaults(handler=lambda a: runner.retry(a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits,
+                                                      a.runs_dir))
 
     answer = commands.add_parser("answer", help="answer the questions a run waits on, and continue it")
     answer.add_argument("run_id", metavar="run-id")
@@ -126,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     answer.add_argument("--detach", action="store_true", help="continue in the background")
     answer.add_argument("--json", action="store_true")
     answer.add_argument("--runs-dir", **runs_dir)
-    answer.set_defaults(handler=lambda a: runner.resume(a.run_id, True, a.answers, a.detach, a.json, runs_dir=a.runs_dir))
+    answer.set_defaults(handler=lambda a: runner.retry(a.run_id, True, a.answers, a.detach, a.json, runs_dir=a.runs_dir))
 
     wait = commands.add_parser("wait", help="block until a run needs attention; print its state as JSON")
     wait.add_argument("run_id", metavar="run-id")
@@ -318,11 +318,11 @@ def _describe(current: dict) -> str:
     if status == "waiting":
         detail = f"waiting for a person: {', '.join(current.get('nodes', []))} ({current.get('answer')})"
     elif status == "failed":
-        detail = f"failed: {current.get('node', '?')}: {current.get('error', '')} ({current.get('resume')})"
+        detail = f"failed: {current.get('node', '?')}: {current.get('error', '')} ({current.get('retry')})"
     elif status == "stopped":
-        detail = f"stopped: {current.get('reason')} ({current.get('resume')})"
+        detail = f"stopped: {current.get('reason')} ({current.get('retry')})"
     elif status == "limit":
-        detail = f"paused at a limit: {current.get('reason')} ({current.get('resume')})"
+        detail = f"paused at a limit: {current.get('reason')} ({current.get('retry')})"
     elif status == "running" and current.get("agents_waiting"):
         detail = "running, waiting for an agent slot: " + ", ".join(w["node"] for w in current["agents_waiting"])
     else:

@@ -206,7 +206,7 @@ Superseded on 2026-10-19 by [section 6](#6-cursor-through-acp): this design need
   the bridge's environment and could read the key otherwise [I].
 - **Process.** Once per run:
   `AsyncClient.launch_bridge(workspace=repo, state_root=<run folder>/cursor)`. Keeping the
-  state inside the run folder lets `wf resume` find agents.
+  state inside the run folder lets `wf retry` find agents.
 - **Session.**
 
   ```python
@@ -265,7 +265,7 @@ Superseded on 2026-10-19 by [section 6](#6-cursor-through-acp): this design need
 - **Code state already carries over.** The worktree persists across passes.
 - **Every instruction must work fresh anyway.** Harness fallback means the next pass can run
   on a different harness.
-- **Everything else stays simple** with fresh sessions: retries, `wf resume`, cost totals,
+- **Everything else stays simple** with fresh sessions: retries, `wf retry`, cost totals,
   and reproducibility (each pass's input is just its `instruction.md` plus a commit).
 - **Continuing isn't clearly cheaper.** Tests plus a review often take longer than the
   5-minute cache lifetime, and after that the whole history is re-sent at 1.25× the input

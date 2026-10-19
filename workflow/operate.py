@@ -2,18 +2,18 @@
 
 An operator (firstmate's first mate, a script, a person on another machine)
 starts runs in the background, waits for the moment one needs attention,
-answers its questions and resumes it, all through commands with JSON output:
+answers its questions and retries it, all through commands with JSON output:
 
     wf run <file> --detach --json        start in the background, print the run id
     wf wait <run-id> [--consumer NAME]   block until the run needs attention, print its state
     wf answer <run-id> <answers.json>    answer the questions a run is waiting on, and continue
-    wf resume <run-id> --detach          continue in the background
+    wf retry <run-id> --detach           continue in the background
     wf status <run-id> --json            the state right now
     wf list --json                       every run in this repo
 
 A run "needs attention" when it's waiting for a person, failed, hit a limit,
 succeeded, or stopped: status.json says running but no process holds the run's
-lock any more (the process crashed or was killed). `wf resume` picks it up.
+lock any more (the process crashed or was killed). `wf retry` picks it up.
 
 `wait --consumer NAME` remembers which state it last reported to NAME (by the
 status sequence number, in the run folder), so a watcher that polls in a loop
@@ -66,9 +66,9 @@ def state(run: Run) -> dict:
     if status == "waiting":
         current["answer"] = run.command("answer", "<answers.json>")
     if status in ("failed", "stopped"):
-        current["resume"] = run.command("resume")
+        current["retry"] = run.command("retry")
     if status == "limit":  # paused: a bigger limit continues it
-        current["resume"] = run.command("resume", limits.hint(current.get("limit")))
+        current["retry"] = run.command("retry", limits.hint(current.get("limit")))
     current["dir"] = str(run.dir)
     info = run.info()  # read once: wait() calls this five times a second
     current["workflow"] = info.get("workflow")

@@ -1,7 +1,7 @@
 """Context: what the graph's nodes need that isn't saved in checkpoints.
 
 LangGraph hands this object to every node as `runtime.context` (it's the
-graph's context_schema, see graph.py). Each `wf run` or `wf resume` process
+graph's context_schema, see graph.py). Each `wf run` or `wf retry` process
 builds a fresh one: the parsed workflow, the run folder, a clock, live usage
 counters, a semaphore per node that caps parallel items, and the cap on live
 agent sessions across runs (capacity.py). None of it goes into a checkpoint,
@@ -91,7 +91,7 @@ class RunContext:
 
     def restart_clock(self, elapsed_before: float) -> None:
         """Count running time from now, on top of what earlier processes ran. Time spent
-        paused (waiting for `wf resume`, or for answers at the terminal) doesn't count."""
+        paused (waiting for `wf retry`, or for answers at the terminal) doesn't count."""
         root = self.root  # the clock is the whole run's (see elapsed())
         root._elapsed_before = elapsed_before
         root._clock_start = time.monotonic()

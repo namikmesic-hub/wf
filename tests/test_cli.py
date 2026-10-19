@@ -1,4 +1,4 @@
-"""The wf command: init, validate and graph (run and resume are in test_run.py)."""
+"""The wf command: init, validate and graph (run and retry are in test_run.py)."""
 
 import re
 import shutil

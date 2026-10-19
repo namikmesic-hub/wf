@@ -7,7 +7,7 @@ Agent skills for working with wf, in the standard `SKILL.md` folder format.
 | [`wf-workflows`](wf-workflows/SKILL.md) | building, changing and improving workflow files: design patterns, the file format, dry runs, and improving from `wf report` evidence |
 
 The skill that teaches firstmate's first mate to *operate* wf runs (start,
-watch, answer, resume) is part of the firstmate integration:
+watch, answer, retry) is part of the firstmate integration:
 [`integrations/firstmate/wf/SKILL.md`](../integrations/firstmate/wf/SKILL.md).
 
 ## Installing

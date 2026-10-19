@@ -4,7 +4,7 @@ description: >-
   Agent-only procedure for running wf workflows (YAML graphs of agent, command,
   human and sub-workflow steps) and supervising them as process-event sources.
   Load before starting a wf run, on any `procevent wf <source-id> <sequence>`
-  check wake, and before answering, resuming or reporting a wf run.
+  check wake, and before answering, retrying or reporting a wf run.
 user-invocable: false
 ---
 
@@ -74,18 +74,18 @@ acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`.
   `nodes/<node>/<pass>/[<item>/]attempt-<n>.log` (agent transcript or command
   output), `instruction.md`, and `events.jsonl`. Load `diagnostic-reasoning`.
   An environment problem (missing tool, dependency, credentials) is yours to
-  fix, then `wf resume <run-id> --detach`; finished steps and items are not
+  fix, then `wf retry <run-id> --detach`; finished steps and items are not
   redone. A workflow-file bug, or a task that keeps failing, goes to the captain.
 
 `stopped`
 : No wf process is driving the run any more (a crash, a reboot). Run
-  `wf resume <run-id> --detach`; it carries on from the last checkpoint.
+  `wf retry <run-id> --detach`; it carries on from the last checkpoint.
 
 `limit`
 : The run hit one of its limits (`reason` says which) and is paused. Spending
   more is the captain's call: tell them what it spent and how far it got
   (`wf report <run-id>`), and ask whether to continue and with what budget. If
-  they say yes, run `wf resume <run-id> --limit cost_usd=<their number> --detach`
+  they say yes, run `wf retry <run-id> --limit cost_usd=<their number> --detach`
   (or `tokens=`, `duration=`, as the reason says); the source keeps watching. If
   they say no, leave the run paused and retire the source yourself.
 

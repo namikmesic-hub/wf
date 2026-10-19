@@ -1,7 +1,7 @@
 """Workflow nodes: a sub-workflow runs inside a node of its parent, end to end through `wf run`.
 
 Each sub-workflow attempt is its own LangGraph thread in the run's checkpoints, so
-its failure is the job's failure (retry, on_item_error, wf resume all apply), and a
+its failure is the job's failure (the node's retry, on_item_error and wf retry all apply), and a
 question inside it is relayed to the top as the parent's own interrupt.
 """
 
@@ -122,7 +122,7 @@ def test_a_failed_sub_workflow_is_an_item_error_with_continue(repo, capsys):
     assert output() == {"said": ["hi a\n", "hi c\n"], "failed": ["b"]}
 
 
-def test_resume_reruns_only_the_failed_sub_workflow(repo, capsys):
+def test_retry_reruns_only_the_failed_sub_workflow(repo, capsys):
     write("greet.yaml", GREET)
     write("build.yaml", BUILD % "fail")
     Path("broken-b").touch()
@@ -130,7 +130,7 @@ def test_resume_reruns_only_the_failed_sub_workflow(repo, capsys):
     assert status() == "failed"
     assert "item 1: sub-workflow greet failed: say: exited with code 1" in capsys.readouterr().err
     Path("broken-b").unlink()
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert output()["said"] == ["hi a\n", "hi b\n", "hi c\n"]
     item = only_run() / "nodes" / "build" / "1"
     assert sorted(p.name for p in (item / "1").iterdir()) == ["attempt-1", "attempt-2", "instruction.md", "output.json"]
@@ -152,7 +152,7 @@ end:
 """
 
 
-def test_a_question_inside_a_sub_workflow_pauses_the_run_and_resume_asks_it(repo, monkeypatch, capsys):
+def test_a_question_inside_a_sub_workflow_pauses_the_run_and_retry_asks_it(repo, monkeypatch, capsys):
     write("asking.yaml", ASKING)
     write("main.yaml", """
         version: 1
@@ -168,7 +168,7 @@ def test_a_question_inside_a_sub_workflow_pauses_the_run_and_resume_asks_it(repo
     assert status() == "waiting"
     capsys.readouterr()
     answers(monkeypatch, "yes", "no")
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert output() == {"oks": [True, False]}
     out = capsys.readouterr().out
     assert "Go ahead with x?" in out and "Go ahead with y?" in out
@@ -326,7 +326,7 @@ def test_answers_reach_the_right_question_when_a_sub_workflow_is_retried(repo, m
     assert output() == {"ok": False}
 
 
-def test_answers_reach_the_right_question_across_separate_resumes(repo, monkeypatch):
+def test_answers_reach_the_right_question_across_separate_retries(repo, monkeypatch):
     write("flaky.yaml", """
         version: 1
         name: flaky
@@ -358,9 +358,9 @@ def test_answers_reach_the_right_question_across_separate_resumes(repo, monkeypa
 
     assert cli.main(["run", "main.yaml", "--no-input"]) == 2
     one_answer("yes")  # attempt 1: yes, then it fails; attempt 2 asks again and nobody answers
-    assert cli.main(["resume", only_run().name]) == 2
+    assert cli.main(["retry", only_run().name]) == 2
     one_answer("no")
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert output() == {"ok": False}
 
 

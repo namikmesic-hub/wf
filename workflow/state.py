@@ -2,7 +2,7 @@
 
 RunState is the LangGraph state. LangGraph saves it in a checkpoint after every
 step, so a run can stop (a crash, a question for a person, a failure) and
-`wf resume` picks up from the last checkpoint. It holds plain data only (dicts,
+`wf retry` picks up from the last checkpoint. It holds plain data only (dicts,
 lists, strings, numbers), so checkpoints are easy to read and can't break when
 a class changes.
 
@@ -38,7 +38,7 @@ class Job(TypedDict):
     pass_no: int
     index: int | None  # the item's position, for for_each nodes
     item: Any
-    attempt: int  # the number of its first attempt (after `wf resume`, numbering continues)
+    attempt: int  # the number of its first attempt (after `wf retry`, numbering continues)
     vars: dict  # template variables, as they were when the node started
     session: NotRequired[dict | None]  # session: continue: the session of the node's last pass
 
@@ -73,11 +73,11 @@ class RunState(TypedDict, total=False):
     workspaces: dict[str, Any]  # node -> {path, branch, base} of its latest pass
     sessions: dict[str, dict]  # node -> the agent session of its latest pass, for session: continue
     usage: dict  # {"cost_usd", "tokens"} so far
-    elapsed_s: float  # running time so far, across `wf resume`
+    elapsed_s: float  # running time so far, across `wf retry`
     failure: dict | None  # {"node", "error"} when the run stopped on a failure
     limit_reason: str  # which limit stopped the run, in words, for status `limit`
     limit_name: str | None  # ...and its name (limits.py)
-    retry: bool  # set when `wf resume` continues a failed run
+    retry: bool  # set when `wf retry` continues a failed run
     output: dict | None  # the end output, once the run succeeded
     inbox: Annotated[list[Finished], operator.add]  # results of the last step's jobs
 
@@ -176,7 +176,7 @@ class Progress:
 
     def stop_for_limit(self, reason: str, name: str | None = None) -> None:
         """A limit was reached: nothing new starts, and the run pauses with status `limit`
-        until `wf resume` continues it (retry() then reruns what the limit stopped)."""
+        until `wf retry` continues it (retry() then reruns what the limit stopped)."""
         self.s["status"] = "limit"
         self.s["failure"] = None
         self.s["limit_reason"] = reason
@@ -184,7 +184,7 @@ class Progress:
         self.emit({"event": "limit", "reason": reason})
 
     def retry(self) -> list[Job]:
-        """`wf resume` on a failed run, or one a limit stopped: rerun what failed or was
+        """`wf retry` on a failed run, or one a limit stopped: rerun what failed or was
         stopped. Finished items are kept."""
         self.s["failure"] = None
         self.s["status"] = "running"
@@ -247,7 +247,7 @@ class Progress:
         return jobs
 
     def _refuse(self, node: str, error: str) -> list[Job]:
-        """The node can't start. It stays pending, so `wf resume` tries again."""
+        """The node can't start. It stays pending, so `wf retry` tries again."""
         self.s["pending"].insert(0, node)
         self._fail(node, error)
         return []

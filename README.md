@@ -12,8 +12,8 @@ wf runs the graph on LangGraph:
 - parallel steps work in their own git worktrees;
 - a failed attempt is retried, or falls back to another agent;
 - limits cap a run's cost, tokens and time;
-- any run can pause for a person and be answered and resumed later, from a
-  terminal or by an autonomous operator.
+- any run can pause for a person and be answered later, from a terminal or by
+  an autonomous operator.
 
 One cap on live agent sessions holds across all your runs that share a `~/.wf`.
 Agents can also read Slack, Granola, Linear, Notion and Gmail through tools that wf brings itself.
@@ -38,6 +38,9 @@ wf report --workflow implement           # what the runs did, per step
 
 `wf run <file> --dry-run <script.yaml>` walks a workflow with scripted agent
 results, for free. `wf --help` lists every command.
+
+`wf retry <run-id>` continues a failed or paused run, or a run that a limit stopped,
+from its last checkpoint. Steps and items that finished don't run again.
 
 Steps that read Slack, Granola, Linear, Notion or Gmail list them in `tools`.
 Sign in to each once per machine:

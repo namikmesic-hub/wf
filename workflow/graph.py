@@ -7,7 +7,7 @@ it would wait forever on a branch that a route skipped. Instead the graph has
 four nodes, and the workflow's own graph lives in the state:
 
     START → schedule ── Send(job) × N ──→ execute ──→ schedule ──→ … ──→ finish → END
-                └── a node failed, or a limit ──→ wait_for_resume ── wf resume ──→ schedule
+                └── a node failed, or a limit ──→ wait_for_resume ── wf retry ──→ schedule
 
 - schedule records the results in the inbox, then starts every pending node
   whose needs are settled (state.Progress does the bookkeeping). It returns
@@ -16,7 +16,7 @@ four nodes, and the workflow's own graph lives in the state:
   is pending or running, it goes to finish.
 - execute runs one job (nodes.run_job) and appends the result to the inbox.
 - wait_for_resume: a failed run, or one that reached a limit, parks here.
-  interrupt() saves the run and stops the graph; `wf resume` answers it, and
+  interrupt() saves the run and stops the graph; `wf retry` answers it, and
   schedule reruns what failed or what the limit stopped (limits.py), unless a
   limit is still reached. (A failed sub-workflow doesn't park: it ends as
   failed, and its workflow node's job fails, so the parent can retry it or,
@@ -32,8 +32,8 @@ waits for a slow parallel one before its next node starts.
 
 Checkpoints: after each step, LangGraph saves the state with the checkpointer
 (an AsyncSqliteSaver in the run folder). It also saves the result of each task
-that finished inside a step, so after a crash or a human-node pause, a resumed
-run only reruns the tasks that hadn't finished.
+that finished inside a step, so after a crash or a human-node pause, a run that
+continues only reruns the tasks that hadn't finished.
 
 Runtime: every node can take `runtime: Runtime[RunContext]`. runtime.context
 is the RunContext (context.py); runtime.stream_writer sends progress events to
@@ -70,7 +70,7 @@ async def schedule(state: RunState, runtime: Runtime[RunContext]) -> Command:
         ctx.usage = dict(progress.s["usage"])
     name, reason = ctx.limit_check() or (None, None)  # e.g. ("tokens", "used 5,000 tokens, limit 1,000")
     jobs = []
-    if state.get("retry"):  # `wf resume` on a failed or paused run, unless a limit is still reached
+    if state.get("retry"):  # `wf retry` on a failed or paused run, unless a limit is still reached
         progress.s["retry"] = False
         if reason:
             progress.stop_for_limit(reason, name)
@@ -99,7 +99,7 @@ async def execute(job: Job, runtime: Runtime[RunContext]) -> dict:
 
 async def wait_for_resume(state: RunState) -> Command:
     # The first time through, interrupt() raises and the graph stops here. When
-    # `wf resume` sends Command(resume=...), this node runs again and interrupt()
+    # `wf retry` sends Command(resume=...), this node runs again and interrupt()
     # returns instead, so the run goes back to schedule to retry.
     if state.get("status") == "limit":
         interrupt({"kind": "limit", "reason": state.get("limit_reason"), "limit": state.get("limit_name")})

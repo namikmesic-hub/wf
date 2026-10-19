@@ -87,7 +87,7 @@ def test_feature_ends_early_when_the_plan_is_rejected(repo, monkeypatch, capsys)
     typed = iter(["no"])
     monkeypatch.setattr(runner, "interactive", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(typed))
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert output() == {"pr_url": None}
     assert "- A" in capsys.readouterr().out  # the approval message lists the tasks
 

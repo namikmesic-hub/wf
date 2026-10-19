@@ -133,7 +133,7 @@ end:
 | `wf validate <file>` | Checks the file and every sub-workflow it uses (see [Validation](#validation)). Exits with code 1 on errors. |
 | `wf graph <file>` | Prints the workflow as a Mermaid diagram. |
 | `wf run <file> [name=value ...]` | Validates, then runs the workflow. Inputs come from `name=value` pairs (a value that parses as JSON is used as JSON), from `--input file.json`, or from prompts for anything missing. Prints progress, then the end output. |
-| `wf resume <run-id> [--limit NAME=VALUE]` | Continues a paused or failed run, or one a limit stopped (with a bigger limit). Finished nodes and items aren't rerun. |
+| `wf retry <run-id> [--limit NAME=VALUE]` | Continues a failed or paused run from its last checkpoint, or one a limit stopped (with a bigger limit). Finished nodes and items aren't rerun. |
 | `wf tools list` | Lists the tools agent nodes can use (see [docs/tools.md](tools.md)), how each signs in, and whether it's set up. |
 | `wf tools <name> setup [--write]` | Signs in to a tool once, in the browser or with a pasted token, and keeps the secret in the macOS Keychain. It asks Slack and Linear for read scopes only, unless `--write` is given. |
 | `wf tools <name> doctor`, `wf tools doctor` | Checks that a tool's sign-in is there and still good, and makes one harmless read call. Prints pass or fail with the next step. |
@@ -141,10 +141,10 @@ end:
 `wf run` exit codes: 0 succeeded, 1 failed or stopped by a limit, 2 paused waiting for a person
 (only with `--no-input` or when there's no terminal).
 
-Every command that makes or finds runs (`run`, `resume`, `answer`, `wait`, `status`, `list`,
+Every command that makes or finds runs (`run`, `retry`, `answer`, `wait`, `status`, `list`,
 `report`, `discard`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
 [Run folder](#run-folder)). The commands that wf prints for a run in a runs folder, like
-`wf resume <run-id>`, include the option, so they find the run whether or not
+`wf retry <run-id>`, include the option, so they find the run whether or not
 `WF_RUNS_DIR` is set where you type them.
 
 ### Setup
@@ -402,7 +402,7 @@ approve:
   a numbered choice for `enum`, a line of text for strings and numbers, and `$EDITOR` with
   JSON for arrays and objects.
 - With `--no-input`, or without a terminal, the run saves its state and pauses (exit
-  code 2). `wf resume <run-id>` asks the questions later.
+  code 2). `wf retry <run-id>` asks the questions later.
 - Nodes that are already running finish before the run pauses.
 
 #### Workflow nodes
@@ -462,11 +462,11 @@ limits:
 ```
 
 When a limit is reached, running attempts finish, nothing new starts, and the run pauses
-with status `limit`. It isn't over: `wf resume <run-id> --limit cost_usd=100` continues it
+with status `limit`. It isn't over: `wf retry <run-id> --limit cost_usd=100` continues it
 with a bigger budget (`--limit NAME=none` removes a limit). The new limit replaces the file's
-for the rest of the run, so later resumes keep it. The run carries on where it stopped: a
+for the rest of the run, so a later `wf retry` keeps it. The run carries on where it stopped: a
 retry the limit held back runs, and a sub-workflow the limit stopped continues its own steps
-rather than starting over. `wf resume` without a big enough limit leaves the run as it is
+rather than starting over. `wf retry` without a big enough limit leaves the run as it is
 and says which limit is still reached. `wf run <file> --limit ...` starts a run with a
 different limit.
 
@@ -577,7 +577,7 @@ is the list of item outputs.
 - A list longer than `max_items` fails the node. Put `maxItems` on the schema that produces
   the list, so the agent learns the limit when `submit_result` rejects a longer one.
 - Retries apply per item. If an item still fails: with `on_item_error: fail`, the node
-  fails, but finished items are kept, so `wf resume` reruns only the failed ones. With
+  fails, but finished items are kept, so `wf retry` reruns only the failed ones. With
   `continue`, the node succeeds with the items that worked, and `errors.<node>` lists the rest.
 - `harness` is a template, so `for_each: ["claude-code", "codex", "cursor"]` with
   `harness: "{{ item }}"` runs the same task on each harness (best-of-N).
@@ -601,7 +601,7 @@ sub-workflow fails.
   wait isn't a failure and uses no retry.
 - When a node, or an item with `on_item_error: fail`, runs out of attempts, the run stops:
   running attempts finish, nothing new starts, and the run's status becomes `failed`.
-  `wf resume` continues from there.
+  `wf retry` continues from there.
 
 ### Sessions
 
@@ -646,8 +646,8 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | Runs of the user that use the same `~/.wf` | They share one set of slots, in `~/.wf/agent-slots/`. Runs with another `WF_HOME` have slots of their own. | `workflow/capacity.py:54` | `test_two_runs_in_separate_processes_share_the_cap`, `test_each_wf_home_has_its_own_slots`, `test_a_slot_file_names_its_holder` |
 | Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:492` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
 | `WF_MAX_AGENTS` is set | It sets the same cap, and wins over `max_agents` in the file, which is still checked. | `workflow/capacity.py:64`, `workflow/capacity.py:66` | `test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home`, `test_a_bad_cap_stops_wf_run_before_the_run_exists` |
-| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf resume` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:145` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
-| `config.yaml` names a setting wf doesn't know, or doesn't hold settings by name | The same. So a misspelt `max_agents` can't quietly mean no cap. | `workflow/settings.py:50` | `test_a_wrong_file_fails_every_read` in `tests/test_settings.py`, `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_resume` |
+| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf retry` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:145` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_retry` |
+| `config.yaml` names a setting wf doesn't know, or doesn't hold settings by name | The same. So a misspelt `max_agents` can't quietly mean no cap. | `workflow/settings.py:50` | `test_a_wrong_file_fails_every_read` in `tests/test_settings.py`, `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_retry` |
 | An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:497`, `workflow/nodes.py:515` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
 | An attempt holds a slot | The slot is the file `~/.wf/agent-slots/<n>`, which the attempt's process locks with `flock`. The file names its holder: pid, run, node and attempt. | `workflow/capacity.py:96`, `workflow/capacity.py:98`, `workflow/capacity.py:107` | `test_a_slot_has_one_holder_at_a_time`, `test_a_slot_file_names_its_holder` |
 | A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:277` | `test_a_retry_and_a_fallback_take_a_slot_again` |
@@ -655,11 +655,11 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | Several attempts wait for one slot | Each tries again every `POLL_SECONDS` (0.2 seconds), and the first try after the slot comes free gets it. So they get it one at a time, in an order that is not defined. | `workflow/capacity.py:46`, `workflow/capacity.py:117`, `workflow/capacity.py:120` | `test_a_wait_tries_again_every_0_2_seconds`, `test_attempts_that_wait_for_one_slot_take_it_one_at_a_time` |
 | Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:505`, `workflow/nodes.py:279`, `workflow/nodes.py:280` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
 | An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:501`, `workflow/nodes.py:511`, `workflow/context.py:153`, `workflow/cli.py:326` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
-| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:509` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_when_resumed` |
+| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:509` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_after_wf_retry` |
 | A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:98` | `test_a_killed_process_frees_its_slot` |
 | A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:58` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
 | Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. | `workflow/capacity.py:95` | `test_a_smaller_cap_uses_only_the_first_slots` |
-| A `wf run` or `wf resume` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:69`, `workflow/runner.py:145` | `test_wf_run_and_wf_resume_read_the_cap_once_when_they_start` |
+| A `wf run` or `wf retry` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:69`, `workflow/runner.py:145` | `test_wf_run_and_wf_retry_read_the_cap_once_when_they_start` |
 
 ## The output tool
 
@@ -718,7 +718,7 @@ the context to fix them.
   example `wf/<run-id>/build/2/implement`.
 - `branch` names a node's branch instead, as a template: `branch: "{{ start.branch }}"`
   lets whoever starts the run choose the branch that carries the result. The name is
-  rendered on the node's first pass; later passes and `wf resume` keep that branch. A
+  rendered on the node's first pass; later passes and `wf retry` keep that branch. A
   `for_each` item, also one in a sub-workflow that a `for_each` node runs, renders its
   name again on every pass. Worktrees go by item index, so the item fails if its index
   names another branch than before.
@@ -743,7 +743,7 @@ the context to fix them.
 - The commit skips git hooks, and it is signed when your git config signs commits.
   "Commit signing" below has the rules.
 - When a run succeeds, its worktrees are removed and its branches are kept. A failed run
-  keeps its worktrees for `wf resume`.
+  keeps its worktrees for `wf retry`.
 - `wf validate` warns when two `edit` nodes could run at the same time in the same workspace.
 
 ### Commit signing
@@ -757,15 +757,15 @@ The tests named below are in `tests/test_workspaces.py`.
 |---|---|---|---|
 | The runner commits in a worktree it made | The commit skips every git hook, so its message is only `wf: <node> (<run-id>)`, with no trailers. | `workflow/workspaces.py:188` | `test_the_runners_commit_message_has_no_trailer_even_when_a_hook_would_add_one` |
 | Your git config signs commits (`commit.gpgsign`) | The runner's commit is signed too, with your signing key (`user.signingkey`). | `workflow/workspaces.py:189` | `test_the_runner_signs_its_commits_when_your_git_config_does` |
-| A run may commit: an `edit` or `full` agent works in a worktree the runner made, directly, through a node's workspace or in a sub-workflow | `wf run` and `wf resume` sign a test commit before any agent works. The test commit goes to a temporary object folder, so the repository keeps nothing. | `workflow/runner.py:90`, `workflow/runner.py:189`, `workflow/runner.py:286`, `workflow/workspaces.py:257` | `test_checking_the_key_leaves_nothing_in_the_repository`, `test_an_agent_that_edits_another_nodes_worktree_needs_a_key_that_signs`, `test_an_edit_agent_in_a_sub_workflow_needs_a_key_that_signs_when_it_works_in_a_worktree`, `test_a_run_from_an_unborn_branch_with_a_base_of_its_own_checks_the_key`, `test_a_resumed_run_checks_the_key_again_before_any_agent_works`, `test_a_resumed_run_checks_the_key_for_an_edit_agent_in_a_sub_workflow`, `test_a_resumed_run_without_its_run_json_checks_the_key_where_it_ran` |
+| A run may commit: an `edit` or `full` agent works in a worktree the runner made, directly, through a node's workspace or in a sub-workflow | `wf run` and `wf retry` sign a test commit before any agent works. The test commit goes to a temporary object folder, so the repository keeps nothing. | `workflow/runner.py:90`, `workflow/runner.py:189`, `workflow/runner.py:286`, `workflow/workspaces.py:257` | `test_checking_the_key_leaves_nothing_in_the_repository`, `test_an_agent_that_edits_another_nodes_worktree_needs_a_key_that_signs`, `test_an_edit_agent_in_a_sub_workflow_needs_a_key_that_signs_when_it_works_in_a_worktree`, `test_a_run_from_an_unborn_branch_with_a_base_of_its_own_checks_the_key`, `test_a_retried_run_checks_the_key_again_before_any_agent_works`, `test_a_retried_run_checks_the_key_for_an_edit_agent_in_a_sub_workflow`, `test_a_retried_run_without_its_run_json_checks_the_key_where_it_ran` |
 | No agent of the run commits: each `edit` agent works in your checkout, and the others only read | There is no test commit, so a key that can't sign doesn't stop the run. | `workflow/runner.py:277` | `test_a_run_the_runner_makes_no_commits_in_doesnt_check_the_key` |
 | The test commit fails, or isn't signed within 30 seconds (`SIGNING_TIMEOUT`) | The command exits 1 before any agent works. The error says the key needs a touch, a PIN or a passphrase, or doesn't work. It names the fix: a key file (ssh) or a key id (OpenPGP) that needs none, as the repository's `user.signingkey`. | `workflow/workspaces.py:225`, `workflow/workspaces.py:60` | `test_a_run_whose_key_cant_sign_fails_at_its_start_and_says_how_to_fix_it`, `test_a_key_waiting_for_a_touch_fails_the_run_at_its_start_within_the_timeout`, `test_the_fix_for_an_openpgp_key_names_a_key_id` |
 | The repository signs with ssh, and `user.signingkey` is a relative path | The command exits 1 before any agent works, and asks for the key's absolute path. The runner commits in worktrees outside your checkout, where the relative path finds no key. | `workflow/workspaces.py:211` | `test_a_relative_signing_key_fails_the_run_at_its_start` |
 | The signing program asks for a passphrase or a PIN at a terminal | It finds none, because git runs in a session of its own, so signing fails at once. | `workflow/workspaces.py:423` | `test_the_signing_program_has_no_terminal_to_ask_on` |
-| `wf resume` of a run that has ended | There is no test commit. It says how the run ended. | `workflow/runner.py:189` | `test_resuming_a_run_that_succeeded_says_so_without_checking_the_key` |
+| `wf retry` of a run that has ended | There is no test commit. It says how the run ended. | `workflow/runner.py:189` | `test_retrying_a_run_that_succeeded_says_so_without_checking_the_key` |
 | The background process of a detached run fails the test | `status.json` says `failed`, with the error, so `wf wait` reports the cause and not a crash. | `workflow/runner.py:192` | `test_a_detached_run_whose_background_check_fails_records_why` |
 | The runner's commit fails | The error says that signing failed only after a timeout, or when a signed test commit fails and an unsigned one works. Otherwise it is git's own error, as `git commit failed: ...`. | `workflow/workspaces.py:197`, `workflow/workspaces.py:263` | `test_a_commit_that_cant_be_signed_says_so`, `test_a_commit_that_fails_for_another_reason_doesnt_blame_signing`, `test_a_commit_whose_signing_test_cant_write_either_doesnt_blame_signing` |
-| An agent succeeds, and then the runner's commit fails | The node fails with the attempt that ran, so `wf resume` starts at the next attempt number. | `workflow/nodes.py:463` | `test_a_failed_commit_keeps_the_attempt_number_so_a_resume_starts_at_the_next_one` |
+| An agent succeeds, and then the runner's commit fails | The node fails with the attempt that ran, so `wf retry` starts at the next attempt number. | `workflow/nodes.py:463` | `test_a_failed_commit_keeps_the_attempt_number_so_wf_retry_starts_at_the_next_one` |
 | wf stops git: after `SIGNING_TIMEOUT`, for a cancelled job, on Ctrl-C, SIGHUP or SIGTERM | Its process group, with the signing program, gets SIGTERM, so git removes its temporary files. Whatever still runs 5 seconds later (`GRACE`) gets SIGKILL. | `workflow/workspaces.py:457`, `workflow/workspaces.py:462` | `test_a_signing_timeout_lets_git_remove_its_temporary_file`, `test_a_signing_program_that_ignores_sigterm_is_killed` |
 | A job is cancelled, for example by a node's `timeout` or Ctrl-C during a run | Its git command stops, and none of its later git commands starts. Its error says it was stopped, not that signing failed. | `workflow/nodes.py:239`, `workflow/workspaces.py:418` | `test_cancelling_a_job_stops_its_git_command_and_the_signing_program`, `test_a_job_cancelled_while_it_waits_for_git_starts_none`, `test_a_stopped_commit_isnt_called_a_signing_failure` |
 | Ctrl-C while git runs in wf's main thread, as in the test before a run | git stops, and wf stops as for any Ctrl-C. | `workflow/workspaces.py:449` | `test_ctrl_c_stops_git_and_the_signing_program` |
@@ -782,7 +782,7 @@ The tests named below are in `tests/test_workspaces.py`.
   output.json                   the end output, once the run succeeds
   status.json                   running | waiting | succeeded | failed | limit
   events.jsonl                  one line per event: node started, finished, route taken, ...
-  checkpoints.sqlite            LangGraph checkpoints, used by wf resume
+  checkpoints.sqlite            LangGraph checkpoints, used by wf retry
   nodes/<node>/<pass>/          one folder per pass ...
     [<index>/]                  ... and per item
       instruction.md            the rendered instruction (or command, or message)
@@ -804,7 +804,7 @@ The tests named below are in `tests/test_workspaces.py`.
   same setting, in the same folder. A blank value counts as no setting. For a run in
   `.wf/runs/` while `WF_RUNS_DIR` is set, the commands that wf prints start with
   `WF_RUNS_DIR=`, which turns the setting off for that command.
-- `wf resume` uses the copies in `workflow/`, so editing the YAML doesn't change a run
+- `wf retry` uses the copies in `workflow/`, so editing the YAML doesn't change a run
   that's already in progress.
 
 ## Validation
@@ -888,8 +888,8 @@ workflow/
   nodes.py          runs one attempt of each node kind, including the reminder loop
   scheduler.py      the rules in "When a node runs": pending, settled, routes, end
   graph.py          LangGraph wiring
-  runs.py           run folder, events, resume
-  cli.py            init, validate, graph, run, resume, tools
+  runs.py           run folder, events, finding a run by id
+  cli.py            init, validate, graph, run, retry, tools
 ```
 
 The `wf` command is a `[project.scripts]` entry in `pyproject.toml`:
@@ -991,9 +991,9 @@ How it maps onto LangGraph:
   `execute` leads back to `schedule`.
 - State holds each node's outputs and history, the pending set, route counters, item
   errors and cost.
-- Human nodes call `interrupt()`, and `wf resume` continues with `Command(resume=answers)`.
+- Human nodes call `interrupt()`, and `wf retry` continues with `Command(resume=answers)`.
 - An `AsyncSqliteSaver` in the run folder keeps checkpoints. LangGraph also saves the
-  results of tasks that finished within a step, so a resumed run doesn't redo them.
+  results of tasks that finished within a step, so a run that continues later doesn't redo them.
 - Progress events go through `get_stream_writer()`, as in `deep_research/researcher.py`.
   The CLI prints them, and `runs.py` appends them to `events.jsonl`.
 - A workflow node runs the sub-workflow's compiled graph inside `execute`, as a subgraph.
@@ -1012,7 +1012,7 @@ How it maps onto LangGraph:
 - Routing on failure (an `on_error: <node>` route).
 - Command nodes that return JSON as structured output.
 - Sharing `types` between files.
-- Resuming a run with an edited version of its workflow.
+- `wf retry` with an edited version of the run's workflow.
 - A separate cap on agent sessions per harness, as Claude Code, Codex and Cursor have
   separate quotas.
   The [agent slots](#agent-slots) cap all harnesses together.
