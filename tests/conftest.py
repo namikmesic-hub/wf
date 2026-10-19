@@ -1,8 +1,10 @@
 """Shared test setup: wf's own folder (~/.wf) goes to a fresh temp folder in every test,
 outside the test's repo, as the real ~/.wf is. A cap on agent sessions set where the
 tests run (WF_MAX_AGENTS) doesn't apply to them. Runs go in the repo's .wf/runs unless a
-test sets a runs folder itself. git reads none of your config, so a global config that signs
-commits with a key that waits for a touch doesn't stop the tests' commits."""
+test sets a runs folder itself. The runner's git and the tests' own git commands read none
+of your global or system config, so a global config that signs commits with a key that waits
+for a touch doesn't stop the tests' commits. (The agents' git tool drops these variables, so
+it still reads your ~/.gitconfig.)"""
 
 import pytest
 

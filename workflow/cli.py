@@ -174,7 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     if extra:
         args.inputs += extra
     try:
-        return args.handler(args)
+        with workspaces.stopping_git_on_exit():
+            return args.handler(args)
     except KeyboardInterrupt:  # anywhere the runner doesn't handle it itself
         print("\nStopped.", file=sys.stderr)
         return runner.STOPPED

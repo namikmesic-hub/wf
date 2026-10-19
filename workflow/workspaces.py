@@ -23,12 +23,20 @@ the worktree goes back to the commit the job started from, so a retry is the
 same instruction on the same commit.
 The runner never commits, or resets, your own checkout. Commits skip hooks, so
 the message is only that line. They are signed when your git config says so
-(commit.gpgsign), with your key.
+(commit.gpgsign), with your key. A run that may commit first checks that the
+key signs with nobody there (check_signing), so a key that can't fails the run
+before any agent works for it.
 
-git never waits for input: nobody is at a terminal to answer. It runs without
-one, so a key that asks for a passphrase or a PIN fails at once, and a commit
-that isn't signed within SIGNING_TIMEOUT (a key waiting for a touch) is
-stopped. Either way the error says signing failed.
+git never waits for input: nobody is at a terminal to answer. Each git command
+runs in a session of its own, without one, so a key that asks for a passphrase
+or a PIN fails at once, and signing that takes longer than SIGNING_TIMEOUT (a
+key waiting for a touch) is stopped. A commit that fails says signing failed
+only when a test shows signing is the cause. git is also stopped when its
+caller is cancelled (stopped_by), on Ctrl-C, and on SIGTERM or a lost terminal
+(stopping_git_on_exit). Stopping git stops whatever it started: it's asked
+first, so it removes its temporary and lock files, and killed GRACE seconds
+later if it's still there. Nothing can stop git on SIGKILL, which ends wf at
+once.
 
 When a run succeeds its worktrees are removed and its branches kept; a failed
 run keeps them for `wf resume`.
@@ -39,17 +47,30 @@ calls in one repo fight over git's lock files.
 """
 
 import contextlib
+import contextvars
 import os
 import shutil
 import signal
 import subprocess
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 SIGNING_TIMEOUT = 30  # seconds: signing takes a moment, unless the key waits for a touch
+GRACE = 5  # seconds a stopped git gets to remove its temporary and lock files before it's killed
 
 
 class WorkspaceError(Exception):
     pass
+
+
+class _TimedOut(WorkspaceError):
+    pass
+
+
+class _Stopped(WorkspaceError):
+    """git was stopped, or never started, because its caller was cancelled or wf is exiting."""
 
 
 def home() -> Path:
@@ -163,19 +184,100 @@ def commit_all(path: str | Path, message: str) -> str | None:
     _git(path, "add", "--all")
     if not _git(path, "diff", "--cached", "--name-only"):
         return None  # e.g. only a submodule's own files changed: nothing to commit here
-    named = _git(path, "config", "user.email", check=False) and _git(path, "config", "user.name", check=False)
-    identity = [] if named else ["-c", "user.name=wf", "-c", "user.email=wf@localhost"]
     # No hooks, not even prepare-commit-msg, which --no-verify still runs: one could add a trailer
-    commit = [*identity, "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", message]
-    if _git(path, "config", "--type=bool", "commit.gpgsign", check=False) != "true":
+    commit = [*_identity(path), "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", message]
+    if not _signs(path):
         _git(path, *commit)
         return head(path)
     try:
         _git(path, *commit, timeout=SIGNING_TIMEOUT)
+    except _Stopped:
+        raise
     except WorkspaceError as error:
-        key = _git(path, "config", "user.signingkey", check=False) or "your default key"
+        if not isinstance(error, _TimedOut) and not _signing_fails(path):
+            raise  # the commit failed for another reason
+        key = _signing_key(path) or "your default key"
         raise WorkspaceError(f"can't sign the commit with {key} (commit.gpgsign is on): {error}") from error
     return head(path)
+
+
+def check_signing(repo: str | Path) -> None:
+    """When your git config signs commits (commit.gpgsign), sign a test commit the way the runner
+    will: with nobody at a terminal, within SIGNING_TIMEOUT. Raises WorkspaceError, naming the fix,
+    if it can't. Outside a git repository nothing is committed, so nothing is checked."""
+    if not _git(repo, "rev-parse", "--git-dir", check=False) or not _signs(repo):
+        return
+    key, ssh = _signing_key(repo), _git(repo, "config", "gpg.format", check=False) == "ssh"
+    if ssh and _relative_path(key):
+        raise WorkspaceError(
+            f"user.signingkey is a relative path ({key}), which git looks for in the checkout it commits in. "
+            f"The runner commits in worktrees under {root()}, so set the key file's absolute path: "
+            f"git -C {repo} config user.signingkey <absolute key file>")
+    try:
+        problem = _signing_problem(repo)
+    except WorkspaceError as error:
+        raise WorkspaceError(f"can't test signing in {repo}: {error}") from error
+    if problem:
+        raise WorkspaceError(
+            f"git can't sign commits in {repo} with nobody at a terminal: {problem}\n"
+            f"commit.gpgsign is on, and the signing key ({key or 'your default key'}) needs a touch, a PIN or a "
+            f"passphrase, or doesn't work. Set a key that needs none as this repository's signing key: "
+            f"git -C {repo} config user.signingkey {'<key file>' if ssh else '<key id>'}")
+
+
+def _signs(path: str | Path) -> bool:
+    return _git(path, "config", "--bool", "commit.gpgsign", check=False) == "true"
+
+
+def _signing_key(path: str | Path) -> str:
+    return _git(path, "config", "user.signingkey", check=False)
+
+
+def _relative_path(key: str) -> bool:
+    """Is this ssh signing key a relative file path? Not a literal key (key::..., or the older
+    ssh-...), and not a path git expands (~/..., %(prefix)/...)."""
+    return bool(key) and not key.startswith(("key::", "ssh-", "~", "%(prefix)/")) and not Path(key).is_absolute()
+
+
+def _identity(path: str | Path) -> list[str]:
+    """wf as the author, when your git config names nobody."""
+    named = _git(path, "config", "user.email", check=False) and _git(path, "config", "user.name", check=False)
+    return [] if named else ["-c", "user.name=wf", "-c", "user.email=wf@localhost"]
+
+
+def _signing_problem(path: str | Path) -> str | None:
+    """Why git can't sign a commit in `path`, or None if it can. Raises WorkspaceError when it can't
+    tell, because git can't make even an unsigned test commit (a full disk, say). The test commits
+    go to a temporary object folder, so the repository doesn't keep them."""
+    try:
+        folder = tempfile.TemporaryDirectory()
+    except OSError as error:
+        raise WorkspaceError(f"can't make a folder for a test commit: {error}") from error
+    with folder as objects:
+        env, identity = {"GIT_OBJECT_DIRECTORY": objects}, _identity(path)
+        tree = _git(path, "mktree", env=env)  # the empty tree
+
+        def test_commit(*sign: str, timeout: int = 600) -> str:
+            return _git(path, *identity, "commit-tree", *sign, "-m", "wf: signing check", tree, env=env, timeout=timeout)
+
+        test_commit()  # unsigned: everything but signing works
+        try:
+            test_commit("-S", timeout=SIGNING_TIMEOUT)
+        except _Stopped:
+            raise
+        except WorkspaceError as error:
+            return str(error)
+    return None
+
+
+def _signing_fails(path: str | Path) -> bool:
+    """Does a test show that signing fails in `path`? False when the test can't tell."""
+    try:
+        return _signing_problem(path) is not None
+    except _Stopped:
+        raise
+    except WorkspaceError:
+        return False
 
 
 def remove_run(repo: str | Path, run_id: str) -> None:
@@ -235,22 +337,68 @@ def git_env(**extra: str) -> dict:
     return {**{k: v for k, v in os.environ.items() if k not in REPO_ENV}, **extra}
 
 
-def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, timeout: int = 600) -> str:
-    # A session of its own: no terminal for a signing program to ask on, and one process
-    # group, so a timeout stops the signing program too, not only git
+_running: set[subprocess.Popen] = set()  # every git command running now, in any thread
+_registry = threading.Lock()  # held while a git command starts and joins _running
+_starting: set[int] = set()  # the threads in _start
+_exiting = threading.Event()  # set by the exit handler: no new git command starts
+_deferred: int | None = None  # an exit signal that came while the main thread was starting git
+_stop: contextvars.ContextVar[threading.Event | None] = contextvars.ContextVar("stop", default=None)
+
+
+@contextlib.contextmanager
+def stopped_by(event: threading.Event):
+    """Inside this block, the git command running when `event` is set stops, and no new one starts:
+    for a caller in another thread, which can't interrupt this one."""
+    token = _stop.set(event)
     try:
-        process = subprocess.Popen(["git", *args], cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True, start_new_session=True,
-                                   env=git_env(GIT_TERMINAL_PROMPT="0"))
-    except OSError as error:
-        raise WorkspaceError(f"can't run git: {error}") from error
-    with process:
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as error:
-            with contextlib.suppress(ProcessLookupError):  # it may have ended just now
-                os.killpg(process.pid, signal.SIGKILL)
-            raise WorkspaceError(f"git {_what(args)} took longer than {timeout} seconds") from error
+        yield
+    finally:
+        _stop.reset(token)
+
+
+@contextlib.contextmanager
+def stopping_git_on_exit():
+    """Inside this block, a lost terminal (SIGHUP) or SIGTERM stops the git commands still running,
+    then exits wf as before: git has a session of its own, which those signals don't reach. A signal
+    that is ignored (nohup) stays ignored. Main thread only, as for every signal handler."""
+    changed = [signum for signum in (signal.SIGHUP, signal.SIGTERM) if signal.getsignal(signum) == signal.SIG_DFL]
+    for signum in changed:
+        signal.signal(signum, _on_exit_signal)
+    try:
+        yield
+    finally:
+        for signum in changed:
+            signal.signal(signum, signal.SIG_DFL)
+
+
+def _on_exit_signal(signum, frame) -> None:
+    global _deferred
+    _exiting.set()
+    if threading.get_ident() in _starting:  # this thread was starting git: _start exits once git is in _running
+        _deferred = signum
+    else:
+        _exit(signum)
+
+
+def _exit(signum: int) -> None:
+    """Stop every git command, then exit by `signum`, as wf would without a handler."""
+    if _registry.acquire(timeout=GRACE):  # a git command another thread is starting joins _running first
+        _registry.release()
+    for process in list(_running):
+        _end(process)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, timeout: int = 600,
+         env: dict[str, str] | None = None) -> str:
+    stop = _stop.get()
+    process = _start(cwd, args, env, stop)
+    try:
+        with process:
+            stdout, stderr = _output(process, args, timeout, stop)
+    finally:
+        _running.discard(process)
     if process.returncode != 0:
         if check:
             raise WorkspaceError(f"git {_what(args)} failed: {stderr.strip() or stdout.strip()}")
@@ -258,9 +406,81 @@ def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, ti
     return stdout.strip() if strip else stdout  # strip=False: column 1 of porcelain matters
 
 
+def _start(cwd: str | Path, args: tuple[str, ...], env: dict[str, str] | None,
+           stop: threading.Event | None) -> subprocess.Popen:
+    """git, started and in _running, unless its caller was cancelled or wf is exiting. A session of
+    its own: no terminal for a signing program to ask on, and one process group, so stopping git
+    stops the signing program too."""
+    me = threading.get_ident()
+    _starting.add(me)
+    try:
+        with _registry:
+            if _exiting.is_set() or (stop is not None and stop.is_set()):
+                why = "wf is exiting" if _exiting.is_set() else "its caller was cancelled"
+                raise _Stopped(f"git {_what(args)} wasn't run: {why}")
+            try:
+                process = subprocess.Popen(["git", *args], cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                           env=git_env(GIT_TERMINAL_PROMPT="0", **(env or {})))
+            except OSError as error:
+                raise WorkspaceError(f"can't run git: {error}") from error
+            _running.add(process)
+            return process
+    finally:
+        _starting.discard(me)
+        if _deferred is not None and threading.current_thread() is threading.main_thread():
+            _exit(_deferred)
+
+
+def _output(process: subprocess.Popen, args: tuple[str, ...], timeout: int,
+            stop: threading.Event | None) -> tuple[str, str]:
+    """git's stdout and stderr once it exits. It's stopped if it runs longer than `timeout` seconds,
+    when `stop` is set, and when this thread is interrupted (Ctrl-C)."""
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:  # wake up every 0.1 seconds to look at `stop`
+                return process.communicate(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                if stop is not None and stop.is_set():
+                    raise _Stopped(f"git {_what(args)} was stopped: its caller was cancelled") from None
+                if time.monotonic() >= deadline:
+                    raise _TimedOut(f"git {_what(args)} took longer than {timeout} seconds") from None
+    except BaseException:
+        _end(process)
+        raise
+
+
+def _end(process: subprocess.Popen) -> None:
+    """Stop git and everything it started (its process group): SIGTERM first, so git removes its
+    temporary and lock files, then SIGKILL for whatever is still there after GRACE seconds."""
+    _signal(process, signal.SIGTERM)
+    deadline = time.monotonic() + GRACE
+    while _group_alive(process) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _group_alive(process):
+        _signal(process, signal.SIGKILL)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(GRACE)
+
+
+def _group_alive(process: subprocess.Popen) -> bool:
+    process.poll()  # reap git once it exits: only running processes should keep its group
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _signal(process: subprocess.Popen, signum: int) -> None:
+    with contextlib.suppress(ProcessLookupError):  # the group is gone already
+        os.killpg(process.pid, signum)
+
+
 def _what(args: tuple[str, ...]) -> str:
-    """The git command for an error message, without leading `-c name=value` pairs."""
+    """The git command for an error message: `commit`, `worktree add`. No `-c name=value` pairs or options."""
     args = list(args)
     while len(args) >= 2 and args[0] == "-c":
         args = args[2:]
-    return " ".join(args[:2])
+    return " ".join(args[:1] + [arg for arg in args[1:2] if not arg.startswith("-")])

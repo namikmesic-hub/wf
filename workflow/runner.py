@@ -85,14 +85,17 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
             print(f"wf run: the dry-run script has problems:\n{error}", file=sys.stderr)
             return 1
     _note_uncommitted(workflows, [*report.files, *([dry_run] if dry_run else [])])
+    repo = Path.cwd()
+    home = _home(repo)  # once: run.json and the run itself use the same branch and commit
+    if problem := _signing_problem(workflows, home):
+        print(f"wf run: {problem}", file=sys.stderr)
+        return 1
     asking = interactive() and not no_input and not detach
     try:
         inputs = collect_inputs(workflow, pairs, input_file, asking, base=script.inputs if script else None)
     except InputError as error:
         print(f"wf run: {error}", file=sys.stderr)
         return 1
-    repo = Path.cwd()
-    home = _home(repo)  # once: run.json and the run itself use the same branch and commit
     try:
         run = runs.create(repo, workflow.name, report.files, path, inputs, home=home, dry_run=script is not None,
                           limits=overrides, runs_dir=runs_dir)
@@ -135,7 +138,8 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
     name = "wf answer" if answers_file else "wf resume"
     try:
         run = runs.find(Path.cwd(), run_id, runs_dir)
-        workflow = spec.load(run.workflow_file)  # the copy, as it was when the run started
+        # The copies, as they were when the run started: the workflow and its sub-workflows
+        workflows = [spec.load(f) for f in validate.check(run.workflow_file).files]
         answers = json.loads(Path(answers_file).read_text(encoding="utf-8")) if answers_file else None
         overrides = limits.parse(limit_pairs or [])
         max_agents = capacity.configured()
@@ -145,16 +149,17 @@ def resume(run_id: str, no_input: bool, answers_file: Path | None = None, detach
         return 1
     try:
         with run.driving() as lock:
-            return _checked_resume(run, workflow, name, answers, no_input, detach, as_json, lock, overrides, max_agents,
-                                   runs_dir)
+            return _checked_resume(run, workflows, name, answers, no_input, detach, as_json, lock, overrides,
+                                   max_agents, runs_dir)
     except runs.RunBusy as error:
         print(f"{name}: {error}", file=sys.stderr)
         return 1
 
 
-def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: dict | None, no_input: bool,
+def _checked_resume(run: runs.Run, workflows: list[spec.Workflow], name: str, answers: dict | None, no_input: bool,
                     detach: bool, as_json: bool, lock: runs.Lock, overrides: dict, max_agents: int | None,
                     runs_dir: Path | None) -> int:
+    workflow = workflows[0]
     ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
     asking = interactive() and not no_input and not detach
     if run.info().get("dry_run"):  # a dry run continues with the rest of its script
@@ -181,6 +186,11 @@ def _checked_resume(run: runs.Run, workflow: spec.Workflow, name: str, answers: 
             for problem in problems:
                 print(f"{name}: {problem}", file=sys.stderr)
             return 1
+    if not _ended(run, state) and (problem := _signing_problem(workflows, _run_home(run, state))):
+        print(f"{name}: {problem}", file=sys.stderr)
+        if run.status().get("status") == "running":  # a background driver: tell `wf wait` why it stopped
+            run.set_status("failed", error=problem)
+        return 1
     if detach:
         args = ["resume", run.id, "--no-input", *_runs_dir_args(runs_dir)]
         if answers is not None:  # keep the answers with the run, for the background process
@@ -201,7 +211,7 @@ def _resume(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict |
         if (run.dir / "output.json").exists():
             print(f"Run {run.id} already succeeded.")
             return 0
-        ctx.home = run.info().get("home") or _home(run.repo)
+        ctx.home = _run_home(run, state)
         try:
             inputs = json.loads((run.dir / "input.json").read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:  # a run killed while it was being created
@@ -209,9 +219,7 @@ def _resume(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict |
             return 1
         print(f"Starting run {run.id}")
         return _drive(ctx, {"input": inputs}, asking)
-    saved = state.values.get("run")
-    ctx.home = ({"path": saved["repo"], "branch": saved["branch"], "base": saved["base"]} if saved
-                else run.info().get("home") or _home(run.repo))  # stopped before its first step
+    ctx.home = _run_home(run, state)
     print(f"Resuming run {run.id}")
     if state.interrupts:
         command = _continue(state.interrupts, asking, run, answers, ctx.script)
@@ -245,6 +253,53 @@ def _runs_dir_args(runs_dir: Path | None) -> list[str]:
     """A background driver inherits WF_RUNS_DIR, but not --runs-dir: pass that on, resolved,
     so the driver finds the run where this process put it."""
     return ["--runs-dir", str(runs_dir.expanduser().resolve())] if runs_dir else []
+
+
+def _ended(run: runs.Run, state: StateSnapshot) -> bool:
+    """Has the run ended, so `wf resume` only says how, and no agent works?"""
+    if not state.values:
+        return (run.dir / "output.json").exists()
+    return not state.interrupts and not state.next
+
+
+def _run_home(run: runs.Run, state: StateSnapshot) -> dict:
+    """The run's `repo` workspace: as its first step saved it, else as run.json has it, else where it is."""
+    if saved := (state.values or {}).get("run"):
+        return {"path": saved["repo"], "branch": saved["branch"], "base": saved["base"]}
+    return run.info().get("home") or _home(run.repo)
+
+
+def _signing_problem(workflows: list[spec.Workflow], home: dict) -> str | None:
+    """Why git can't sign the commits this run may make with nobody there, or None. Asked before
+    any agent works, so a key that needs a person stops the run before its first agent, not at
+    its first commit. `workflows`: the workflow, then its sub-workflows."""
+    loaded = {Path(w.path).resolve(): w for w in workflows}
+    if not _commits(workflows[0], loaded, workspaces.made_by_runner(home["path"])):
+        return None
+    try:
+        workspaces.check_signing(home["path"])
+    except workspaces.WorkspaceError as error:
+        return str(error)
+    return None
+
+
+def _commits(workflow: spec.Workflow, loaded: dict[Path, spec.Workflow], repo_is_worktree: bool) -> bool:
+    """Can the runner commit in this workflow? It commits after an `edit` or `full` agent in a
+    worktree it made: `workspace: new`, a node's that is one, or `repo` when the workflow's repo
+    is one (a sub-workflow's, when its parent node runs in one)."""
+    def in_worktree(node_id: str, seen: tuple[str, ...] = ()) -> bool:
+        kind = workflow.setting(node_id, "workspace")
+        if kind in ("new", "repo", "temp"):
+            return kind == "new" or (kind == "repo" and repo_is_worktree)
+        return kind in workflow.nodes and kind not in seen and in_worktree(kind, (*seen, node_id))
+
+    for node_id, node in workflow.nodes.items():
+        if node.kind == "agent" and workflow.setting(node_id, "access") in ("edit", "full") and in_worktree(node_id):
+            return True
+        if node.kind == "workflow" and _commits(loaded[(Path(workflow.path).parent / node.workflow).resolve()],
+                                                loaded, in_worktree(node_id)):
+            return True
+    return False
 
 
 def _say(data: dict, text: str, as_json: bool) -> None:
