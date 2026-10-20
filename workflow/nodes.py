@@ -417,6 +417,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
     fresh = render(False)
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
+    readable = _named_folders(fresh, ctx, variables, workspace)
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
     target, override = ctx.override(node_id, job["index"]) or (None, {})
     render_setting = partial(ctx.trace.render, job)  # the trace records how the harness, model and effort render
@@ -481,6 +482,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             tools=tools,
             only_wf_tools=listed is not None,
             project_instructions=wf.setting(node_id, "project_instructions"),
+            read_roots=readable,
             trace=record,
         )
         with ctx.steering.opening(spec.where, number, name):
@@ -650,6 +652,18 @@ async def _start_commit(ctx: RunContext, folder: Path, workspace: dict) -> tuple
     commit = await _git(ctx, workspaces.head, workspace["path"])
     record.write_text(commit + "\n", encoding="utf-8")
     return commit, False
+
+
+def _named_folders(instruction: str, ctx: RunContext, variables: dict, workspace: dict) -> list[Path]:
+    """wf's folders that an instruction names: the run folder, and other nodes' workspaces. A harness
+    whose agent reads files only through wf's tools lets it read these too (files_tool.py)."""
+    found = [str(ctx.root.run.dir)]
+    for value in (variables.get("workspace") or {}).values():
+        for one in value if isinstance(value, list) else [value]:
+            if isinstance(one, dict) and isinstance(one.get("path"), str):
+                found.append(one["path"])
+    own = Path(workspace["path"]).resolve()
+    return [Path(path) for path in dict.fromkeys(found) if path and path in instruction and Path(path).resolve() != own]
 
 
 def _continue_from(previous: dict | None, harness: str, model: str | None) -> tuple[dict | None, str | None]:

@@ -14,6 +14,10 @@ Tools that agent nodes can use (`tools: [slack, ...]`; workflow/tools/):
     wf tools <name> setup            sign in once; the secret goes to the macOS Keychain
     wf tools <name> doctor           check that a tool works; `wf tools doctor` checks them all
 
+Runtimes that need setting up (workflow/harnesses/cursor.py):
+    wf runtimes cursor signin        keep a Cursor API key in the macOS Keychain, for Cursor's SDK
+    wf runtimes cursor doctor        check Node, Cursor's SDK, the key, and how model ids map (--model ID)
+
 For an operator that isn't at a terminal (operate.py):
     wf run <file> --detach --json    start in the background
     wf wait <run-id>                 block until the run needs attention
@@ -251,6 +255,17 @@ def main(argv: list[str] | None = None) -> int:
             setup.add_argument("--write", action="store_true", help="ask for the write scopes too, for nodes with `write: true`")
         setup.set_defaults(handler=_tools_setup, tool=tool.name, token=False, write=False)
         actions.add_parser("doctor", help=f"check that {tool.title} works").set_defaults(handler=_tools_doctor, tool=tool.name)
+
+    runtimes = commands.add_parser("runtimes", help="set up and check the agent runtimes that need it: Cursor's API key")
+    runtime_commands = runtimes.add_subparsers(dest="runtime", required=True, parser_class=_Parser)
+    cursor_actions = runtime_commands.add_parser("cursor", help="Cursor, through its SDK").add_subparsers(
+        dest="action", required=True, parser_class=_Parser)
+    cursor_actions.add_parser("signin", help="keep a Cursor API key in the macOS Keychain, and check it").set_defaults(
+        handler=_cursor_signin)
+    cursor_doctor = cursor_actions.add_parser("doctor", help="check Node, Cursor's SDK, the API key, and how model ids map")
+    cursor_doctor.add_argument("--model", action="append", default=[], metavar="ID",
+                               help="a Cursor model id, as a workflow names it, to see what it maps to (repeatable)")
+    cursor_doctor.set_defaults(handler=_cursor_doctor)
 
     integrate = commands.add_parser("integrate", help="connect wf to another tool")
     integrate.add_argument("tool", choices=["firstmate"])
@@ -660,6 +675,43 @@ def _tools_doctor(args) -> int:
     found = asyncio.run(check_all())
     print("\n".join(report.text() for report in found))
     return 1 if any(r.status == "fail" or (args.tool and r.status != "pass") for r in found) else 0
+
+
+def _cursor_signin(args) -> int:
+    from keyring.errors import KeyringError
+
+    from .harnesses import Unavailable, cursor
+
+    if not sys.stdin.isatty():
+        print("wf runtimes cursor signin: run it at a terminal, since it asks for the key", file=sys.stderr)
+        return 1
+    print("Create a Cursor API key in the Cursor dashboard, and paste it here. It goes to the macOS Keychain, "
+          "and the screen doesn't show it.")
+    key = getpass.getpass("Cursor API key: ").strip()
+    if not key:
+        print("wf runtimes cursor signin: no key was given", file=sys.stderr)
+        return 1
+    try:
+        cursor.save_key(key)
+    except KeyringError as error:
+        print(f"wf runtimes cursor signin: can't save the key in the Keychain: {error or type(error).__name__}", file=sys.stderr)
+        return 1
+    print("Saved the Cursor API key in the macOS Keychain. Checking that it works:")
+    try:
+        found = asyncio.run(cursor.check(key=key))
+    except Unavailable as error:
+        print(f"wf runtimes cursor signin: {error}", file=sys.stderr)
+        return 1
+    print(f"  {cursor.works(found)}")
+    return 0
+
+
+def _cursor_doctor(args) -> int:
+    from .harnesses import cursor
+
+    lines, ok = asyncio.run(cursor.doctor(args.model))
+    print("\n".join(lines))
+    return 0 if ok else 1
 
 
 def _graph(args) -> int:

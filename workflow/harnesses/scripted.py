@@ -30,7 +30,7 @@ class Scripted:
     async def open(self, run_dir) -> None:
         pass
 
-    def check_model(self, model: str | None) -> None:
+    async def check_model(self, model: str | None) -> None:
         pass
 
     async def session(self, spec: SessionSpec) -> "ScriptedSession":

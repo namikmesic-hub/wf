@@ -1,0 +1,562 @@
+"""Remote: a harness whose sessions run in another program, a peer that wf speaks the
+wf-session protocol to.
+
+A peer hosts one runtime's agent sessions. For Cursor it is the Cursor host (cursor_host/, in
+TypeScript on Cursor's SDK), one child process per session, and the protocol runs over its stdin
+and stdout. A later service that runs every runtime's sessions speaks the same protocol over a
+socket, so this module doesn't change for it.
+
+Frames are JSON objects, one per line, at most MAX_FRAME bytes, in both directions:
+- hello and welcome: wf names the protocol it speaks (PROTOCOL) and gives the runtime's
+  credentials. The peer answers with its own protocol and versions. Another protocol, or no
+  answer, makes the harness unavailable.
+- req and res: wf's requests, which the peer answers by id, in any order. An answer that fails
+  carries an error with a class (below).
+- ev: what happens in a session, numbered by `seq`, with the session's id and, in a turn, the turn's.
+- call and ret: the peer asks wf to run one of the session's tools. wf always answers, with an
+  error text when it can't run the tool, because the agent waits for the answer.
+cursor_host/protocol/ has the frames as JSON Schema, and an example of each.
+
+How the operations map onto base.py's interfaces:
+- Harness.session() is session.open: the working folder, access level, web, model, the tools,
+  and where to start (`fresh`, or `load` an earlier session for session: continue). The tools are
+  submit_result, the runner's `git` at read-only, and the node's wf tools, each of kind `client`:
+  wf keeps running them, and the peer only offers them to the agent and passes each call on.
+  A harness with `file_tools` also gives a read-only session wf's file tools (files_tool.py),
+  which read only the workspace and the folders the instruction names, and its peer then offers
+  none of the runtime's own.
+- Session.send() is turn.start, which the peer answers at once with the turn's id. Events follow:
+  turn.text, turn.tool and turn.usage, and then turn.ended, which ends send().
+- Session.steer() is turn.steer. `delivered`: the running turn has the message. `declined` is
+  None here, so the runner sends the message as the next turn. `unconfirmed` is passed on, and so
+  is no answer in STEER_TIMEOUT seconds.
+- Session.close() is turn.cancel when a turn still runs, usage.read for the transcript, and
+  session.close.
+
+Error classes, in an answer or in turn.ended: unavailable, auth and usage_limit make the harness
+unavailable for the attempt, so the runner goes to the node's next harness. An auth error's text
+gets the harness's fix (RemoteHarness.fix). transient fails the attempt, and its retry waits the
+seconds the error names (retry_after_s), or RETRY_AFTER. failed, internal and cancelled fail the
+attempt. not_found, when the peer can't load the session to continue, makes it start fresh.
+invalid is a bug in wf: opening a session that way fails the job at once.
+
+Usage: turn.ended carries the turn's usage object. Usage.tokens is its total_tokens, and
+Usage.cost_usd its cost_usd, 0 when the runtime reports no dollars yet. turn.usage events tell
+pending_usage() what a turn used so far, so a turn that a timeout cuts off still counts.
+
+What the agent does goes where each adapter puts it (base.py): an agent_tool progress event when
+a tool call starts, the attempt's transcript (sent, text, tool, tool_result, turn, usage lines),
+and the trace (spec.trace). For a wf tool the peer sends only the size of the answer, and so the
+transcript and the trace keep only that.
+"""
+
+import asyncio
+import contextlib
+import itertools
+import json
+import os
+import signal
+from collections.abc import Callable
+from pathlib import Path
+
+from .. import output_tool
+from . import files_tool, git_tool
+from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
+
+PROTOCOL = "wf-session/0"
+MAX_FRAME = 1024 * 1024
+STEER_TIMEOUT = 10  # seconds: inside the time `wf steer` waits for an answer (steer.py)
+CLOSE_TIMEOUT = 5  # seconds for each step of closing a session
+USAGE_TIMEOUT = 3
+RETRY_AFTER = 30  # seconds before the retry after a `transient` error that names no wait
+UNAVAILABLE = ("unavailable", "auth", "usage_limit", "not_found")
+CLOSED = {"kind": "peer.closed"}  # in a session's events: the peer is gone
+
+
+class RemoteError(Exception):
+    """The peer refused a request: `error` holds its class, code and message."""
+
+    def __init__(self, error: dict):
+        self.error = error if isinstance(error, dict) else {}
+        self.kind = self.error.get("class") or "internal"
+        super().__init__(self.error.get("message") or self.kind)
+
+
+class PeerGone(Exception):
+    """The peer's process ended, or its pipes broke."""
+
+
+class Peer:
+    """A wf-session peer behind a child process's stdin and stdout. stderr goes to a log file."""
+
+    def __init__(self, process: asyncio.subprocess.Process, stderr, timeout: float, name: str):
+        self.process, self.stderr, self.timeout, self.name = process, stderr, timeout, name
+        self.ids = itertools.count(1)
+        self.pending: dict[str, asyncio.Future] = {}
+        self.sessions: dict[str, RemoteSession] = {}
+        self.early: dict[str, list[dict]] = {}  # events for a session that isn't attached yet
+        self.answering: set[asyncio.Task] = set()  # tool calls in progress
+        self.dead: str | None = None  # why the peer is gone, once it is
+        self.welcome: dict = {}
+        self.tap: Callable[[str, dict], None] | None = None  # sees every frame: "in" or "out" (tests)
+        self._welcomed = asyncio.get_running_loop().create_future()
+        self.reader = asyncio.ensure_future(self._read())
+
+    @classmethod
+    async def start(cls, command: list[str], *, cwd: Path, env: dict, log: Path, timeout: float, name: str,
+                    client: dict, credentials: dict | None = None,
+                    tap: Callable[[str, dict], None] | None = None) -> "Peer":
+        """Start the peer and greet it. Raises OSError (it didn't start), PeerGone, RemoteError
+        (another protocol) or TimeoutError."""
+        log.parent.mkdir(parents=True, exist_ok=True)
+        stderr = log.open("a", encoding="utf-8")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command, cwd=cwd, env=env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=stderr, limit=4 * MAX_FRAME,
+                start_new_session=True,  # its own process group, so stopping it stops the commands it started
+            )
+        except OSError:
+            stderr.close()
+            raise
+        peer = cls(process, stderr, timeout, name)
+        peer.tap = tap
+        try:
+            await peer._write({"t": "hello", "protocol": PROTOCOL, "client": client,
+                               **({"credentials": credentials} if credentials else {})})
+            peer.welcome = await asyncio.wait_for(asyncio.shield(peer._welcomed), timeout)
+            if peer.welcome is None:
+                raise PeerGone(peer.dead)
+            if peer.welcome.get("protocol") != PROTOCOL:
+                raise RemoteError({"class": "unavailable", "code": "protocol.version",
+                                   "message": f"{name} speaks {peer.welcome.get('protocol')}, and wf {PROTOCOL}"})
+        except BaseException:
+            await peer.stop()
+            raise
+        return peer
+
+    async def request(self, op: str, args: dict, timeout: float | None = None) -> dict:
+        """Send a request and wait for its answer. Raises RemoteError, PeerGone or TimeoutError."""
+        if self.dead:
+            raise PeerGone(self.dead)
+        ident = f"r{next(self.ids)}"
+        future = self.pending[ident] = asyncio.get_running_loop().create_future()
+        try:
+            await self._write({"t": "req", "id": ident, "op": op, "args": args})
+            return await asyncio.wait_for(future, timeout or self.timeout)
+        except TimeoutError:  # an OSError too, but it means no answer, not a lost peer
+            raise
+        except OSError as error:
+            raise PeerGone(self.dead or f"lost {self.name}: {error}") from error
+        finally:
+            self.pending.pop(ident, None)
+
+    def attach(self, session: "RemoteSession") -> None:
+        self.sessions[session.session] = session
+        for event in self.early.pop(session.session, []):
+            session.events.put_nowait(event)
+        if self.dead:
+            session.events.put_nowait(CLOSED)
+
+    def detach(self, session: "RemoteSession") -> None:
+        self.sessions.pop(session.session, None)
+
+    async def _write(self, frame: dict) -> None:
+        if self.tap:
+            self.tap("out", frame)
+        self.process.stdin.write((json.dumps(frame, ensure_ascii=False) + "\n").encode())
+        await self.process.stdin.drain()
+
+    async def _read(self) -> None:
+        try:
+            while line := await self.process.stdout.readline():
+                try:
+                    frame = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(frame, dict):
+                    continue
+                if self.tap:
+                    self.tap("in", frame)
+                self._receive(frame)
+        except (OSError, ValueError) as error:  # ValueError: a line longer than the reader's limit
+            self.dead = f"lost {self.name}: {error}"
+        except Exception as error:  # a bug in handling a frame: say so, rather than that the peer exited
+            self.dead = f"wf failed to handle a frame from {self.name}: {type(error).__name__}: {error}"
+        finally:
+            self.dead = self.dead or f"{self.name} exited (its output is in {self.stderr.name})"
+            if not self._welcomed.done():
+                self._welcomed.set_result(None)  # no welcome: start() says why
+            for future in self.pending.values():
+                if not future.done():
+                    future.set_exception(PeerGone(self.dead))
+            for session in self.sessions.values():
+                session.events.put_nowait(CLOSED)
+
+    def _receive(self, frame: dict) -> None:
+        kind = frame.get("t")
+        if kind == "welcome" and not self._welcomed.done():
+            self._welcomed.set_result(frame)
+        elif kind == "res":
+            future = self.pending.get(str(frame.get("id")))
+            if future is not None and not future.done():
+                if frame.get("ok"):
+                    future.set_result(frame.get("result") if isinstance(frame.get("result"), dict) else {})
+                else:
+                    future.set_exception(RemoteError(frame.get("error") or {}))
+        elif kind == "ev":
+            session = self.sessions.get(frame.get("session"))
+            if session is not None:
+                session.events.put_nowait(frame)
+            elif isinstance(frame.get("session"), str):
+                self.early.setdefault(frame["session"], []).append(frame)
+        elif kind == "call":
+            task = asyncio.ensure_future(self._answer(frame))
+            self.answering.add(task)
+            task.add_done_callback(self.answering.discard)
+
+    async def _answer(self, frame: dict) -> None:
+        """Run the tool a `call` asks for, and answer with `ret`. Every call gets its answer."""
+        session = self.sessions.get(frame.get("session"))
+        try:
+            if session is None:
+                content, is_error = [_text(f"Error: there's no session {frame.get('session')} here.")], True
+            else:
+                content, is_error = await session.call(frame)
+        except Exception as error:
+            content, is_error = [_text(f"Error: {type(error).__name__}: {error}")], True
+        with contextlib.suppress(OSError):  # the peer is gone: the reader notices that
+            await self._write({"t": "ret", "id": frame.get("id"), "content": content, "isError": is_error})
+
+    async def stop(self) -> None:
+        """Close the peer's stdin, which asks it to stop, then end its process group."""
+        if self.process.returncode is None:
+            with contextlib.suppress(Exception):
+                self.process.stdin.close()
+            try:
+                await asyncio.wait_for(self.process.wait(), CLOSE_TIMEOUT)
+            except TimeoutError:
+                _kill(self.process, signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(self.process.wait(), CLOSE_TIMEOUT)
+                except TimeoutError:
+                    _kill(self.process, signal.SIGKILL)
+                    await self.process.wait()
+        _kill(self.process, signal.SIGKILL)  # whatever it started that's still running
+        self.reader.cancel()
+        for task in self.answering:
+            task.cancel()
+        # gather() hands back the reader's own cancellation as a value, but still lets a
+        # cancellation of this task (Ctrl-C during teardown) through
+        await asyncio.gather(self.reader, *self.answering, return_exceptions=True)
+        self.stderr.close()
+
+
+def _kill(process: asyncio.subprocess.Process, sig: int) -> None:
+    """Signal the peer's process group."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, sig)
+
+
+class RemoteHarness:
+    """A Harness whose sessions run behind wf-session peers. A subclass names the harness, says how
+    to reach a peer (peer()), and what to do with it when a session is done (done())."""
+
+    name = "remote"
+    labels: dict[str, str] = {}  # the runtime's tool names, as progress shows them
+    fix = ""  # what to do about an `auth` error
+    file_tools = False  # read-only sessions read files through files_tool.py, not the runtime's tools
+    tap: Callable[[str, dict], None] | None = None  # sees every frame to and from its peers (tests)
+
+    def __init__(self, request_timeout: float = 60):
+        self.request_timeout = request_timeout  # for each request: a turn has the node's timeout
+
+    async def open(self, run_dir: Path) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def peer(self) -> Peer:
+        """A peer for one session or check. Raises Unavailable."""
+        raise NotImplementedError
+
+    async def done(self, session: "RemoteSession") -> None:
+        """After a session closed. A peer of its own stops here."""
+        await session.peer.stop()
+
+    async def check_model(self, model: str | None) -> None:
+        peer = await self.peer()
+        try:
+            await peer.request("runtime.check", {"runtime": self.name, "model": model, "effort": None})
+        except RemoteError as error:
+            raise Unavailable(self.explain(error.error)) from error
+        except (PeerGone, TimeoutError) as error:
+            raise Unavailable(f"{peer.name} didn't check the model: {error or 'no answer'}") from error
+        finally:
+            await peer.stop()
+
+    async def session(self, spec: SessionSpec) -> "RemoteSession":
+        return await self.start(spec, open_args(spec, self.name, self.file_tools))
+
+    async def start(self, spec: SessionSpec, args: dict, extra: dict | None = None) -> "RemoteSession":
+        """Open a session on a new peer with these session.open arguments. `extra` is the
+        harness's own record of the session, for done()."""
+        session = RemoteSession(self, await self.peer(), spec)
+        session.extra = extra or {}
+        try:
+            await session.open(args)
+        except BaseException as error:  # failed or cancelled: don't leave the peer running
+            await session.close()
+            if isinstance(error, RemoteError) and error.kind != "invalid":
+                raise Unavailable(self.explain(error.error)) from error
+            if isinstance(error, (PeerGone, TimeoutError)):
+                raise Unavailable(f"{session.peer.name} didn't start a session: {error or 'no answer'}") from error
+            raise
+        return session
+
+    def explain(self, error: dict) -> str:
+        """An error's text, and for `auth` what to do about it."""
+        message = error.get("message") or error.get("class") or "error"
+        return f"{message}. {self.fix}" if error.get("class") == "auth" and self.fix else message
+
+    def ended(self, error: dict, usage: Usage) -> TurnEnd:
+        """The TurnEnd for a turn that ended with this error."""
+        kind, message = error.get("class"), f"{self.name}: {self.explain(error)}"
+        if kind in UNAVAILABLE:
+            return TurnEnd("unavailable", message, usage)
+        if kind == "transient":
+            return TurnEnd("failed", message, usage, retry_after=float(error.get("retry_after_s") or RETRY_AFTER))
+        return TurnEnd("failed", message, usage)
+
+    def label(self, data: dict) -> str:
+        """A tool call's name, as progress and the trace show it. A wf tool's is linear.list_issues,
+        as on the other harnesses."""
+        tool, server = str(data.get("tool") or "tool"), data.get("server")
+        return f"{server}.{tool}" if server else self.labels.get(tool, tool)
+
+
+def open_args(spec: SessionSpec, runtime: str, file_tools: bool = False) -> dict:
+    """session.open's arguments for a SessionSpec."""
+    return {
+        "runtime": runtime, "model": spec.model, "effort": spec.effort, "cwd": str(spec.cwd), "access": spec.access,
+        "web": spec.web, "project_instructions": spec.project_instructions, "only_given_tools": spec.only_wf_tools,
+        "max_turns": spec.max_turns, "budget_usd": spec.budget_usd, "tools": tools(spec, file_tools),
+        "start": {"kind": "fresh"}, "retain": spec.continuable, "labels": {"node": spec.where or spec.node},
+    }
+
+
+def tools(spec: SessionSpec, file_tools: bool = False) -> list[dict]:
+    """The session's tools, which wf runs: submit_result, git (and with `file_tools` the file
+    tools) at read-only, and the node's wf tools."""
+    given = [{"kind": "client", "name": output_tool.NAME, "description": output_tool.DESCRIPTION,
+              "input_schema": spec.tool.schema}]
+    if spec.access == "read-only":
+        given.append({"kind": "client", "name": git_tool.NAME, "description": git_tool.DESCRIPTION,
+                      "input_schema": git_tool.SCHEMA})
+        given += [{"kind": "client", "name": name, "description": files_tool.description(name),
+                   "input_schema": files_tool.schema(name)} for name in (files_tool.NAMES if file_tools else ())]
+    for server in spec.tools:
+        for op in server.operations:
+            hints = op.annotations.model_dump(exclude_none=True) if hasattr(op.annotations, "model_dump") else op.annotations
+            given.append({"kind": "client", "server": server.name, "name": op.name, "description": op.description,
+                          "input_schema": op.input_schema, "private": True,
+                          **({"annotations": hints} if isinstance(hints, dict) and hints else {})})
+    return given
+
+
+def usage(data: object) -> Usage:
+    """wf's Usage for the protocol's usage object."""
+    data = data if isinstance(data, dict) else {}
+    return Usage(tokens=int(data.get("total_tokens") or 0), cost_usd=float(data.get("cost_usd") or 0))
+
+
+class RemoteSession:
+    def __init__(self, harness: RemoteHarness, peer: Peer, spec: SessionSpec):
+        self.harness, self.peer, self.spec = harness, peer, spec
+        self.id = ""  # the runtime's id for the session, which session: continue loads
+        self.session = ""  # the peer's id for it
+        self.facts: dict = {}  # session.open's answer
+        self.events: asyncio.Queue = asyncio.Queue()
+        self.turn: str | None = None  # the turn that runs
+        self.turns = 0
+        self.text = ""  # the agent's text since the last tool call
+        self.traced: dict[str, object] = {}  # call -> the arguments the trace has for it
+        self.answered: dict[str, int] = {}  # call -> the size of a wf tool's answer
+        self.pending = Usage()
+        self.succeeded = False  # a turn ended with a result: the attempt has its result
+        self.closed = False
+        self.extra: dict = {}  # the harness's own record of the session
+
+    async def open(self, args: dict) -> None:
+        self.facts = await self.peer.request("session.open", args)
+        self.session, self.id = str(self.facts.get("session") or ""), str(self.facts.get("runtime_session_id") or "")
+        self.peer.attach(self)
+
+    def pending_usage(self) -> Usage:
+        return self.pending if self.turn else Usage()
+
+    async def send(self, text: str) -> TurnEnd:
+        spec, name = self.spec, self.harness.name
+        transcript(spec.log, "sent", text=text)
+        self.text, self.pending = "", Usage()
+        kind = "instruction" if self.turns == 0 else "message"
+        self.turns += 1
+        try:
+            answer = await self.peer.request("turn.start", {"session": self.session, "kind": kind, "text": text})
+        except RemoteError as error:
+            return self.harness.ended(error.error, Usage())
+        except (PeerGone, TimeoutError) as error:
+            return TurnEnd("failed", f"{name}: {error or f'{self.peer.name} did not start the turn'}")
+        self.turn = answer.get("turn")
+        try:
+            while True:
+                event = await self.events.get()
+                if event is CLOSED:
+                    self.turn = None
+                    return TurnEnd("failed", f"{name}: {self.peer.dead}", self.pending)
+                kind, data = event.get("kind"), event.get("data") or {}
+                if kind == "turn.text":
+                    self.text += str(data.get("text") or "")
+                elif kind == "turn.tool":
+                    self._flush()
+                    self._tool(data)
+                elif kind == "turn.usage":
+                    self.pending = usage(data.get("usage"))
+                elif kind == "turn.ended" and event.get("turn") == self.turn:
+                    self.turn = None
+                    return self._ended(data)
+        finally:
+            self._flush()
+
+    def _ended(self, data: dict) -> TurnEnd:
+        error, used = data.get("error") or {}, usage(data.get("usage"))
+        transcript(self.spec.log, "turn", status=data.get("status"), usage=data.get("usage"),
+                   **({"error": error} if error else {}))
+        self.succeeded = self.succeeded or self.spec.tool.result is not None
+        if data.get("status") == "done":
+            return TurnEnd("done", usage=used)
+        if data.get("status") == "cancelled":
+            return TurnEnd("failed", f"{self.harness.name}: the turn was cancelled", used)
+        return self.harness.ended(error, used)
+
+    def _tool(self, data: dict) -> None:
+        spec, call, status = self.spec, str(data.get("call") or ""), data.get("status")
+        label = self.harness.label(data)
+        if status == "started":
+            spec.emit({"event": "agent_tool", "tool": label, "detail": detail(data, spec.cwd)})
+        self._trace_call(call, label, data)
+        if status not in ("completed", "failed"):
+            return
+        self.traced.pop(call, None)
+        kept = data.get("kept") is not False
+        size = self.answered.pop(call, None) if not kept else None
+        size = size if size is not None else int(data.get("size") or 0)
+        outcome = {"output": short(data.get("result") or "", 2000)} if kept else {"kept": False, "characters": size}
+        transcript(spec.log, "tool", tool=label, status=status, input=data.get("args"), **outcome)
+        if kept:
+            spec.trace.tool_result(call, data.get("result"), status == "failed")
+        else:
+            spec.trace.tool_result(call, None, status == "failed", kept=False, characters=size)
+
+    def _trace_call(self, call: str, label: str, data: dict) -> None:
+        """A tool call for the trace, again each time that the peer tells more of its arguments."""
+        arguments = data.get("args")
+        if call not in self.traced or self.traced[call] != arguments:
+            self.traced[call] = arguments
+            self.spec.trace.tool_call(call, label, arguments)
+
+    def _flush(self) -> None:
+        if self.text.strip():
+            transcript(self.spec.log, "text", text=self.text)
+            self.spec.trace.text(self.text)
+        self.text = ""
+
+    async def call(self, frame: dict) -> tuple[list[dict], bool]:
+        """Run the tool a `call` frame asks for: (content, is_error)."""
+        spec, tool, server, args = self.spec, frame.get("tool"), frame.get("server"), frame.get("args")
+        if server is None and tool == output_tool.NAME:
+            text, is_error = spec.tool.submit(args)
+            transcript(spec.log, "tool_result", tool=output_tool.NAME, is_error=is_error, content=text)
+            return [_text(text)], is_error
+        if server is None and tool == git_tool.NAME and spec.access == "read-only":
+            given = args.get("args") if isinstance(args, dict) else None
+            text, is_error = await asyncio.to_thread(git_tool.run, spec.cwd, given or [])
+            return [_text(text)], is_error
+        if server is None and tool in files_tool.NAMES and spec.access == "read-only" and self.harness.file_tools:
+            text, is_error = await asyncio.to_thread(files_tool.run, str(tool), spec.cwd, spec.read_roots, args)
+            return [_text(text)], is_error
+        found = next((s for s in spec.tools if s.name == server), None)
+        if found is None:
+            return [_text(f"Error: there's no tool called `{tool}` here. Call `{output_tool.NAME}` with your result.")], True
+        content, is_error = await found.call(str(tool), args)
+        if frame.get("callId"):
+            self.answered[str(frame["callId"])] = len(json.dumps(content, default=str))
+        return content, is_error
+
+    async def steer(self, text: str, ident: str) -> str | None:
+        if not self.turn or self.peer.dead:
+            return None
+        try:
+            answer = await self.peer.request("turn.steer", {"session": self.session, "id": ident, "text": text},
+                                             timeout=STEER_TIMEOUT)
+        except TimeoutError:  # sent, but no answer: the agent may have it, so it isn't sent again
+            return "unconfirmed"
+        except (RemoteError, PeerGone):
+            return None
+        status = answer.get("status")
+        return status if status in ("delivered", "unconfirmed") else None
+
+    async def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            if self.session and not self.peer.dead:
+                if self.turn:  # a turn still runs, as after a timeout: stop it
+                    with contextlib.suppress(Exception):
+                        await self.peer.request("turn.cancel", {"session": self.session}, timeout=CLOSE_TIMEOUT)
+                        await asyncio.wait_for(self._turn_end(), CLOSE_TIMEOUT)
+                with contextlib.suppress(Exception):
+                    read = await self.peer.request("usage.read", {"session": self.session}, timeout=USAGE_TIMEOUT)
+                    transcript(self.spec.log, "usage", **read)
+                with contextlib.suppress(Exception):
+                    await self.peer.request("session.close", {"session": self.session, "reason": "the attempt ended"},
+                                            timeout=CLOSE_TIMEOUT)
+        finally:  # even when cancelled: the peer must stop
+            self._flush()
+            self.peer.detach(self)
+            await self.harness.done(self)
+
+    async def _turn_end(self) -> None:
+        """Read the running turn's events until it ends, so that its tool calls reach the trace."""
+        while True:
+            event = await self.events.get()
+            if event is CLOSED:
+                return
+            if event.get("kind") == "turn.tool":
+                self._flush()
+                self._tool(event.get("data") or {})
+            elif event.get("kind") == "turn.text":
+                self.text += str((event.get("data") or {}).get("text") or "")
+            elif event.get("kind") == "turn.ended" and event.get("turn") == self.turn:
+                transcript(self.spec.log, "turn", status=(event.get("data") or {}).get("status"))
+                self.turn = None
+                return
+
+
+def detail(data: dict, cwd: Path) -> str:
+    """A few words about a tool call, for the progress line. Paths are shown relative to the workspace."""
+    args = data.get("args")
+    if not isinstance(args, dict):
+        return ""
+    if isinstance(args.get("args"), list):  # the runner's git tool: ["diff", "main...HEAD"]
+        return short(" ".join(str(part) for part in args["args"]), 80)
+    for key in ("path", "command", "pattern", "globPattern", "query", "searchTerm", "url"):
+        if args.get(key):
+            return short(str(args[key]).removeprefix(str(cwd).rstrip("/") + "/"), 80)
+    return ""
+
+
+def _text(text: str) -> dict:
+    return {"type": "text", "text": text}

@@ -649,7 +649,7 @@ def test_cost_limits_with_harnesses_that_do_not_report_cost_warn(tmp_path):
     assert_problems(report, [("warning", "limits.cost_usd", "codex doesn't report cost in dollars")])
 
 
-def test_cursor_reports_neither_cost_nor_tokens_and_takes_no_effort(tmp_path):
+def test_cursor_reports_tokens_but_no_cost_and_takes_no_effort(tmp_path):
     report = check(tmp_path, flow(
         "a: {needs: [start], instruction: x, harness: cursor, model: gpt-5.6-sol-max-fast, effort: high}",
         top="limits: {cost_usd: 5, tokens: 100000}\n",
@@ -658,16 +658,22 @@ def test_cursor_reports_neither_cost_nor_tokens_and_takes_no_effort(tmp_path):
     assert_problems(report, [
         ("warning", "nodes.a", "cursor doesn't use `effort`: a Cursor model id carries its own"),
         ("warning", "limits.cost_usd", "cursor doesn't report cost in dollars"),
-        ("warning", "limits.tokens", "cursor doesn't report tokens"),
     ])
 
 
-def test_a_template_reading_run_tokens_warns_when_cursor_runs(tmp_path):
+def test_a_template_reading_run_tokens_warns_when_cursor_runs_an_edit_node_through_acp(tmp_path):
     report = check(tmp_path, flow(
-        "a: {needs: [start], instruction: x, harness: [claude-code, cursor], model: {claude-code: opus, cursor: composer-2.5}}",
+        "a: {needs: [start], instruction: x, access: edit, harness: [claude-code, cursor], model: {claude-code: opus, cursor: composer-2.5}}",
         end='used: {type: integer, value: "{{ run.tokens }}"}',
     ))
-    assert_problems(report, [("warning", "end.output.used.value", "cursor doesn't report tokens")])
+    assert_problems(report, [("warning", "end.output.used.value", "cursor doesn't report tokens through cursor-agent's ACP")])
+
+
+def test_a_token_limit_warns_when_every_cursor_node_runs_through_acp(tmp_path, monkeypatch):
+    monkeypatch.setenv("WF_CURSOR_RUNTIME", "acp")
+    report = check(tmp_path, flow("a: {needs: [start], instruction: x, harness: cursor, model: composer-2.5}",
+                                  top="limits: {tokens: 100000}\n"))
+    assert_problems(report, [("warning", "limits.tokens", "every node with `cursor_runtime: acp`")])
 
 
 def test_project_instructions_takes_a_boolean_on_a_node_or_in_defaults(tmp_path):

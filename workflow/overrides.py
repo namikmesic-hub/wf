@@ -364,7 +364,7 @@ async def _open(name: str, keys: list[str], models: dict[str, set[str]], folder:
         for key in keys:
             for model in sorted(models[key]):
                 try:
-                    harness.check_model(model)
+                    await harness.check_model(model)
                 except harnesses.Unavailable as error:
                     problems.append(f"{key}: {error}")
     except (harnesses.Unavailable, OSError) as error:

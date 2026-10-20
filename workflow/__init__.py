@@ -29,8 +29,11 @@ Then the runner, built on LangGraph:
     tools/         wf tools (Slack, Linear, ...): sign-in, the Keychain, and the
                    relay that attaches them to agent sessions
     harnesses/     the coding-agent adapters: base.py, then claude_code.py,
-                   codex.py, cursor.py (with mcp_http.py, which serves it
-                   submit_result), and git_tool.py (read-only git without a shell)
+                   codex.py, remote.py and cursor.py (Cursor's SDK in the
+                   TypeScript Cursor host, cursor_host/), cursor_acp.py (with
+                   mcp_http.py, which serves it submit_result), git_tool.py
+                   (read-only git without a shell) and files_tool.py (file
+                   reads kept to the folders a step may read)
     nodes.py       running one job: agents, commands, human questions via interrupt()
     graph.py       the LangGraph wiring: schedule -> Send -> execute -> schedule
     ask.py         questions at the terminal

@@ -31,7 +31,7 @@ class _FakeHarness:
             raise Unavailable(self.fake.unavailable)
         self.fake.opened += 1
 
-    def check_model(self, model):
+    async def check_model(self, model):
         if self.fake.models is not None and model not in self.fake.models:
             raise Unavailable(f"{self.name} has no model `{model}`")
 

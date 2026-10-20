@@ -1,6 +1,8 @@
 """Settings: wf's own settings for the user, in ~/.wf/config.yaml (WF_HOME moves ~/.wf).
 
     max_agents: 4      # the cap on live agent sessions across all runs (capacity.py)
+    cursor_runtime: sdk                      # or acp, for one release (harnesses/cursor.py)
+    cursor_api_key_file: ~/.config/cursor-key  # a file with the Cursor API key, in place of the Keychain
 
 This module owns the file: get(name) reads one setting, and the feature that
 uses it checks its value. KNOWN lists every setting wf reads, so a misspelt
@@ -14,7 +16,7 @@ import yaml
 
 from .workspaces import home
 
-KNOWN = ("max_agents",)
+KNOWN = ("max_agents", "cursor_runtime", "cursor_api_key_file")
 
 
 class SettingsError(Exception):
