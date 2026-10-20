@@ -668,6 +668,70 @@ def test_a_follow_up_keeps_the_outputs_before_its_node_also_of_a_node_that_a_loo
     assert sorted(p.name for p in (run.dir / "nodes" / "plan").iterdir()) == ["1", "2", "3"]
 
 
+def test_a_follow_up_keeps_the_output_of_the_route_that_the_run_took_before_its_node(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 5)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("routed.yaml", """
+        version: 1
+        name: routed
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {kind: {type: string}}}
+        nodes:
+          classify:
+            needs: [start]
+            command: "echo {{ start.kind | quote }}"
+            routes: [{when: "classify.stdout | trim == 'a'", to: plan_a}, {to: plan_b}]
+          plan_a: {command: "echo plan a"}
+          plan_b: {command: "echo plan b"}
+          implement:
+            needs: [plan_a, plan_b]
+            access: edit
+            max_parallel: 1
+            for_each: "[plan_a.stdout] if plan_a else ([plan_b.stdout] if plan_b else [])"
+            instruction: "Build {{ item | trim }}"
+          check: {needs: [implement], command: "true", routes: [{to: classify, max: 1}, {to: end}]}
+        end: {output: {}}
+    """)
+    assert validate.check("routed.yaml").problems == []
+    assert cli.main(["run", "routed.yaml", "kind=b"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    # plan_b starts before implement, so it keeps its output, and implement's first pass has its item and the request
+    first, later = fake.sent[2:]
+    assert first.startswith(f"Build plan b\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag\n\n")
+    assert later.startswith("Build plan b\n\nWhen you're done")
+    assert sorted(p.name for p in (run.dir / "nodes" / "plan_b").iterdir()) == ["1", "2", "3"]
+
+
+def test_the_request_goes_to_the_first_pass_with_a_job_when_a_for_each_pass_has_no_items(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 4)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("fix.yaml", """
+        version: 1
+        name: fix
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {}}
+        nodes:
+          fix:
+            needs: [start]
+            access: edit
+            max_parallel: 1
+            for_each: "[check.stdout] if check else []"
+            instruction: "Fix {{ item | trim }}"
+          check: {needs: [fix], command: "echo broken", routes: [{to: fix, max: 1}, {to: end}]}
+        end: {output: {}}
+    """)
+    assert validate.check("fix.yaml").problems == []
+    assert cli.main(["run", "fix.yaml"]) == 0
+    run = only_run()
+    assert len(fake.sent) == 1
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    # The first pass of fix in the follow-up has no items, so the next pass, after check, gets the request
+    (sent,) = fake.sent[1:]
+    assert sent.startswith(f"Fix broken\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag\n\n")
+    assert sorted(p.name for p in (run.dir / "nodes" / "fix").iterdir()) == ["2", "4"]
+
+
 def test_a_follow_up_goes_to_the_first_agent_in_the_order_of_the_graph_and_says_when_it_never_ran(repo, monkeypatch, capsys):
     fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 4)])
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)

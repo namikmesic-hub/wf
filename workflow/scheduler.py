@@ -2,8 +2,7 @@
 
 Nothing here touches LangGraph, files or agents. state.Progress calls these
 from the graph's `schedule` node; validate.py uses Topology to reason about
-the graph before anything runs. Order says which nodes are certain to have
-finished at a point of a run, for validate.py and for a follow-up.
+the graph before anything runs.
 
 Topology is the graph: each node's `needs` and `routes`, in file order.
 Two kinds of edges lead from a node to the next ones:
@@ -20,7 +19,8 @@ The rules, in the order a run uses them:
 
 follow_up_targets() uses them to say where `wf continue` sends a follow-up
 request in a workflow without `follow_up`: to the agent node with `edit` or
-`full` access that a run starts first (first_starts).
+`full` access that a run starts first (first_starts). That follow-up keeps the
+outputs of the nodes that start before that node (started_before).
 """
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -151,85 +151,6 @@ def starts(topo: Topology, pending: Sequence[str], running: Iterable[str]) -> li
     return [pending[0]]
 
 
-# ---------- what a run is certain to have done ----------
-
-
-class Order:
-    """Which nodes are certain to have finished at a given point of a run. validate.py warns about a template
-    that reads another node without `{% if %}`, and a follow-up without `follow_up` keeps the outputs of the
-    nodes certain to have finished before its node (state.Progress.follow_up)."""
-
-    def __init__(self, topo: Topology):
-        self.topo = topo
-        self.route_sources: dict[str, list[str]] = {n: [] for n in topo.order}
-        for source in topo.order:
-            for route in topo.routes[source]:
-                for target in route.targets:
-                    if target != END and source not in self.route_sources[target]:
-                        self.route_sources[target].append(source)
-        # triggers: the nodes whose finishing can make a node pending
-        triggers = {n: set(topo.needs[n]) | set(self.route_sources[n]) for n in topo.order}
-        triggers[END] = {n for n in topo.order
-                         if any(END in r.targets for r in topo.routes[n]) or not (topo.routes[n] or topo.dependents.get(n))}
-        self.dominators = dominators([START, *topo.order, END], triggers, topo.reachable([START]) | {END})
-        self.predecessors: dict[str, set[str]] = {n: set() for n in (START, *topo.order)}
-        for node, successors in topo.successors.items():
-            for nxt in successors:
-                self.predecessors[nxt].add(node)
-        self._before: dict[str, set[str]] = {}
-
-    def before(self, node: str) -> set[str]:
-        """Nodes certain to have finished before `node` starts."""
-        if node not in self._before:
-            known = self.dominators[node] - {node}
-            self._before[node] = known | (self._ancestors(node) & self._certain(known, excluding=node))
-        return self._before[node]
-
-    def at_end(self) -> set[str]:
-        """Nodes certain to have run by the time end.output is computed."""
-        return self._certain(self.dominators[END] - {END}, excluding=None)
-
-    def _ancestors(self, node: str) -> set[str]:
-        seen, todo = set(), [node]
-        while todo:
-            for prev in self.predecessors.get(todo.pop(), ()):
-                if prev not in seen and prev != node:
-                    seen.add(prev)
-                    todo.append(prev)
-        return seen
-
-    def _certain(self, known: set[str], excluding: str | None) -> set[str]:
-        """`known` plus every node they're certain to make pending (a needs edge, or all of a node's routes)."""
-        done, changed = set(known), True
-        while changed:
-            changed = False
-            for node in self.topo.order:
-                if node in done or node == excluding:
-                    continue
-                by_needs = any(need in done for need in self.topo.needs[node])
-                by_routes = any(s in done and all(node in r.targets for r in self.topo.routes[s]) for s in self.route_sources[node])
-                if by_needs or by_routes:
-                    done.add(node)
-                    changed = True
-        return done
-
-
-def dominators(nodes: list[str], triggers: dict[str, set[str]], reached: set[str]) -> dict[str, set[str]]:
-    """Classic iterative dominators: d dominates n if every path from start to n passes through d."""
-    everything = set(nodes)
-    dominators = {n: set(everything) for n in nodes}
-    dominators[START] = {START}
-    changed = True
-    while changed:
-        changed = False
-        for node in nodes[1:]:
-            preds = [p for p in triggers.get(node, ()) if p in reached]
-            new = {node} | (set.intersection(*(dominators[p] for p in preds)) if preds else set())
-            if new != dominators[node]:
-                dominators[node], changed = new, True
-    return dominators
-
-
 # ---------- follow-ups ----------
 
 
@@ -264,3 +185,10 @@ def first_starts(topo: Topology) -> dict[str, int]:
             new = [n for n in topo.successors[node] if n in topo.needs and n not in found]
             pending = add_pending(topo, pending, new)
     return found
+
+
+def started_before(topo: Topology, node: str) -> set[str]:
+    """The nodes that the run of first_starts() starts in an earlier step than `node`. That run finishes each
+    of them before `node` starts, so on its first pass `node` finds their outputs."""
+    step = first_starts(topo)
+    return {other for other, at in step.items() if node in step and at < step[node]}

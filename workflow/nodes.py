@@ -43,9 +43,10 @@ passes before it both continued.
 
 In a follow-up (`wf continue`) of a workflow without `follow_up`, the node
 that takes the request (scheduler.follow_up_targets) finds it in a section of its
-own after its instruction, on its first pass in the follow-up. The section
-says whether an earlier pass of the node did the task. An instruction that
-reads `follow_up` itself gets no such section (state.Progress._adds_request).
+own after its instruction, on its first pass in the follow-up that has a job.
+The section says whether an earlier pass of the node did the task. An
+instruction that reads `follow_up` itself gets no such section
+(state.Progress._adds_request).
 
 An agent session tells events.jsonl what its attempt has used so far, in an
 `agent_usage` event, when that changed. It looks after each turn, and when the

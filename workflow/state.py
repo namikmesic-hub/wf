@@ -81,7 +81,7 @@ class RunState(TypedDict, total=False):
     limit_name: str | None  # ...and its name (limits.py)
     retry: bool  # set when `wf retry` continues a failed run
     output: dict | None  # the end output, once the run succeeded
-    follow_up: dict  # the latest request from `wf continue`: {request, number, limits, and pending or from and to}
+    follow_up: dict  # the latest request from `wf continue`: {request, number, limits, and pending or from, to, section_pass}
     inbox: Annotated[list[Finished], operator.add]  # results of the last step's jobs
 
 
@@ -207,10 +207,11 @@ class Progress:
     def follow_up(self, elapsed_s: float) -> None:
         """Take in the request that `wf continue` gave a run that succeeded: a new pass of the run, from the
         nodes that take the request (scheduler.follow_up_targets, which `to` keeps). Every node they can lead to
-        reads none until it runs again. Without `follow_up`, a node certain to have finished before the node that
-        takes the request starts (scheduler.Order) keeps its output. So that node finds what its template reads
-        without {% if %}, as on its first pass. The others keep their outputs. Routes count from zero again, the
-        limits count from `from`, and the next pass of a `session: continue` node continues its last session."""
+        reads none until it runs again. Without `follow_up`, a node that a run starts in an earlier step than the
+        node that takes the request (scheduler.started_before) keeps its output. So the node that takes the request
+        finds the outputs of its `needs` and of the routes before it, as on its first pass. The others keep their
+        outputs. Routes count from zero again, the limits count from `from`, and the next pass of a
+        `session: continue` node continues its last session."""
         targets, given = list(scheduler.follow_up_targets(self.wf, self.topo)), self.s["follow_up"]
         usage = self.s["usage"]
         self.s["follow_up"] = {**{k: v for k, v in given.items() if k != "pending"}, "to": targets,
@@ -219,8 +220,7 @@ class Progress:
         self.s["taken"] = {}
         again = self.topo.reachable(targets)
         if self.wf.follow_up is None:
-            order = scheduler.Order(self.topo)
-            again -= set().union(*(order.before(node) for node in targets))
+            again -= set().union(*(scheduler.started_before(self.topo, node) for node in targets))
         for node in again:
             self.s["outputs"].pop(node, None)
             self.s["errors"].pop(node, None)
@@ -318,14 +318,17 @@ class Progress:
             job["session"] = self.s["sessions"].get(node)
         if self._adds_request(node, active):
             job["follow_up_section"] = True
+            self.s["follow_up"]["section_pass"] = active["pass"]
         return job
 
     def _adds_request(self, node: str, active: dict) -> bool:
-        """Does wf add the follow-up request to the instruction of the node's pass? It does on the first pass in
-        a follow-up of the node that takes the request in a workflow without `follow_up`, when its instruction
-        doesn't read `follow_up` itself."""
+        """Does wf add the follow-up request to the instruction of the node's pass? In a workflow without
+        `follow_up`, it does for the node that takes the request, when its instruction doesn't read `follow_up`
+        itself. It does on the first pass of that node in the follow-up that has a job, and so not on a pass of
+        `for_each` with no items. Each job and attempt of that pass (`section_pass`) gets it."""
         given = self.s.get("follow_up") or {}
-        if self.wf.follow_up is not None or node not in given.get("to", ()) or active["vars"].get(node) is not None:
+        if (self.wf.follow_up is not None or node not in given.get("to", ())
+                or given.get("section_pass", active["pass"]) != active["pass"]):
             return False
         try:
             return not any(ref.name == "follow_up" for ref in templates.references(self.wf.nodes[node].instruction))
