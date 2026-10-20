@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_agent_sdk import ResultMessage, UserMessage
+from claude_agent_sdk import AssistantMessage, ResultMessage, ToolResultBlock, ToolUseBlock, UserMessage
 from fake_claude import FakeClaude
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, runner, schemas
@@ -352,4 +352,34 @@ def test_a_write_that_fails_after_the_turns_result_doesnt_leave_the_turn_waiting
         return status
 
     assert asyncio.run(drive()) == ("done", "")
+    assert session._held == []
+
+
+@pytest.mark.parametrize("ending, expected", [
+    ("submitted", ("done", "")),
+    ("failed", ("failed", "Claude Code: it broke")),
+])
+def test_a_result_that_ends_the_attempt_doesnt_wait_for_a_write_that_stalls(tmp_path, ending, expected):
+    session = ClaudeSession(spec(tmp_path))
+    session._working = session._repeats = True
+    session._client = _Stream(session, fail_after=60)  # the write never returns
+
+    async def drive():
+        writing = asyncio.get_running_loop().create_task(session.steer("Stop", "id-1"))
+        await asyncio.sleep(0.05)
+        out = session._client.out
+        if ending == "submitted":
+            out.put_nowait(AssistantMessage(content=[ToolUseBlock(id="call-1", name=TOOL, input={"summary": "hi"})],
+                                            model="fake"))
+            out.put_nowait(UserMessage(content=[ToolResultBlock(tool_use_id="call-1", content="ok", is_error=False)]))
+            out.put_nowait(_result())
+        else:
+            out.put_nowait(ResultMessage(subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
+                                         is_error=True, num_turns=1, session_id="s", result="it broke"))
+        status = await asyncio.wait_for(session._read("the prompt"), 2)
+        writing.cancel()
+        await asyncio.gather(writing, return_exceptions=True)
+        return status
+
+    assert asyncio.run(drive()) == expected
     assert session._held == []

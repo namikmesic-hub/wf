@@ -71,7 +71,10 @@ goes out with an id. With --replay-user-messages, Claude Code repeats each
 message with its id when it reads it, and then a message from `wf steer` counts
 as delivered. When a result comes while such a message is still unread, the
 adapter reads on to that message's turn. But if the agent already submitted
-its result, the session closes, and the message is dropped. Until Claude Code
+its result, the session closes, and the message is dropped. A result that ends
+the attempt (the agent submitted, or the turn failed) ends the turn at once,
+also while a message is still being written: steer.py then cuts off that
+write, and the message is unconfirmed. Until Claude Code
 has repeated a message in this session, steer() takes none, and the runner
 sends it as the next turn.
 """
@@ -352,9 +355,11 @@ class ClaudeSession:
                 if item.is_error and status == "done":
                     reason = item.result or ", ".join(item.errors or []) or item.subtype
                     status, message = ("unavailable" if _login_problem(item) else "failed"), f"Claude Code: {reason}"
+                if status != "done" or submitted:  # the attempt ends now: steer.py cuts off a write still going
+                    break
                 while self._writing:  # whether a message being written gets a turn of its own depends on the write
                     await self._written.wait()
-                if not self._held or status != "done" or submitted:
+                if not self._held:
                     break
                 # a message from wf steer came after the agent's last step: its own turn follows
         return status, message

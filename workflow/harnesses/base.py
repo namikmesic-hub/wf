@@ -46,6 +46,7 @@ How a turn ended:
   harness. The harness sets it for an error that a retry can clear, but not at once.
 """
 
+import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -164,8 +165,10 @@ def transcript(path: Path, kind: str, **data) -> None:
 
 def steered(spec: SessionSpec, ident: str, status: str, **more) -> None:
     """Record what became of a message from `wf steer`: a `steer` line in the transcript, and a
-    `steer` event."""
-    transcript(spec.log, "steer", id=ident, status=status, **more)
+    `steer` event. A line that can't be written (a full disk) is lost alone: the event still goes,
+    and neither the message nor the session fails."""
+    with contextlib.suppress(OSError):
+        transcript(spec.log, "steer", id=ident, status=status, **more)
     spec.emit({"event": "steer", "id": ident, "status": status, **more})
 
 

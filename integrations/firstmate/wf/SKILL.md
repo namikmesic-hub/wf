@@ -142,6 +142,11 @@ wf steer <run-id> <node> --item <index> --file <message.md>
   A `steer` event in `events.jsonl` says when the message was delivered, or why it was dropped.
   An `unconfirmed` event means that the harness may have the message, but wf can't tell whether the agent read it.
 
+`unconfirmed`
+: The attempt ended while the harness took the message.
+  The harness may have it, but wf can't tell whether the agent read it.
+  Do not send it again to the same attempt: that attempt has ended.
+
 no live session
 : Exit code 1, and nothing was sent.
   The reason says why: the node has no agent session open now, or the run isn't running.

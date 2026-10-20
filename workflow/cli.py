@@ -435,9 +435,10 @@ def _steer(args) -> int:
         print(f"wf steer: no live session for {path}: {answer['reason']}. Nothing was sent.", file=sys.stderr)
     else:
         where = f"{path} (attempt {answer['attempt']} on {answer['harness']})"
-        print(f"Delivered to {where}: the agent reads it at its next step." if answer["status"] == "delivered" else
-              f"Queued for {where}: the agent gets it at its next step, or as its next turn. The run's events.jsonl "
-              f"says when it does, or why it doesn't.")
+        print({"delivered": f"Delivered to {where}: the agent reads it at its next step.",
+               "queued": f"Queued for {where}: the agent gets it at its next step, or as its next turn. The run's "
+                         "events.jsonl says when it does, or why it doesn't.",
+               "unconfirmed": f"Unconfirmed for {where}: {answer.get('reason')}."}[answer["status"]])
     return 1 if answer["status"] == "none" else 0
 
 

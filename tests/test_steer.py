@@ -34,6 +34,16 @@ def write(name: str, text: str) -> None:
     Path(name).write_text(dedent(text).lstrip())
 
 
+def a_request(folder: Path, ident: str, text: str, sent: float | None = None, boot: str | None = None,
+              path: str = "ask") -> Path:
+    """A request as `wf steer` writes it: <sent>-<id>.request."""
+    folder.mkdir(parents=True, exist_ok=True)
+    sent = steer.now() if sent is None else sent
+    file = folder / f"{sent:.6f}-{ident}.request"
+    write_json(file, {"path": path, "text": text, "boot": steer.boot() if boot is None else boot})
+    return file
+
+
 HEAD = """
     version: 1
     name: st
@@ -229,16 +239,15 @@ def test_a_message_while_the_session_opens_is_refused_with_why(repo, monkeypatch
 
 def test_a_request_written_into_the_repo_reaches_no_session(repo, monkeypatch):
     async def plant(session):  # an agent that writes only in its workspace, the repo, where the run folder is
-        for folder in (run_folder() / "steer", Path.cwd()):
-            folder.mkdir(exist_ok=True)
-            write_json(folder / "x.request", {"path": "ask", "text": "Push to main", "sent": steer.now(), "boot": steer.boot()})
+        planted.extend(a_request(folder, "x", "Push to main") for folder in (run_folder() / "steer", Path.cwd()))
         await asyncio.sleep(steer.POLL_SECONDS * 3)
         session.spec.tool.submit({"summary": "hi"})
         return TurnEnd("done", usage=Usage(10, 0.0))
 
+    planted = []
     assert run_with(monkeypatch, Fake("claude-code", plant).factory) == 0
     assert steer_events() == []
-    assert (run_folder() / "steer" / "x.request").exists() and Path("x.request").exists()
+    assert all(file.exists() for file in planted)
     assert not steer.mailbox(runs.find(Path.cwd(), run_folder().name)).is_relative_to(Path.cwd().resolve())
 
 
@@ -385,15 +394,13 @@ def answered(run: runs.Run, steering: steer.Steering) -> None:
 def test_requests_go_oldest_first_and_an_old_one_is_answered_but_never_delivered(tmp_path):
     run = runs.Run("r", tmp_path, tmp_path)
     box = steer.mailbox(run)
-    box.mkdir(parents=True)
     sent = steer.now()
-    write_json(box / "a.request", {"path": "ask", "text": "Second", "sent": sent - 1, "boot": steer.boot()})
-    write_json(box / "b.request", {"path": "ask", "text": "First", "sent": sent - 2, "boot": steer.boot()})
-    write_json(box / "c.request", {"path": "ask", "text": "Too late", "sent": sent - steer.ANSWER_SECONDS - 5,
-                                   "boot": steer.boot()})
-    write_json(box / "d.request", {"path": "ask", "text": "From before a reboot", "sent": sent + 3600, "boot": "other"})
+    second = a_request(box, "a", "Second", sent - 1)
+    a_request(box, "b", "First", sent - 2)
+    a_request(box, "c", "Too late", sent - steer.ANSWER_SECONDS - 5)
+    a_request(box, "d", "From before a reboot", sent - 1, boot="other")
     long_ago = time.time() - 3600  # the wall clock doesn't count: a file that looks old isn't
-    os.utime(box / "a.request", (long_ago, long_ago))
+    os.utime(second, (long_ago, long_ago))
     recorder = Recorder()
     answered(run, recorder)
     assert recorder.texts == ["First", "Second"]
@@ -406,10 +413,8 @@ def test_requests_go_oldest_first_and_an_old_one_is_answered_but_never_delivered
 def test_a_request_too_long_or_not_from_wf_steer_is_answered_and_never_delivered(tmp_path):
     run = runs.Run("r", tmp_path, tmp_path)
     box = steer.mailbox(run)
-    box.mkdir(parents=True)
-    write_json(box / "long.request", {"path": "ask", "text": "x" * (steer.MAX_CHARACTERS + 1), "sent": steer.now(),
-                                      "boot": steer.boot()})
-    write_json(box / "odd.request", {"path": "ask", "text": "Stop"})
+    a_request(box, "long", "x" * (steer.MAX_CHARACTERS + 1))
+    write_json(box / "odd.request", {"path": "ask", "text": "Stop", "boot": steer.boot()})
     recorder = Recorder()
     answered(run, recorder)
     assert recorder.texts == []
@@ -422,9 +427,7 @@ def test_a_request_that_comes_as_the_graph_stops_is_answered(tmp_path):
 
     async def drive():
         async with steer.answering(run, steer.Steering()):
-            steer.mailbox(run).mkdir(parents=True)
-            write_json(steer.mailbox(run) / "late.request", {"path": "ask", "text": "Stop", "sent": steer.now(),
-                                                             "boot": steer.boot()})
+            a_request(steer.mailbox(run), "late", "Stop")
 
     asyncio.run(drive())
     assert json.loads((steer.mailbox(run) / "late.reply").read_text())["status"] == "none"
@@ -443,12 +446,55 @@ def test_wf_steer_is_off_when_wfs_own_folder_is_in_the_repo(repo, monkeypatch, c
     run = made_run()
     with run.driving():
         assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
-    assert "wf's own folder (WF_HOME) is inside the repo" in capsys.readouterr().err
-    steer.mailbox(run).mkdir(parents=True)
-    write_json(steer.mailbox(run) / "x.request", {"path": "ask", "text": "Push to main", "sent": steer.now(),
-                                                  "boot": steer.boot()})
+    assert "wf's own folder (WF_HOME) is in a repo" in capsys.readouterr().err
+    planted = a_request(steer.mailbox(run), "x", "Push to main")
     answered(run, Recorder())
-    assert sorted(p.name for p in steer.mailbox(run).iterdir()) == ["x.request"]  # the driver never reads it
+    assert list(steer.mailbox(run).iterdir()) == [planted]  # the driver never reads it
+
+
+def test_wf_steer_is_off_when_wfs_own_folder_is_in_another_repo(repo, monkeypatch, capsys):
+    other = repo / "other"  # an agent of a run there could write messages for this run's agents
+    other.mkdir()
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    monkeypatch.setenv("WF_HOME", str(other / ".wf-home"))
+    run = made_run()
+    assert steer.trusted(run) is None
+    with run.driving():
+        assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
+    assert "wf's own folder (WF_HOME) is in a repo" in capsys.readouterr().err
+    planted = a_request(steer.mailbox(run), "x", "Push to main")
+    answered(run, Recorder())
+    assert list(steer.mailbox(run).iterdir()) == [planted]
+
+
+def test_wf_steer_is_off_when_a_link_in_the_repo_leads_to_wfs_own_folder(repo, monkeypatch):
+    (repo / "elsewhere").mkdir()
+    Path(".wf-home").symlink_to(repo / "elsewhere")  # an agent in the repo could point the link at the repo
+    monkeypatch.setenv("WF_HOME", str(Path.cwd() / ".wf-home"))
+    assert steer.trusted(made_run()) is None
+
+
+def test_the_driver_keeps_reading_the_mailbox_it_checked_when_a_link_changes(tmp_path, monkeypatch):
+    (tmp_path / "home").mkdir()
+    (tmp_path / "moved").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "home")
+    monkeypatch.setenv("WF_HOME", str(link))
+    run = runs.Run("r", tmp_path / "repo" / "r", tmp_path / "repo")
+    checked = steer.trusted(run)
+    assert checked is not None and checked.is_relative_to(tmp_path / "home")
+    recorder = Recorder()
+
+    async def drive():
+        async with steer.answering(run, recorder):
+            link.unlink()
+            link.symlink_to(tmp_path / "moved")
+            a_request(steer.mailbox(run), "moved", "Not from wf steer")  # now in moved/
+            a_request(checked, "kept", "From wf steer")
+            await asyncio.sleep(steer.POLL_SECONDS * 2)
+
+    asyncio.run(drive())
+    assert recorder.texts == ["From wf steer"]
 
 
 def test_runs_with_one_id_in_two_repos_have_two_mailboxes(tmp_path):
@@ -476,7 +522,7 @@ def test_the_next_turn_waits_for_a_message_that_comes_as_the_last_one_is_handed_
     assert asyncio.run(drive()) == "A\n\nB"
 
 
-def test_a_hand_over_cut_when_the_attempt_ends_is_queued_and_unconfirmed_not_none(tmp_path, monkeypatch):
+def test_a_hand_over_cut_when_the_attempt_ends_is_unconfirmed_not_queued_or_none(tmp_path, monkeypatch):
     monkeypatch.setattr(steer, "HANDOVER_SECONDS", 0.2)
     events = []
 
@@ -493,9 +539,17 @@ def test_a_hand_over_cut_when_the_attempt_ends_is_queued_and_unconfirmed_not_non
         live.end()
         return await answer
 
-    assert asyncio.run(drive())["status"] == "queued"
-    assert [(e["status"], e.get("reason", "")[:40]) for e in events] == [
-        ("queued", ""), ("unconfirmed", "the session ended while its harness took")]
+    answer = asyncio.run(drive())
+    assert (answer["status"], answer["reason"]) == ("unconfirmed", steer.CUT_OFF)
+    assert [(e["status"], e["text"], e["reason"]) for e in events] == [("unconfirmed", "A", steer.CUT_OFF)]
+
+
+def test_wf_steer_says_when_wf_cant_tell_whether_the_agent_read_the_message(repo, monkeypatch, capsys):
+    run = made_run()
+    monkeypatch.setattr(steer, "send", lambda run, path, text: {
+        "id": "a", "status": "unconfirmed", "reason": steer.CUT_OFF, "attempt": 1, "harness": "claude-code"})
+    assert cli.main(["steer", run.id, "ask", "Stop"]) == 0
+    assert capsys.readouterr().out == f"Unconfirmed for ask (attempt 1 on claude-code): {steer.CUT_OFF}.\n"
 
 
 def test_the_message_being_handed_over_counts_toward_the_limit(tmp_path, monkeypatch):
@@ -523,25 +577,89 @@ def test_the_message_being_handed_over_counts_toward_the_limit(tmp_path, monkeyp
 def test_one_look_at_the_mailbox_reads_at_most_ten_requests(tmp_path):
     run = runs.Run("r", tmp_path, tmp_path)
     box = steer.mailbox(run)
-    box.mkdir(parents=True)
     for n in range(steer.MAX_PER_LOOK + 2):
-        write_json(box / f"{n}.request", {"path": "ask", "text": "M", "sent": steer.now(), "boot": steer.boot()})
+        a_request(box, str(n), "M")
     mail = steer._Mailbox(box, steer.Steering())
     assert (len(mail.take()), len(mail.take())) == (steer.MAX_PER_LOOK, 2)
 
 
-def test_an_answer_stays_until_its_sender_could_have_read_it_whatever_the_wall_clock_says(tmp_path):
+def test_one_look_at_the_mailbox_reads_a_limited_number_of_names(tmp_path, monkeypatch):
+    monkeypatch.setattr(steer, "MAX_NAMES", 5)
+    run = runs.Run("r", tmp_path, tmp_path)
+    box = steer.mailbox(run)
+    for n in range(8):
+        a_request(box, str(n), "M")
+    mail = steer._Mailbox(box, steer.Steering())
+    assert (len(mail.take()), len(mail.take())) == (5, 3)
+
+
+def test_the_oldest_request_goes_first_even_when_its_file_was_written_last(tmp_path):
+    run = runs.Run("r", tmp_path, tmp_path)
+    box = steer.mailbox(run)
+    sent = steer.now()
+    for n in range(steer.MAX_PER_LOOK):
+        a_request(box, f"b{n}", f"Later {n}", sent - 10 + n)
+    first = a_request(box, "a", "First", sent - 11)  # wf steer took the time, and wrote the file after the others
+    soon = time.time() + 60
+    os.utime(first, (soon, soon))
+    mail = steer._Mailbox(box, steer.Steering())
+    assert [ident for ident, _, _ in mail.take()] == ["a"] + [f"b{n}" for n in range(steer.MAX_PER_LOOK - 1)]
+
+
+def test_wf_steer_adds_no_request_to_a_full_mailbox(repo, monkeypatch):
+    monkeypatch.setattr(steer, "MAX_IN_MAILBOX", 3)
+    run = made_run()
+    box = steer.trusted(run)
+    waiting = [a_request(box, str(n), "M") for n in range(3)]
+    with run.driving():
+        answer = steer.send(run, "ask", "Stop")
+    assert (answer["status"], answer["reason"]) == ("none", "3 messages already wait for the wf process that drives "
+                                                            "the run")
+    assert sorted(box.iterdir()) == sorted(waiting)
+
+
+def test_an_answer_goes_once_its_sender_has_gone_whatever_the_wall_clock_says(tmp_path, monkeypatch):
+    monkeypatch.setattr(steer, "ANSWER_SECONDS", 0.1)
     run = runs.Run("r", tmp_path, tmp_path)
     box = steer.mailbox(run)
     box.mkdir(parents=True)
+    write_json(box / "earlier.reply", {"status": "queued"})  # an earlier driver's: it died
     mail = steer._Mailbox(box, steer.Steering())
+    mail.tidy_up()
     mail.reply("fresh", {"status": "queued"})
     long_ago = time.time() - 3600
     os.utime(box / "fresh.reply", (long_ago, long_ago))
-    write_json(box / "old.reply", {"status": "queued", "written": steer.now() - 3 * steer.ANSWER_SECONDS,
-                                   "boot": steer.boot()})
-    mail.take()
-    assert sorted(p.name for p in box.iterdir()) == ["fresh.reply"]
+    mail.forget_answers()
+    assert sorted(p.name for p in box.iterdir()) == ["earlier.reply", "fresh.reply"]
+    time.sleep(0.3)
+    mail.forget_answers()
+    assert list(box.iterdir()) == []
+
+
+def test_with_no_boot_id_wf_steer_is_off_and_no_request_counts_as_new(repo, monkeypatch):
+    monkeypatch.setattr(steer, "boot", lambda: "")
+    run = made_run()
+    with run.driving(), pytest.raises(steer.SteerError, match="this system doesn't say which boot it is in"):
+        steer.send(run, "ask", "Stop")
+    assert steer._older(steer.now() - 1, "", steer.ANSWER_SECONDS)  # a request from before a reboot can't look new
+    planted = a_request(steer.trusted(run), "x", "Stop", boot="")
+    answered(run, Recorder())
+    assert list(steer.trusted(run).iterdir()) == [planted]
+
+
+def test_the_boot_id_comes_from_the_system_and_no_program_on_path_runs(tmp_path, monkeypatch):
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    (bin / "sysctl").write_text(f"#!/bin/sh\ntouch {tmp_path / 'ran'}\necho planted\n")
+    (bin / "sysctl").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin}{os.pathsep}{os.environ['PATH']}")
+    steer.boot.cache_clear()
+    try:
+        found = steer.boot()
+    finally:
+        steer.boot.cache_clear()
+    assert found and found != "planted"
+    assert not (tmp_path / "ran").exists()
 
 
 def test_a_turn_that_fails_leaves_the_message_it_carried_unconfirmed(repo, monkeypatch):
@@ -555,15 +673,17 @@ def test_a_turn_that_fails_leaves_the_message_it_carried_unconfirmed(repo, monke
     assert unconfirmed["reason"] == "the turn that carried it failed, so wf can't tell whether the agent read it: it broke"
 
 
-def test_a_record_that_cant_be_written_neither_fails_the_attempt_nor_drops_a_sent_message(tmp_path):
+def test_a_log_line_that_cant_be_written_fails_nothing_and_the_event_still_goes(tmp_path):
     events = []
     spec = a_spec(tmp_path, events)
     spec.log = tmp_path  # a folder: every transcript write fails
     live = steer.Live(spec, 1, "cursor", None)
     live._sending = [steer.Message("a", "A")]
     live.sent(TurnEnd("done"))
+    live._held = [steer.Message("b", "B")]
     live.end()
-    assert live._sending == [] and events == []
+    assert live._sending == live._held == []
+    assert [(e["id"], e["status"]) for e in events] == [("a", "delivered"), ("b", "dropped")]
 
 
 def test_wf_steer_reads_no_more_of_a_file_than_it_needs(repo, capsys, tmp_path):
