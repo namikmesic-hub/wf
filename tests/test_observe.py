@@ -1,5 +1,6 @@
 """Watching runs: the agent sessions that run now (wf sessions), and the event stream (wf watch)."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -11,8 +12,9 @@ from textwrap import dedent
 
 import pytest
 
-from fakes import Fake, hang, submit
-from workflow import cli, harnesses, observe, runner, runs
+from fakes import Fake, hang, submit, talk
+from workflow import cli, harnesses, nodes, observe, runner, runs
+from workflow.harnesses.base import TurnEnd, Usage
 from workflow.runs import Run
 
 HELD_AGENT = Path(__file__).parent / "held_agent.py"
@@ -70,6 +72,28 @@ def test_each_session_starts_and_ends_with_an_event(repo, monkeypatch):
         "log": "nodes/work/1/attempt-1.log", "pid": os.getpid()}
     kinds = [e["event"] for e in events]
     assert kinds.index("session_started") < kinds.index("agent_tool") < kinds.index("session_ended") < kinds.index("node_finished")
+
+
+def test_a_session_tells_what_its_attempt_has_used_so_far_while_and_after_each_turn_runs(repo, monkeypatch):
+    async def long_turn(session):
+        session.pending = Usage(300, 0.03)  # what the harness has reported of the turn so far
+        await asyncio.sleep(0.3)
+        session.pending = Usage()
+        session.spec.tool.submit({"summary": "done"})
+        return TurnEnd("done", usage=Usage(500, 0.05))
+
+    fake = Fake("claude-code", talk(tokens=100, cost=0.01), long_turn)
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    monkeypatch.setattr(nodes, "USAGE_SECONDS", 0.05)
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    assert cli.main(["run", "flow.yaml"]) == 0
+    events = [json.loads(line) for line in (only_run().dir / "events.jsonl").read_text().splitlines()]
+    told = [e for e in events if e["event"] == "agent_usage"]
+    assert [(e["tokens"], e["cost_usd"]) for e in told] == [(100, 0.01), (400, 0.04), (600, 0.06)]
+    assert {(e["node"], e["pass"], e["attempt"], e["harness"]) for e in told} == {("work", 1, 1, "claude-code")}
+    kinds = [e["event"] for e in events]
+    assert kinds.index("session_started") < kinds.index("agent_usage")
+    assert max(n for n, kind in enumerate(kinds) if kind == "agent_usage") < kinds.index("session_ended")
 
 
 def test_a_session_inside_a_sub_workflow_names_its_transcript_from_the_run_folder(repo, monkeypatch):
