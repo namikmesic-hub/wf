@@ -48,9 +48,13 @@ A frame longer than MAX_FRAME never goes: a tool's answer that big becomes an er
 agent, and a turn whose text is that big fails.
 
 Usage: turn.ended carries the turn's usage object. Usage.tokens is its total_tokens, and
-Usage.cost_usd its cost_usd, 0 when the runtime reports no dollars yet. turn.usage events tell
-pending_usage() what a turn used so far, so a turn that a timeout cuts off still counts. When
-close() cancels such a turn, what its turn.ended reports beyond that is late_usage().
+Usage.cost_usd its cost_usd, 0 when the runtime reports no dollars yet. The object's
+input_tokens, cached_input_tokens (cache reads), cache_write_tokens and output_tokens are the
+parts of total_tokens, as Cursor's SDK counts them. Its reasoning_tokens is a part of
+output_tokens. Usage keeps all five, with cached_input_tokens as cache_read_tokens. turn.usage
+events tell pending_usage() what a turn used so far, so a turn that a timeout cuts off still
+counts. When close() cancels such a turn, what its turn.ended reports beyond that is
+late_usage().
 
 A turn's kind, for turn.started: the first is the instruction. The runner sends only reminders
 (output_tool.REMINDER) and messages from `wf steer` after it, so the others are told apart by text.
@@ -396,7 +400,14 @@ def tools(spec: SessionSpec, file_tools: bool = False) -> list[dict]:
 def usage(data: object) -> Usage:
     """wf's Usage for the protocol's usage object."""
     data = data if isinstance(data, dict) else {}
-    return Usage(tokens=int(data.get("total_tokens") or 0), cost_usd=float(data.get("cost_usd") or 0))
+
+    def count(key: str) -> int:
+        return int(data.get(key) or 0)
+
+    return Usage(tokens=count("total_tokens"), cost_usd=float(data.get("cost_usd") or 0),
+                 input_tokens=count("input_tokens"), output_tokens=count("output_tokens"),
+                 cache_read_tokens=count("cached_input_tokens"), cache_write_tokens=count("cache_write_tokens"),
+                 reasoning_tokens=count("reasoning_tokens"))
 
 
 class RemoteSession:
@@ -626,8 +637,7 @@ class RemoteSession:
                 self._steer_status(data)
             elif kind == "turn.ended" and event.get("turn") == self.turn:
                 transcript(self.spec.log, "turn", status=data.get("status"), usage=data.get("usage"))
-                final = usage(data.get("usage"))
-                self.late = Usage(max(final.tokens - counted.tokens, 0), max(final.cost_usd - counted.cost_usd, 0.0))
+                self.late = usage(data.get("usage")).beyond(counted)
                 self.turn = None
                 return
 

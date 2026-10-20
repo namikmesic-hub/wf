@@ -6,14 +6,15 @@ sessions showed:
 - it reads a message that comes while a turn runs at the turn's next step, after a tool's result.
 - a message still unread when the turn ends starts a turn of its own, with a result of its own.
 
-    fake = FakeClaude(folder, *turns)
+    fake = FakeClaude(folder, *turns, usage={...})
     fake.install(monkeypatch)        claude_code.options hands the client the SessionSpec itself
 
 Each turn is a list of actions:
     {"tool": "Read"}                 a step: a tool call and its result
     {"submit": {...}}                a step that calls submit_result with these arguments
     {"pause": "p"}                   write <folder>/p.paused, and wait until <folder>/p.go is there
-Every turn ends with a ResultMessage. `fake.read` lists the user messages it read, in order.
+Every turn ends with a ResultMessage, whose usage is `usage` (by default 100 input and 10 output
+tokens). `fake.read` lists the user messages it read, in order.
 """
 
 import asyncio
@@ -27,10 +28,11 @@ from workflow.harnesses import claude_code
 
 
 class FakeClaude:
-    def __init__(self, folder: Path, *turns: list[dict]):
+    def __init__(self, folder: Path, *turns: list[dict], usage: dict | None = None):
         self.folder, self.turns = folder, list(turns)
         self.read: list[str] = []
         self.cost = 0.0  # the session's running total, as Claude Code reports it
+        self.usage = usage or {"input_tokens": 100, "output_tokens": 10}
 
     def install(self, monkeypatch) -> None:
         monkeypatch.setattr(claude_code, "options", lambda spec: spec)
@@ -77,7 +79,7 @@ class _Client:
             self.fake.cost += 0.01
             self.out.put_nowait(ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
                                               num_turns=1, session_id="fake-session", total_cost_usd=self.fake.cost,
-                                              usage={"input_tokens": 100, "output_tokens": 10}))
+                                              usage=self.fake.usage))
 
     def _read(self, message: dict) -> None:
         text = message["message"]["content"]

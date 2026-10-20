@@ -112,7 +112,8 @@ def test_a_runs_trace_holds_each_kind_of_record_and_its_ids_nest(repo, monkeypat
     (attempt,) = of("attempt_end", id="plan#1.a1")
     assert {k: attempt[k] for k in ("harness", "model", "effort", "access", "web", "outcome", "usage")} == {
         "harness": "claude-code", "model": "opus", "effort": "high", "access": "read-only", "web": False,
-        "outcome": "succeeded", "usage": {"tokens": 200, "cost_usd": 0.02}}
+        "outcome": "succeeded", "usage": {"tokens": 200, "cost_usd": 0.02, "input_tokens": 0, "output_tokens": 0,
+                                          "cache_read_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}}
     assert attempt["session"] == {"start": "fresh", "id": "session-1"}
     assert attempt["workspace"]["path"] == str(repo.resolve())
     assert attempt["started"] <= attempt["ended"]

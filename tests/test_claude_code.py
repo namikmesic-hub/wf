@@ -15,7 +15,7 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, ToolResultBlock, T
 from fake_claude import FakeClaude
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, runner, schemas, steer
-from workflow.harnesses.base import SessionSpec, Unavailable
+from workflow.harnesses.base import SessionSpec, Unavailable, Usage
 from workflow.harnesses.claude_code import GIT, REPLAY, TOOL, ClaudeCode, ClaudeSession, options
 from workflow.output_tool import FINISH, ResultTool, REMINDER
 
@@ -174,6 +174,23 @@ def test_a_message_after_the_last_step_gets_a_turn_of_its_own_and_no_reminder_go
     assert len(results) == 2  # one send() read both turns' results
     out = json.loads((folder / "output.json").read_text())
     assert (out["tokens"], round(out["cost"], 6)) == (220, 0.02)  # and counted both
+
+
+def trace(kind: str) -> list[dict]:
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    return [r for r in map(json.loads, (folder / "trace.jsonl").read_text().splitlines()) if r["kind"] == kind]
+
+
+def test_the_trace_keeps_the_parts_of_the_tokens_and_the_thinking_that_each_result_reports(repo, monkeypatch):
+    counts = {"input_tokens": 2, "cache_creation_input_tokens": 33476, "cache_read_input_tokens": 1200, "output_tokens": 271,
+              "output_tokens_details": {"thinking_tokens": 186}}
+    FakeClaude(repo, [{"tool": "Read"}], [GOOD], usage=counts).install(monkeypatch)  # a reminder: two turns
+    assert run_flow() == 0
+    each = {"tokens": 34949, "cost_usd": 0.01, "input_tokens": 2, "output_tokens": 271, "cache_read_tokens": 1200,
+            "cache_write_tokens": 33476, "reasoning_tokens": 186}
+    assert [r["usage"] for r in trace("turn_end")] == [pytest.approx(each), pytest.approx(each)]
+    (attempt,) = trace("attempt_end")
+    assert attempt["usage"] == pytest.approx({name: 2 * value for name, value in each.items()})
 
 
 class _Writer:
@@ -441,4 +458,4 @@ def test_a_turn_cut_off_after_a_message_from_wf_steer_still_counts_the_result_be
         return session.pending_usage()
 
     usage = asyncio.run(drive())
-    assert (usage.tokens, usage.cost_usd) == (160, 0.01)
+    assert usage == Usage(160, 0.01, input_tokens=150, output_tokens=10)  # and the parts of both

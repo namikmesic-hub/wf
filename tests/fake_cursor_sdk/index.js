@@ -29,7 +29,8 @@ import { dirname, join } from "node:path";
 const SCENARIO = JSON.parse(readFileSync(process.env.FAKE_CURSOR_SDK_SCENARIO, "utf8"));
 const LOG = process.env.FAKE_CURSOR_SDK_LOG;
 const KEY = SCENARIO.key ?? "key_test";
-const USAGE = { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 600, cacheWriteTokens: 0, totalTokens: 1200 };
+// As the SDK's toTokenUsage() makes it, totalTokens adds up the input, output and cache counts.
+const USAGE = { inputTokens: 400, outputTokens: 200, cacheReadTokens: 600, cacheWriteTokens: 0, totalTokens: 1200 };
 
 function log(kind, data = {}) {
   appendFileSync(LOG, JSON.stringify({ kind, data }) + "\n");

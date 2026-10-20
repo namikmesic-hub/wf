@@ -20,11 +20,12 @@ It is in the top-level run folder, and sub-workflows write to it too:
     tool_call      the agent calls a tool          the tool and its arguments
     tool_result    the tool answers                the answer, and if it is an error
     submit_result  the agent calls submit_result   the arguments, and the problems or "accepted"
-    turn_end       the agent's turn ends           how it ended, and what it used
+    turn_end       the agent's turn ends           how it ended, and what it used: the tokens, the
+                                                   cost, and the parts of the tokens (harnesses.Usage)
     attempt_end    the attempt ends                all of `attempt`, the session id, start, end,
-                                                   how it ended and what it used. For a command:
-                                                   its text, env, exit code, and the files that
-                                                   hold its stdout and stderr
+                                                   how it ended and what it used, as in turn_end.
+                                                   For a command: its text, env, exit code, and
+                                                   the files that hold its stdout and stderr
     job_end        the job ends                    its output or error (or that it waits for a person)
     run_stopped    the process stops driving it    the run's status, and its output once it succeeds
 
@@ -70,7 +71,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -525,7 +526,7 @@ class Attempt:
             self._write("turn_end", turn, self.id, status=ended, message=f"{type(error).__name__}: {error}".rstrip(": "))
             raise
         self._write("turn_end", turn, self.id, status=end.status, **({"message": end.message} if end.message else {}),
-                    usage={"tokens": end.usage.tokens, "cost_usd": end.usage.cost_usd})
+                    usage=asdict(end.usage))
         return end
 
     # ----- harnesses.Recorder: what the adapter saw -----

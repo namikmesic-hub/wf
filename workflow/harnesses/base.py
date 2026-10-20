@@ -49,7 +49,7 @@ How a turn ended:
 import contextlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -61,12 +61,25 @@ if TYPE_CHECKING:  # tools/relay.py loads the MCP client, which only runs that u
 
 @dataclass
 class Usage:
+    """What a turn or an attempt used. input_tokens, cache_read_tokens, cache_write_tokens and
+    output_tokens are the parts of tokens. A count that the harness doesn't report is 0."""
+
     tokens: int = 0  # input + output, cached input included, as the harness reports them
     cost_usd: float = 0.0  # 0 when the harness doesn't report dollars
+    input_tokens: int = 0  # the input that the prompt cache didn't read or write
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0  # the part of output_tokens that the model used to reason
 
     def add(self, other: "Usage") -> None:
-        self.tokens += other.tokens
-        self.cost_usd += other.cost_usd
+        for count in fields(self):
+            setattr(self, count.name, getattr(self, count.name) + getattr(other, count.name))
+
+    def beyond(self, before: "Usage") -> "Usage":
+        """What this has used after `before`, count by count, and none where `before` has more."""
+        return Usage(**{count.name: max(getattr(self, count.name) - getattr(before, count.name), count.default)
+                        for count in fields(self)})
 
 
 class Recorder:

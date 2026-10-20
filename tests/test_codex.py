@@ -158,6 +158,32 @@ def test_a_forked_thread_counts_only_its_own_tokens(repo, monkeypatch):
     assert output() == {"tokens": 1300}  # not 2300: the fork inherits the first pass's 1000
 
 
+def trace(kind: str) -> list[dict]:
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    return [r for r in map(json.loads, (folder / "trace.jsonl").read_text().splitlines()) if r["kind"] == kind]
+
+
+RESPONSE = {"inputTokens": 1000, "cachedInputTokens": 600, "cacheWriteInputTokens": 100, "outputTokens": 200,
+            "reasoningOutputTokens": 80}
+PARTS = {"tokens": 1200, "cost_usd": 0.0, "input_tokens": 300, "output_tokens": 200, "cache_read_tokens": 600,
+         "cache_write_tokens": 100, "reasoning_tokens": 80}  # one RESPONSE: its input less what the cache read and wrote
+
+
+def test_the_trace_keeps_the_parts_of_each_turns_tokens(repo, monkeypatch):
+    codex(monkeypatch, repo, [{"tokens": RESPONSE}, {"tokens": RESPONSE}], [{"tokens": RESPONSE}, GOOD])
+    assert run() == 0
+    first, second = (r["usage"] for r in trace("turn_end"))
+    assert (first, second) == ({name: 2 * value for name, value in PARTS.items()}, PARTS)
+    (attempt,) = trace("attempt_end")
+    assert attempt["usage"] == {name: 3 * value for name, value in PARTS.items()}
+
+
+def test_a_forked_thread_counts_only_its_own_parts_of_the_tokens(repo, monkeypatch):
+    codex(monkeypatch, repo, [{"tokens": RESPONSE}, GOOD], [{"tokens": RESPONSE}, GOOD])
+    assert run("session: continue\nroutes: [{to: ask, max: 1}, {to: end}]\n") == 0
+    assert [r["usage"] for r in trace("attempt_end")] == [PARTS, PARTS]  # the fork's thread holds both passes' counts
+
+
 def test_approval_requests_are_declined(repo, monkeypatch):
     log = codex(monkeypatch, repo, [{"approval": "item/commandExecution/requestApproval"},
                                     {"approval": "item/fileChange/requestApproval"},
