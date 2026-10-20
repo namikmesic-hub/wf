@@ -20,7 +20,10 @@ Agents can also read Slack, Granola, Linear, Notion and Gmail through tools that
 
 ## Install
 
-Needs Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code, Codex or Cursor (`cursor-agent`) logged in.
+Needs Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code, Codex or Cursor set up.
+Cursor runs through Cursor's SDK, so it needs Node.js 22.18 or later and a Cursor API key (`wf runtimes cursor signin`).
+Its `edit` steps run through `cursor-agent`, logged in.
+Until a key is set, all its steps run through `cursor-agent`, and each run warns once.
 
 ```sh
 uv tool install --editable .
@@ -38,9 +41,9 @@ wf trace <run-id> --var review.blocking_issues   # what one run's templates read
 ```
 
 `wf steer <run-id> <node> <message>` tells an agent something while it works.
-Claude Code and Codex agents read it at their next step.
-Cursor can't take a message during a turn.
-wf keeps it for the next turn, and drops it when the agent submits its result first, which is common.
+Claude Code and Codex agents read it at their next step, and so does Cursor when its SDK takes the message.
+When an agent can't take it during a turn, wf keeps it for the next turn.
+wf drops it when the agent submits its result first, which is common.
 
 `wf run <file> --dry-run <script.yaml>` walks a workflow with scripted agent
 results, for free. `wf --help` lists every command.
@@ -117,5 +120,8 @@ Tools attach to sessions on all three.
 uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
+
+The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.
+The host has its own TypeScript checks: `npm ci && npm run check && npm test` in `workflow/harnesses/cursor_host`.
 
 The tests need git 2.34 or later: they hide your own git config with `GIT_CONFIG_GLOBAL` (2.32), and sign with ssh keys (2.34).

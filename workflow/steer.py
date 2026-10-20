@@ -354,6 +354,7 @@ class Live:
         self._idle = asyncio.Event()  # no message is waiting or being handed over
         self._idle.set()
         self._held: list[Message] = []  # for the next turn
+        self._order: dict[str, int] = {}  # message id -> its place among the messages that came, for the next turn
         self._sending: list[Message] = []  # in the turn that is running
         self._serving: asyncio.Task | None = None
 
@@ -366,6 +367,7 @@ class Live:
         if self._inbox.qsize() + len(self._held) + handing >= MAX_WAITING:
             return {"status": "none", "reason": f"{MAX_WAITING} messages already wait for this session"}
         answer = asyncio.get_running_loop().create_future()
+        self._order.setdefault(message.id, len(self._order))
         self._idle.clear()
         self._inbox.put_nowait((message, answer))
         outcome = await answer
@@ -401,12 +403,16 @@ class Live:
         steered(self.spec, message.id, status or "queued", text=message.text, **why)
 
     async def next_turn(self) -> str | None:
-        """The text of the messages kept for the next turn, or None. A message being handed over goes
-        first: if the harness can't take it, it's in this turn too."""
+        """The text of the messages kept for the next turn, in the order they came, or None. A message
+        being handed over goes first: if the harness can't take it, it's in this turn too."""
         while not self._idle.is_set():  # another message can come between the wake-up and this check
             await self._idle.wait()
+        given_back = getattr(self.session, "given_back", None)  # messages it took as queued, and gave back later
+        if given_back is not None:
+            self._held += [Message(ident, text) for ident, text in given_back()]
         if not self._held:
             return None
+        self._held.sort(key=lambda message: self._order.get(message.id, 0))  # a later correction stays last
         self._sending, self._held = self._held, []
         return "\n\n".join(message.text for message in self._sending)
 

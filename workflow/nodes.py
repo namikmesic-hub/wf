@@ -98,6 +98,7 @@ import codecs
 import contextvars
 import json
 import os
+import re
 import signal
 import threading
 import time
@@ -114,13 +115,16 @@ from langgraph.types import interrupt
 from . import capacity, dryrun, output_tool, overrides, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
-from .harnesses import SessionSpec, Unavailable, Usage, reaches_keychain
+from .harnesses import SessionSpec, StartFailed, Unavailable, Usage, reaches_keychain
 from .spec import seconds
 from .state import Finished, Job
 from .trace import HIDDEN, Attempt
 
 TAIL = 20_000  # characters of stdout and stderr kept in a command's output
 USAGE_SECONDS = 30  # how often a turn that runs says what its attempt has used so far
+NAMED_PATH = re.compile(r"(?<![\w.~:/-])~?/[^\s'\"`<>()\[\]{}|,;*]+")  # an absolute or ~/ path in a text
+QUOTED_PATH = re.compile(r"""(["'`])(~?/(?:(?!\1).)+)\1""")  # one in quotes, which may hold spaces
+LINES_AFTER = re.compile(r":\d+(?:[-:]\d+)*$")  # nodes.py:641, nodes.py:641-655, nodes.py:641:4
 
 
 class _Failed(Exception):
@@ -417,6 +421,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
     fresh = render(False)
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
+    readable = _named_paths(fresh, ctx, variables, workspace)
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
     target, override = ctx.override(node_id, job["index"]) or (None, {})
     render_setting = partial(ctx.trace.render, job)  # the trace records how the harness, model and effort render
@@ -481,11 +486,14 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             tools=tools,
             only_wf_tools=listed is not None,
             project_instructions=wf.setting(node_id, "project_instructions"),
+            read_roots=list(readable),
             trace=record,
         )
         with ctx.steering.opening(spec.where, number, name):
             try:
                 session = await agent.session(spec)
+            except StartFailed as error:
+                raise _AttemptFailed(str(error), error.retry_after) from error
             except Unavailable as error:
                 if source is None:
                     raise _Unavailable(str(error)) from error
@@ -495,9 +503,13 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                 source, spec = None, replace(spec, fork_from=None, prior_cost_usd=0.0)  # the fork failed: start fresh
                 try:
                     session = await agent.session(spec)
+                except StartFailed as error:
+                    raise _AttemptFailed(str(error), error.retry_after) from error
                 except Unavailable as error:
                     raise _Unavailable(str(error)) from error
         instruction = render(True) if source else fresh
+        spec.read_roots.extend(path for path in _named_paths(instruction, ctx, variables, workspace)
+                               if path not in spec.read_roots)  # what a continued pass's own text names
         if source:
             emit({"event": "session_continued", **_label(job), "attempt": number})
             (folder / "instruction.md").write_text(instruction, encoding="utf-8")
@@ -562,10 +574,15 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             ctx.add_usage(cut_off)
             tell_usage()
             session_facts["id"] = session.id
-            record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
             try:
                 await session.close()
             finally:
+                late = session.late_usage() if hasattr(session, "late_usage") else Usage()  # reported as it closed
+                usage.add(late)
+                spent.add(late)
+                ctx.add_usage(late)
+                tell_usage()
+                record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
                 spec.emit({"event": "session_ended"})
 
     result, number = await _attempts(job, ctx, emit, attempt, names,
@@ -650,6 +667,55 @@ async def _start_commit(ctx: RunContext, folder: Path, workspace: dict) -> tuple
     commit = await _git(ctx, workspaces.head, workspace["path"])
     record.write_text(commit + "\n", encoding="utf-8")
     return commit, False
+
+
+def _named_paths(instruction: str, ctx: RunContext, variables: dict, workspace: dict) -> list[Path]:
+    """What an instruction names, which a harness whose agent reads files only through wf's tools
+    lets it read too (files_tool.py). That is wf's folders: the run folder, the run's repo, and
+    other nodes' workspaces, as the `run` and `workspace` variables give them. It is also each
+    other file or folder that the text names by an absolute or ~/ path, such as a report to read.
+    A path in quotes may hold spaces. The home folder and the folders above it stay out, so that a
+    search can't walk every app's data."""
+    found = [str(ctx.run_info["dir"]), str(ctx.run_info["repo"])]
+    for value in (variables.get("workspace") or {}).values():
+        for one in value if isinstance(value, list) else [value]:
+            if isinstance(one, dict) and isinstance(one.get("path"), str):
+                found.append(one["path"])
+    own, text, named = Path(workspace["path"]).resolve(), instruction, set()
+    for path in sorted(set(filter(None, found)), key=len, reverse=True):  # the run folder can be inside the repo
+        if path in text:
+            named.add(path)
+            text = text.replace(path, "\0")  # so a folder above it isn't named by the same text
+    readable = [Path(path) for path in dict.fromkeys(found) if path in named and Path(path).resolve() != own]
+    home, inside = Path.home().resolve(), [own, *(path.resolve() for path in readable)]
+    for path in _paths_in(instruction):
+        if home.is_relative_to(path.resolve()):
+            continue
+        if not any(path.resolve().is_relative_to(folder) for folder in inside):
+            readable.append(path)
+            inside.append(path.resolve())
+    return readable
+
+
+def _paths_in(text: str) -> list[Path]:
+    """The files and folders that a text names by an absolute or ~/ path and that exist, in order.
+    A path in quotes that exists is read whole, so no path in it counts on its own."""
+    found, quoted = [], []
+    for match in QUOTED_PATH.finditer(text):
+        if path := _existing(match.group(2)):
+            found.append((match.start(), path))
+            quoted.append(match.span())
+    for match in NAMED_PATH.finditer(text):
+        if not any(start < match.start() < end for start, end in quoted):
+            if path := _existing(match.group().rstrip(".:!?")):
+                found.append((match.start(), path))
+    return [path for _, path in sorted(found, key=lambda one: one[0])]
+
+
+def _existing(given: str) -> Path | None:
+    """The path that a text gives, with the line numbers after it or without them, when it exists."""
+    given = os.path.expanduser(given)
+    return next((Path(one) for one in (given, LINES_AFTER.sub("", given)) if os.path.exists(one)), None)
 
 
 def _continue_from(previous: dict | None, harness: str, model: str | None) -> tuple[dict | None, str | None]:

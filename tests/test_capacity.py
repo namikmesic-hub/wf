@@ -184,10 +184,10 @@ def test_another_setting_in_the_config_leaves_the_cap_alone(monkeypatch, wf_home
     (None, "max_agents:\n", "must be a whole number of 1 or more, not `null`"),
     (None, "max_agents: null\n", "must be a whole number of 1 or more, not `null`"),
     (None, 'max_agents: "4"\n', 'must be a whole number of 1 or more, not `"4"`'),
-    ("2", "max_agent: 4\n", "unknown setting max_agent (known: max_agents)"),  # checked though the variable wins
+    ("2", "max_agent: 4\n", "unknown setting max_agent (known: max_agents, cursor_runtime, cursor_api_key_file)"),  # checked though the variable wins
     ("2", "max_agents: 0\n", "max_agents in"),
     (None, "max_agents: 2.5\n", "must be a whole number of 1 or more, not `2.5`"),
-    (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents)"),
+    (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents, cursor_runtime, cursor_api_key_file)"),
     (None, "- 4\n", "must hold settings by name"),
 ])
 def test_a_bad_cap_stops_wf_run_before_the_run_exists(repo, monkeypatch, capsys, wf_home, env, config, problem):
@@ -202,7 +202,7 @@ def test_a_bad_cap_stops_wf_run_before_the_run_exists(repo, monkeypatch, capsys,
 
 @pytest.mark.parametrize("env, config, problem", [
     ("0", None, "wf retry: WF_MAX_AGENTS must be a whole number of 1 or more, not `0`"),
-    (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents)"),
+    (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents, cursor_runtime, cursor_api_key_file)"),
 ])
 def test_a_bad_cap_stops_wf_retry(repo, monkeypatch, capsys, wf_home, env, config, problem):
     assert cli.main(["run", failing_flow()]) == 1

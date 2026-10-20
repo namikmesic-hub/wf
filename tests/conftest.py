@@ -55,3 +55,14 @@ def fake_keyring():
     keyring.set_keyring(fake)
     yield fake
     keyring.set_keyring(previous)
+
+
+@pytest.fixture(scope="session")
+def cursor_host(tmp_path_factory):
+    """A copy of the Cursor host with the fake Cursor SDK beside it (tests/cursor_sdk.py)."""
+    from cursor_sdk import host_copy
+
+    return host_copy(tmp_path_factory.mktemp("cursor-host"))
+
+
+from cursor_sdk import live_key  # noqa: E402,F401  (a fixture of the opt-in Cursor tests)

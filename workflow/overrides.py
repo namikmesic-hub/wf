@@ -180,6 +180,7 @@ class Checked:
     found: dict[str, dict] = field(default_factory=dict)  # the overrides to keep, by target, each with its harness
     problems: list[str] = field(default_factory=list)
     models: dict[str, set[str]] = field(default_factory=dict)  # by target: the models that available() checks
+    access: dict[str, str] = field(default_factory=dict)  # by target: its node's access level, which can decide the runtime
 
 
 def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: dict) -> Checked:
@@ -201,6 +202,7 @@ def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: d
             checked.problems.append(problem)
             continue
         checked.found[key], checked.models[key] = override, models
+        checked.access[key] = workflow.setting(node_id, "access")
     return checked
 
 
@@ -340,7 +342,7 @@ async def available(checked: Checked) -> list[str]:
     problems = []
     try:
         for name, keys in by_harness.items():
-            problems += await _open(name, keys, checked.models, folder)
+            problems += await _open(name, keys, checked.models, checked.access, folder)
     finally:
         problems += [problem for made in (folder, workspaces.temp_root(folder.name)) if (problem := _remove(made))]
     return problems
@@ -356,15 +358,18 @@ def _remove(folder: Path) -> str | None:
     return None
 
 
-async def _open(name: str, keys: list[str], models: dict[str, set[str]], folder: Path) -> list[str]:
+async def _open(name: str, keys: list[str], models: dict[str, set[str]], access: dict[str, str],
+                folder: Path) -> list[str]:
+    """Open the harness, and check each target's models on it at the target's access level. A target
+    whose model wf can't tell yet is checked with none, which asks whether the harness can run at all."""
     problems, harness = [], None
     try:
         harness = harnesses.create(name)
         await harness.open(folder)
         for key in keys:
-            for model in sorted(models[key]):
+            for model in sorted(models[key]) or [None]:
                 try:
-                    harness.check_model(model)
+                    await harness.check_model(model, access.get(key, "read-only"))
                 except harnesses.Unavailable as error:
                     problems.append(f"{key}: {error}")
     except (harnesses.Unavailable, OSError) as error:

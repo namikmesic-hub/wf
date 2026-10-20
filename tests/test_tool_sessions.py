@@ -22,13 +22,15 @@ import yaml
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
 from mcp import Client
 
+from cursor_sdk import entries as sdk_entries
+from cursor_sdk import needs_node, use
 from fake_vendor import FakeVendor, free_port, png_base64, sign_in
 from fakes import Fake, submit
 from workflow import cli, harnesses, runner, schemas
 from workflow.harnesses.base import Recorder, SessionSpec, TurnEnd, Usage
 from workflow.harnesses.claude_code import ClaudeSession, options
 from workflow.harnesses.codex import Codex
-from workflow.harnesses.cursor import Cursor, allows
+from workflow.harnesses.cursor_acp import CursorAcp, allows
 from workflow.output_tool import ResultTool
 from workflow.spec import ToolUse
 from workflow.tools import relay, signin
@@ -481,12 +483,14 @@ def trace_records() -> list[dict]:
 
 
 def test_progress_names_a_wf_tools_operation_the_same_on_every_harness():
-    from workflow.harnesses import claude_code, cursor as cursor_harness
+    from workflow.harnesses import claude_code, cursor, cursor_acp as cursor_harness
 
     assert claude_code._tool_name("mcp__linear__list_issues") == "linear.list_issues"
     assert claude_code._tool_name("mcp__wf__submit_result") == "submit_result"
     assert cursor_harness._label({"kind": "other", "rawInput": {"providerIdentifier": "linear", "toolName": "list_issues"}}) == "linear.list_issues"
     assert cursor_harness._label({"kind": "other", "rawInput": {"providerIdentifier": "wf", "toolName": "git"}}) == "git"
+    assert cursor.Cursor().label({"tool": "list_issues", "server": "linear"}) == "linear.list_issues"
+    assert cursor.Cursor().label({"tool": "git", "server": None}) == "git"
 
 
 # ---------- Codex ----------
@@ -651,7 +655,7 @@ def cursor(monkeypatch, tmp_path: Path, *turns) -> Path:
     scenario, log = tmp_path / "acp-scenario.json", tmp_path / "acp-requests.jsonl"
     scenario.write_text(json.dumps({"turns": list(turns)}))
     monkeypatch.setitem(harnesses.FACTORIES, "cursor",
-                        lambda: Cursor(command=[sys.executable, str(FAKE_ACP), str(scenario), str(log)], request_timeout=10))
+                        lambda: CursorAcp(command=[sys.executable, str(FAKE_ACP), str(scenario), str(log)], request_timeout=10))
     return log
 
 
@@ -716,6 +720,75 @@ def test_cursor_refuses_an_mcp_server_wf_did_not_give_the_session(tmp_path):
     assert allows("read-only", False, tmp_path, call, {"wf", "slack"})
 
 
+# ---------- Cursor's SDK ----------
+
+
+@needs_node
+def test_cursors_sdk_gets_a_custom_tool_per_operation_and_its_calls_are_relayed(vendor, repo, monkeypatch, cursor_host):
+    sign_in(vendor)
+    log = use(monkeypatch, repo, cursor_host, [{"tool": {"server": "linear", "name": "list_issues", "arguments": {"query": "open"}}},
+                                               {"tool": {"server": "linear", "name": "save_issue", "arguments": {"query": "x"}}},
+                                               {"tool": {"server": "linear", "name": "screenshot", "arguments": {}}},
+                                               {"tool": {"name": "submit_result", "arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[linear]", harness="cursor")]) == 0
+    (create,) = sdk_entries(log, "create")
+    custom = create["local"]["customTools"]
+    assert [name for name in custom if name.startswith("linear__")] == ["linear__list_issues", "linear__get_user", "linear__screenshot"]
+    assert custom["linear__list_issues"]["description"]
+    assert create["mcpServers"] == {}  # no MCP server but the session's own tools
+    read, write, image, result = sdk_entries(log, "tool_result")
+    assert read["result"] == {"content": [{"type": "text", "text": "list_issues answered 'open'"}], "isError": False}
+    assert write == {"name": "linear__save_issue", "offered": False}  # not among the operations this read-only node may use
+    assert image["result"] == {"content": [{"type": "image", "data": png_base64(), "mimeType": "image/png"}], "isError": False}
+    assert result["result"]["isError"] is False
+    assert "list_issues answered" not in attempt_logs()  # the transcript leaves out what the tool returned
+    assert [e["tool"] for e in events() if e["event"] == "agent_tool"][0] == "linear.list_issues"
+
+
+@needs_node
+def test_cursors_sdk_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned(vendor, repo, monkeypatch, cursor_host):
+    sign_in(vendor)
+    use(monkeypatch, repo, cursor_host, [{"text": "Looking."},
+                                         {"tool": {"server": "linear", "name": "list_issues", "arguments": {"query": "open"}}},
+                                         {"tool": {"name": "submit_result", "arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[linear]", harness="cursor")]) == 0
+    found = [r for r in trace_records() if r["kind"] in ("message", "tool_call", "tool_result")]
+    assert [(r["kind"], r.get("tool"), r.get("text"), r.get("kept", True)) for r in found] == [
+        ("message", None, "Looking.", True), ("tool_call", "linear.list_issues", None, True), ("tool_result", None, None, False),
+        ("tool_call", "submit_result", None, True), ("tool_result", None, None, True)]
+    assert found[1]["arguments"] == {"query": "open"}
+    returned = [{"type": "text", "text": "list_issues answered 'open'"}]
+    assert found[2]["characters"] == len(json.dumps(returned))
+    assert "list_issues answered" not in (run_dir() / "trace.jsonl").read_text()
+
+
+@needs_node
+def test_an_answer_too_big_for_a_frame_reaches_cursors_agent_as_an_error(vendor, repo, monkeypatch, cursor_host):
+    sign_in(vendor)
+    big = "q" * 1_100_000  # the fake vendor's answer repeats the query
+    log = use(monkeypatch, repo, cursor_host, [{"tool": {"server": "linear", "name": "list_issues", "arguments": {"query": big}}},
+                                               {"tool": {"name": "submit_result", "arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[linear]", harness="cursor")]) == 0
+    read, result = sdk_entries(log, "tool_result")
+    assert read["result"]["isError"] is True
+    assert "the answer was too big to pass on" in read["result"]["content"][0]["text"]
+    assert result["result"]["isError"] is False
+    (call,) = [r for r in trace_records() if r["kind"] == "tool_call" and r["tool"] == "linear.list_issues"]
+    assert call["arguments"]["truncated"] is True  # the event was too big as well: its arguments are cut, its call stays
+    assert [r.get("kept", True) for r in trace_records() if r["kind"] == "tool_result"] == [False, True]
+
+
+@needs_node
+def test_cursors_sdk_reports_a_tool_call_that_a_timeout_stops_for_the_trace(repo, monkeypatch, cursor_host):
+    use(monkeypatch, repo, cursor_host, [{"call": {"name": "shell", "args": {"command": "sleep 600"}, "status": "running"}},
+                                         {"hang": True}])
+    Path("flow.yaml").write_text(Path(timed_out("cursor")).read_text().replace("defaults: {", "defaults: {access: full, ", 1))
+    assert cli.main(["run", "flow.yaml"]) == 1
+    calls = [r for r in trace_records() if r["kind"] == "tool_call"]
+    assert calls and calls[0]["arguments"] == {"command": "sleep 600"}
+    assert [r["outcome"] for r in trace_records() if r["kind"] == "attempt_end"] == ["timed_out"]
+
+
 # ---------- secrets ----------
 
 
@@ -752,7 +825,9 @@ def test_no_secret_reaches_an_agent_or_the_run_folder(vendor, repo, wf_home, mon
 
 @pytest.mark.harness
 @pytest.mark.parametrize("harness", ["claude-code", "codex", "cursor"])
-def test_a_real_agent_reads_through_a_tool(harness, vendor, repo):
+def test_a_real_agent_reads_through_a_tool(harness, vendor, repo, request):
+    if harness == "cursor":
+        request.getfixturevalue("live_key")  # Cursor's SDK needs your Cursor API key
     sign_in(vendor)
     Path("flow.yaml").write_text(dedent("""
         version: 1

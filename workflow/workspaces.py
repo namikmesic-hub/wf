@@ -303,8 +303,56 @@ def mailbox(run_dir: Path) -> Path:
     """Where `wf steer` passes messages to the process that drives a run (steer.py):
     ~/.wf/steer/<run-id>-<hash of the run folder's path>, so two repos' runs with one id keep
     apart. It stays as long as the run folder, and `wf discard` removes it."""
+    return home() / "steer" / _run_key(run_dir)
+
+
+def sessions_root(run_dir: Path) -> Path:
+    """Where harnesses keep the agent sessions of a run that a later pass may continue:
+    ~/.wf/sessions/<run-id>-<hash of the run folder's path>, with a folder for each harness, and
+    one for each session in that (saved_sessions). Unlike temp_root, it outlives the run's success,
+    so that `wf continue` continues them: success keeps only those that a follow-up can continue
+    (keep_sessions). `wf discard` removes it."""
+    return home() / "sessions" / _run_key(run_dir)
+
+
+def saved_sessions(run_dir: Path, harness: str) -> Path:
+    """The folder where one harness keeps a run's sessions, as <session id>/ folders. It may not
+    exist yet: make_private() makes it."""
+    return sessions_root(run_dir) / harness
+
+
+def make_private(folder: Path) -> Path:
+    """Make a folder of ~/.wf/sessions, and the folders between, that only you can open. Returns it."""
+    top = home() / "sessions"
+    if not folder.is_relative_to(top):
+        raise ValueError(f"{folder} isn't in {top}")
+    for one in [*reversed(folder.relative_to(top).parents), folder.relative_to(top)]:
+        (top / one).mkdir(mode=0o700, parents=True, exist_ok=True)
+        (top / one).chmod(0o700)  # also when it was there before
+    return folder
+
+
+def keep_sessions(run_dir: Path, ids: set[str]) -> None:
+    """Remove the run's saved sessions but those with these ids, and its folder when none stays."""
+    root = sessions_root(run_dir)
+    for harness in _folders(root):
+        for saved in _folders(harness):
+            if saved.name not in ids:
+                shutil.rmtree(saved, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            harness.rmdir()  # when no session of it stays
+    with contextlib.suppress(OSError):
+        root.rmdir()
+
+
+def _folders(folder: Path) -> list[Path]:
+    return [one for one in folder.iterdir() if one.is_dir() and not one.is_symlink()] if folder.is_dir() else []
+
+
+def _run_key(run_dir: Path) -> str:
+    """<run-id>-<hash of the run folder's path>: the run's own name in a folder that every run shares."""
     folder = Path(run_dir).resolve()
-    return home() / "steer" / f"{folder.name}-{hashlib.sha256(os.fsencode(folder)).hexdigest()[:12]}"
+    return f"{folder.name}-{hashlib.sha256(os.fsencode(folder)).hexdigest()[:12]}"
 
 
 def uncommitted(repo: str | Path) -> list[Path]:

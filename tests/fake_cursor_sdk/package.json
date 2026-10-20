@@ -1,0 +1,8 @@
+{
+  "name": "@cursor/sdk",
+  "version": "1.0.38",
+  "private": true,
+  "description": "A fake of Cursor's SDK for wf's tests: scripted agents, no network.",
+  "type": "module",
+  "exports": "./index.js"
+}

@@ -3,11 +3,22 @@
 Read base.py first (the Harness and Session interfaces), then the adapters:
     claude_code.py   Claude Code, through the Claude Agent SDK
     codex.py         Codex, through `codex app-server` (JSON-RPC over stdio)
-    cursor.py        Cursor, through `cursor-agent acp` (the Agent Client Protocol
-                     over stdio), with mcp_http.py serving it submit_result
+    remote.py        any harness whose sessions run in another program, a peer
+                     spoken to with the wf-session protocol
+    cursor.py        Cursor, through its SDK in the Cursor host (cursor_host/, in
+                     TypeScript), a peer of remote.py
+    cursor_acp.py    Cursor, through `cursor-agent acp` (the Agent Client Protocol
+                     over stdio), with mcp_http.py serving it submit_result: for
+                     `edit` sessions, and for every session with `cursor_runtime: acp`
 
 KEPT_INSTRUCTIONS names what a harness still gives its agent when a node sets
 `project_instructions: false`, which `wf validate` warns about.
+
+reports_tokens() says whether a harness counts a session's tokens: Cursor does on its SDK,
+but not through cursor-agent's ACP, which runs its `edit` sessions, and every session when no
+Cursor API key is set (cursor_on_acp()).
+KEPT_INSTRUCTIONS["cursor"] is what cursor-agent keeps. On the SDK a session with
+`project_instructions: false` loads none of Cursor's settings layers.
 
 KEYCHAIN_SHELL names the access levels at which a harness's agent runs commands
 that can reach the macOS Keychain, and so every stored sign-in of wf tools: no
@@ -22,7 +33,7 @@ FACTORIES.
 
 from collections.abc import Callable
 
-from .base import Harness, Session, SessionSpec, TurnEnd, Unavailable, Usage
+from .base import Harness, Session, SessionSpec, StartFailed, TurnEnd, Unavailable, Usage
 
 
 def _claude_code() -> Harness:
@@ -38,9 +49,9 @@ def _codex() -> Harness:
 
 
 def _cursor() -> Harness:
-    from .cursor import Cursor
+    from .cursor import create
 
-    return Cursor()
+    return create()
 
 
 FACTORIES: dict[str, Callable[[], Harness]] = {"claude-code": _claude_code, "codex": _codex, "cursor": _cursor}
@@ -59,10 +70,35 @@ def reaches_keychain(harness: str, access: str) -> bool:
     return access in KEYCHAIN_SHELL.get(harness, ())
 
 
+def cursor_on_acp(access: str) -> bool:
+    """Does a Cursor session at this access level run through cursor-agent's ACP? A cursor_runtime
+    setting or an API key that can't be read counts as the default, since a run would stop at it anyway."""
+    from .cursor import ON_ACP, api_key, runtime
+
+    if access in ON_ACP:
+        return True
+    try:
+        return runtime() == "acp" or api_key() is None
+    except Unavailable:
+        return False
+
+
+def reports_tokens(harness: str, access: str) -> bool:
+    """Does the harness report a session's tokens at this access level?"""
+    return harness != "cursor" or not cursor_on_acp(access)
+
+
+def kept_instructions(harness: str, access: str) -> str | None:
+    """What a session at this access level still loads with `project_instructions: false`, or None."""
+    if harness == "cursor" and not cursor_on_acp(access):
+        return None
+    return KEPT_INSTRUCTIONS.get(harness)
+
+
 def create(name: str) -> Harness:
     if name not in FACTORIES:
         raise Unavailable(f"the `{name}` harness isn't supported yet")
     return FACTORIES[name]()
 
 
-__all__ = ["FACTORIES", "KEPT_INSTRUCTIONS", "KEYCHAIN_SHELL", "reaches_keychain", "Harness", "Session", "SessionSpec", "TurnEnd", "Unavailable", "Usage", "create"]
+__all__ = ["FACTORIES", "KEPT_INSTRUCTIONS", "KEYCHAIN_SHELL", "reaches_keychain", "reports_tokens", "kept_instructions", "cursor_on_acp", "Harness", "Session", "SessionSpec", "StartFailed", "TurnEnd", "Unavailable", "Usage", "create"]

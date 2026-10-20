@@ -1,0 +1,1122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/namikmesic/wf/protocol/wf-session-0.schema.json",
+  "title": "A frame of the wf-session/0 protocol",
+  "description": "One JSON object per line, at most 1 MiB, between wf (the client) and a session host. src/protocol.ts and workflow/harnesses/remote.py speak it. Every frame after hello and welcome names its session, except the requests and answers of runtime.check, which concern none.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/hello"
+    },
+    {
+      "$ref": "#/$defs/welcome"
+    },
+    {
+      "$ref": "#/$defs/req"
+    },
+    {
+      "$ref": "#/$defs/res"
+    },
+    {
+      "$ref": "#/$defs/ev"
+    },
+    {
+      "$ref": "#/$defs/call"
+    },
+    {
+      "$ref": "#/$defs/ret"
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "session": {
+      "type": "string",
+      "pattern": "^ses_"
+    },
+    "turn": {
+      "type": "string",
+      "pattern": "^trn_"
+    },
+    "hello": {
+      "type": "object",
+      "required": [
+        "t",
+        "protocol",
+        "client"
+      ],
+      "properties": {
+        "t": {
+          "const": "hello"
+        },
+        "protocol": {
+          "const": "wf-session/0"
+        },
+        "client": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          }
+        },
+        "since": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "credentials": {
+          "type": "object",
+          "properties": {
+            "api_key": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "welcome": {
+      "type": "object",
+      "required": [
+        "t",
+        "protocol",
+        "server",
+        "head",
+        "replay"
+      ],
+      "properties": {
+        "t": {
+          "const": "welcome"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "server": {
+          "type": "object",
+          "required": [
+            "name",
+            "version"
+          ]
+        },
+        "head": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replay": {
+          "enum": [
+            "events",
+            "resync"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "req": {
+      "type": "object",
+      "required": [
+        "t",
+        "id",
+        "op",
+        "args"
+      ],
+      "properties": {
+        "t": {
+          "const": "req"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "op": {
+          "enum": [
+            "runtime.check",
+            "session.open",
+            "turn.start",
+            "turn.steer",
+            "turn.cancel",
+            "session.close",
+            "usage.read"
+          ]
+        },
+        "args": {
+          "type": "object"
+        },
+        "session": {
+          "$ref": "#/$defs/session"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "runtime.check"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/check_args"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "session.open"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/open_args"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "turn.start"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/start_args"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "turn.steer"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/steer_args"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "turn.cancel",
+                  "usage.read"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/session_args"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "session.close"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "$ref": "#/$defs/close_args"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "check_args": {
+      "type": "object",
+      "required": [
+        "runtime"
+      ],
+      "properties": {
+        "runtime": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "open_args": {
+      "type": "object",
+      "required": [
+        "runtime",
+        "model",
+        "cwd",
+        "access",
+        "web",
+        "tools",
+        "start"
+      ],
+      "properties": {
+        "runtime": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "access": {
+          "enum": [
+            "read-only",
+            "edit",
+            "full"
+          ]
+        },
+        "web": {
+          "type": "boolean"
+        },
+        "project_instructions": {
+          "type": "boolean"
+        },
+        "only_given_tools": {
+          "type": "boolean"
+        },
+        "max_turns": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "budget_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/tool"
+          }
+        },
+        "start": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "fresh"
+                }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "from"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "load"
+                },
+                "from": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "resume": {
+          "type": "object"
+        },
+        "slot": {
+          "type": "object"
+        },
+        "retain": {
+          "type": "boolean"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          }
+        },
+        "state_dir": {
+          "type": "string"
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "required": [
+        "kind",
+        "name"
+      ],
+      "properties": {
+        "kind": {
+          "const": "client"
+        },
+        "server": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "input_schema": {
+          "type": "object"
+        },
+        "annotations": {
+          "type": "object"
+        },
+        "private": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "session_args": {
+      "type": "object",
+      "required": [
+        "session"
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/session"
+        }
+      }
+    },
+    "start_args": {
+      "type": "object",
+      "required": [
+        "session",
+        "kind",
+        "text"
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/session"
+        },
+        "kind": {
+          "$ref": "#/$defs/turn_kind"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "steer_args": {
+      "type": "object",
+      "required": [
+        "session",
+        "id",
+        "text"
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/session"
+        },
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    },
+    "close_args": {
+      "type": "object",
+      "required": [
+        "session"
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/session"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "res": {
+      "type": "object",
+      "required": [
+        "t",
+        "id",
+        "ok"
+      ],
+      "properties": {
+        "t": {
+          "const": "res"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {
+          "type": "object"
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        },
+        "session": {
+          "$ref": "#/$defs/session"
+        }
+      },
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "result"
+        ],
+        "not": {
+          "required": [
+            "error"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "error"
+        ],
+        "not": {
+          "required": [
+            "result"
+          ]
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "class",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "class": {
+          "enum": [
+            "unavailable",
+            "auth",
+            "usage_limit",
+            "transient",
+            "failed",
+            "cancelled",
+            "invalid",
+            "not_found",
+            "internal"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "retry_after_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "resets_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "usage": {
+      "type": "object",
+      "required": [
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "cost_usd",
+        "cost_source"
+      ],
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cached_input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cost_source": {
+          "enum": [
+            "reported",
+            "estimated",
+            "pending",
+            "none"
+          ]
+        },
+        "billed": {
+          "type": "object",
+          "required": [
+            "raw_cost_cents",
+            "charged_cents"
+          ],
+          "properties": {
+            "raw_cost_cents": {
+              "type": "number"
+            },
+            "charged_cents": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ev": {
+      "type": "object",
+      "required": [
+        "t",
+        "seq",
+        "at",
+        "session",
+        "kind",
+        "data"
+      ],
+      "properties": {
+        "t": {
+          "const": "ev"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "at": {
+          "type": "string"
+        },
+        "session": {
+          "$ref": "#/$defs/session"
+        },
+        "turn": {
+          "$ref": "#/$defs/turn"
+        },
+        "kind": {
+          "enum": [
+            "session.opened",
+            "turn.started",
+            "turn.text",
+            "turn.tool",
+            "turn.usage",
+            "turn.ended",
+            "session.closed",
+            "steer.status"
+          ]
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "session.opened"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "runtime_session_id",
+                  "effective"
+                ],
+                "properties": {
+                  "runtime_session_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "effort": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "effective": {
+                    "type": "object"
+                  },
+                  "waited_s": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "turn.started",
+                  "turn.text",
+                  "turn.tool",
+                  "turn.usage",
+                  "turn.ended"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "turn"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "turn.started"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "text"
+                ],
+                "properties": {
+                  "kind": {
+                    "$ref": "#/$defs/turn_kind"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "turn.text"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "turn.tool"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "call",
+                  "tool",
+                  "server",
+                  "status",
+                  "args"
+                ],
+                "properties": {
+                  "call": {
+                    "type": "string"
+                  },
+                  "tool": {
+                    "type": "string"
+                  },
+                  "server": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "started",
+                      "updated",
+                      "completed",
+                      "failed"
+                    ]
+                  },
+                  "args": true,
+                  "result": true,
+                  "kept": {
+                    "const": false
+                  },
+                  "size": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "truncated": {
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "turn.usage"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "usage"
+                ],
+                "properties": {
+                  "usage": {
+                    "$ref": "#/$defs/usage"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "turn.ended"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "status",
+                  "error",
+                  "usage",
+                  "result_accepted",
+                  "queued_steers"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "done",
+                      "failed",
+                      "unavailable",
+                      "cancelled"
+                    ]
+                  },
+                  "error": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/$defs/error"
+                      }
+                    ]
+                  },
+                  "usage": {
+                    "$ref": "#/$defs/usage"
+                  },
+                  "result_accepted": {
+                    "type": "boolean"
+                  },
+                  "queued_steers": {
+                    "type": "array"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "session.closed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "reason",
+                  "usage"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  },
+                  "usage": {
+                    "$ref": "#/$defs/usage"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "steer.status"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "status"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "delivered",
+                      "declined"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "call": {
+      "type": "object",
+      "required": [
+        "t",
+        "id",
+        "session",
+        "tool",
+        "server",
+        "callId",
+        "args"
+      ],
+      "properties": {
+        "t": {
+          "const": "call"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "session": {
+          "$ref": "#/$defs/session"
+        },
+        "turn": {
+          "$ref": "#/$defs/turn"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "server": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "callId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": true
+      },
+      "additionalProperties": false
+    },
+    "ret": {
+      "type": "object",
+      "required": [
+        "t",
+        "id",
+        "content",
+        "isError"
+      ],
+      "properties": {
+        "t": {
+          "const": "ret"
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "text",
+                  "image"
+                ]
+              },
+              "text": {
+                "type": "string"
+              },
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "isError": {
+          "type": "boolean"
+        },
+        "session": {
+          "$ref": "#/$defs/session"
+        }
+      },
+      "additionalProperties": false
+    },
+    "turn_kind": {
+      "enum": [
+        "instruction",
+        "reminder",
+        "steer",
+        "resume"
+      ]
+    }
+  }
+}

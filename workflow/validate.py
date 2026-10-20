@@ -80,6 +80,7 @@ class _Result:
     files: list[Path] = field(default_factory=list)  # this file and its sub-workflows
     worktrees: bool = False  # does it (or a sub-workflow) create worktrees with `workspace: new`?
     branches: list["_Branch"] = field(default_factory=list)  # the names `branch` gives, here and in sub-workflows
+    no_tokens: set[str] = field(default_factory=set)  # harnesses that may run an agent here without counting its tokens
 
 
 def _check(path: Path, stack: tuple[Path, ...], tainted: frozenset[str], cache: dict) -> _Result:
@@ -106,6 +107,7 @@ class _Checker:
         self.problems: list[Problem] = []
         self.subs: dict[str, _Result] = {}
         self.harnesses: set[str] = set()
+        self.no_tokens: set[str] = set()  # harnesses that may run an agent here without counting its tokens
         self.cost_refs: list[str] = []  # where templates read run.cost_usd
         self.token_refs: list[str] = []  # where templates read run.tokens
         self.end_fields: dict[str, dict] = {}
@@ -147,7 +149,7 @@ class _Checker:
         }
         files = [self.path] + [f for sub in self.subs.values() for f in sub.files]
         worktrees = any(self.wf.setting(n, "workspace") == "new" for n in self.nodes) or any(s.worktrees for s in self.subs.values())
-        return _Result(self.problems, self.wf, end_schema, self.harnesses, files, worktrees, self.branches)
+        return _Result(self.problems, self.wf, end_schema, self.harnesses, files, worktrees, self.branches, self.no_tokens)
 
     # ---------- 1. structure ----------
 
@@ -294,6 +296,7 @@ class _Checker:
             result = _check(sub_path, self.stack, self._tainted_inputs(node_id), self.cache)
             self.problems += result.problems
             self.harnesses |= result.harnesses
+            self.no_tokens |= result.no_tokens
             self.subs[node_id] = result
             if result.worktrees and self.wf.setting(node_id, "workspace") == "new":
                 # git can't have a branch wf/<run>/<node> and also wf/<run>/<node>/<sub node>
@@ -582,6 +585,7 @@ class _Checker:
         if "cursor" in possible and self.wf.harness_setting(node_id, "cursor", "effort") is not None:
             self.warn(at, "cursor doesn't use `effort`: a Cursor model id carries its own, like gpt-5.6-sol-max-fast")
         self.harnesses |= possible
+        self.no_tokens |= {name for name in possible if not harnesses.reports_tokens(name, self.wf.setting(node_id, "access"))}
         if not possible and isinstance(harness, str) and ("{{" in harness or "{%" in harness):
             possible = self._named_by(harness, node_id)
         self._model_and_effort(node_id, possible or set(HARNESSES))
@@ -642,11 +646,13 @@ class _Checker:
             possible = set(HARNESSES)
         own = self.nodes[node_id].project_instructions is not None
         where = f"nodes.{node_id}.project_instructions" if own else "defaults.project_instructions"
+        access = self.wf.setting(node_id, "access")
         for name in sorted(possible & harnesses.KEPT_INSTRUCTIONS.keys()):
-            if (where, name) not in self._warned:
+            kept = harnesses.kept_instructions(name, access)
+            if kept and (where, name) not in self._warned:
                 self._warned.add((where, name))
-                self.warn(where, f"on {name}, `project_instructions: false` doesn't keep out "
-                                 f"{harnesses.KEPT_INSTRUCTIONS[name]}")
+                label = "cursor through cursor-agent" if name == "cursor" else name
+                self.warn(where, f"on {label}, `project_instructions: false` doesn't keep out {kept}")
 
     def _tool_list(self, where: str, uses: list) -> None:
         seen = set()
@@ -865,8 +871,10 @@ class _Checker:
             self.warn(where, f"{' and '.join(silent)} {verb} report cost in dollars, so spending there isn't counted; "
                              f"{hint}limits.duration caps every harness")
         where = "limits.tokens" if self.wf.limits.tokens is not None else next(iter(self.token_refs), None)
-        if "cursor" in self.harnesses and where:
-            self.warn(where, "cursor doesn't report tokens, so its spending isn't counted; limits.duration caps every harness")
+        if "cursor" in self.no_tokens and where:
+            self.warn(where, "cursor doesn't report tokens through cursor-agent's ACP, which runs its `edit` nodes "
+                             "(and every node with `cursor_runtime: acp`, or with no Cursor API key set), "
+                             "so that spending isn't counted; limits.duration caps every harness")
 
 
 class _Order:

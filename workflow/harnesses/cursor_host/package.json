@@ -1,0 +1,22 @@
+{
+  "name": "wf-cursor-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "wf's Cursor host: one Cursor agent session through @cursor/sdk, driven over stdio with the wf-session/0 protocol.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p .",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@cursor/sdk": "1.0.38",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

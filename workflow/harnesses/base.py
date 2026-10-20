@@ -80,9 +80,10 @@ class Recorder:
         """The agent called `tool`. `call` is the harness's id for the call. An adapter reports a
         call when it starts, and again if it learns more of its arguments later."""
 
-    def tool_result(self, call: str, result: Any, is_error: bool = False, kept: bool = True) -> None:
+    def tool_result(self, call: str, result: Any, is_error: bool = False, kept: bool = True,
+                    characters: int | None = None) -> None:
         """The answer to a call. kept=False for a wf tool's answer (other people's messages and
-        mail): the trace notes only its size."""
+        mail): the trace notes only its size, which is `characters` when the harness gives only that."""
 
 
 @dataclass
@@ -107,6 +108,7 @@ class SessionSpec:
     tools: list["ToolServer"] = field(default_factory=list)  # wf tools the agent may call, besides submit_result
     only_wf_tools: bool = False  # the node lists `tools`: no other MCP servers or connectors, whatever the access
     project_instructions: bool = True  # False: the repo's CLAUDE.md, AGENTS.md and rules stay out of the session
+    read_roots: list[Path] = field(default_factory=list)  # the files and folders the instruction names, which the agent may read too
     trace: Recorder = field(default_factory=Recorder)  # the agent's text and tool calls, for the run's trace
 
 
@@ -126,14 +128,18 @@ class Session(Protocol):
 
     def pending_usage(self) -> Usage:
         """What a turn that hasn't returned yet has used so far (zero between turns), so a turn
-        cut off by a timeout still counts. Harnesses that can't tell return Usage()."""
+        cut off by a timeout still counts. Harnesses that can't tell return Usage(). A harness
+        that learns more of it only as close() ends the turn has late_usage() too, which the runner
+        reads after close()."""
 
     async def steer(self, text: str, ident: str) -> Literal["delivered", "queued", "unconfirmed"] | None:
         """A message from `wf steer`, with its id. "delivered": the running turn has it now.
         "queued": the harness holds it for the agent's next step, and records with steered() what
         became of it, or steer_dropped() when the session ends first. "unconfirmed": the harness
         sent it on but got no answer, so it may have it, and the runner doesn't send it again. None:
-        the harness can't take it now, so the runner sends it in the next turn."""
+        the harness can't take it now, so the runner sends it in the next turn. A harness whose
+        runtime can decline a queued message later has given_back() too: the runner takes those
+        messages for its next turn, as if steer() had returned None."""
 
     async def close(self) -> None:
         """End the session, interrupting a turn that's still running."""
@@ -145,17 +151,28 @@ class Harness(Protocol):
     async def open(self, run_dir: Path) -> None:
         """Before the first session of a stream (e.g. start an app server)."""
 
-    def check_model(self, model: str | None) -> None:
-        """After open(): raise Unavailable if the harness knows that it can't run `model`."""
+    async def check_model(self, model: str | None, access: str = "read-only") -> None:
+        """After open(): raise Unavailable if the harness knows that it can't run `model` for a node
+        at this access level. With no model, whether the harness can run at all."""
 
     async def session(self, spec: SessionSpec) -> Session:
-        """A new session. Raises Unavailable if the harness can't start one."""
+        """A new session. Raises Unavailable if the harness can't start one, or StartFailed when a
+        retry may."""
 
     async def close(self) -> None: ...
 
 
 class Unavailable(Exception):
     """The harness can't run: not installed, not logged in, or out of quota."""
+
+
+class StartFailed(Exception):
+    """The harness couldn't start a session now, for a reason that a retry can clear. The retry on
+    the same harness waits `retry_after` seconds."""
+
+    def __init__(self, message: str, retry_after: float = 0):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 def transcript(path: Path, kind: str, **data) -> None:

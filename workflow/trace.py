@@ -542,9 +542,11 @@ class Attempt:
         self._calls[str(call)] = ours
         self._write("tool_call", ours, ours.rsplit(".", 1)[0], tool=tool, arguments=arguments)
 
-    def tool_result(self, call: str, result: Any, is_error: bool = False, kept: bool = True) -> None:
+    def tool_result(self, call: str, result: Any, is_error: bool = False, kept: bool = True,
+                    characters: int | None = None) -> None:
         ours = self._calls.pop(str(call), None) or self._next("c")
-        answer = {"result": result} if kept else {"kept": False, "characters": len(json.dumps(result, default=str))}
+        size = len(json.dumps(result, default=str)) if characters is None else characters
+        answer = {"result": result} if kept else {"kept": False, "characters": size}
         self._write("tool_result", ours, ours.rsplit(".", 1)[0], is_error=is_error, **answer)
 
     # ----- output_tool.ResultTool -----
