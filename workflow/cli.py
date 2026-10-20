@@ -5,9 +5,9 @@
     wf validate <file>               check a file and every sub-workflow it uses
     wf graph <file>                  print the workflow as a Mermaid diagram
     wf run <file> [name=value ...]   validate, then run it (runner.py)
-    wf retry <run-id>                continue a failed or paused run from its last checkpoint
-                                     (with --model NODE=MODEL, another model for a node or for one
-                                     item NODE[INDEX]: overrides.py)
+    wf retry <run-id>                continue a failed or paused run from its last checkpoint (--model
+                                     NODE=MODEL or NODE[INDEX]=MODEL: another model, overrides.py)
+    wf continue <run-id> <request>   give a run that succeeded a follow-up request (runner.py)
 
 Tools that agent nodes can use (`tools: [slack, ...]`; workflow/tools/):
     wf tools list                    each tool, how it signs in, and whether it's set up
@@ -37,12 +37,12 @@ folders outside the repo, in a folder per repo under DIR, instead of in ./.wf/ru
 main() parses the arguments and returns the exit code. The pyproject entry
 point (`wf = "workflow.cli:main"`) passes that code to the shell.
 
-Exit codes: 0 success, 1 failure (including bad arguments), 2 paused waiting
-for a person (wf run and wf retry, only with --no-input or without a
-terminal), 3 nothing new before the timeout (wf wait), 130 stopped with
-Ctrl-C. Bad arguments exit with 1, not argparse's usual 2, so a script can
-tell a pause from a typo. A message that `wf steer` doesn't send fails too:
-exit code 1.
+Exit codes: 0 means success, and 1 means failure, bad arguments included. A
+pause for a person gives 2, from wf run, wf retry and wf continue, only with
+--no-input or without a terminal. Nothing new before the timeout gives 3 (wf
+wait), and Ctrl-C gives 130. Bad arguments exit with 1, not argparse's usual
+2, so a script can tell a pause from a typo. A message that `wf steer`
+doesn't send fails too: exit code 1.
 """
 
 import argparse
@@ -147,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     answer.add_argument("--json", action="store_true")
     answer.add_argument("--runs-dir", **runs_dir)
     answer.set_defaults(handler=lambda a: runner.retry(a.run_id, True, a.answers, a.detach, a.json, runs_dir=a.runs_dir))
-
+    _continue_command(commands, no_input, runs_dir)
     wait = commands.add_parser("wait", help="block until a run needs attention; print its state as JSON")
     wait.add_argument("run_id", metavar="run-id")
     wait.add_argument("--timeout", type=float, default=3600, help="seconds (default 3600); exit code 3 if nothing happened")
@@ -447,10 +447,10 @@ def _steer(args) -> int:
     return 1 if answer["status"] == "none" else 0
 
 
-def _message(args) -> str:
-    """wf steer's message: the argument, or what --file holds. Raises ValueError."""
+def _message(args, what: str = "message") -> str:
+    """wf steer's message, or wf continue's request: the argument, or what --file holds. Raises ValueError."""
     if (args.message is None) == (args.file is None):
-        raise ValueError("give the message, or --file, but not both")
+        raise ValueError(f"give the {what}, or --file, but not both")
     most = steer.MAX_CHARACTERS + 1  # enough to tell that it's too long
     if args.file is None:
         text = args.message
@@ -470,11 +470,11 @@ def _message(args) -> str:
     try:
         text.encode("utf-8")
     except UnicodeEncodeError as error:  # bytes that aren't UTF-8, as the system passes them on
-        raise ValueError("the message isn't UTF-8 text") from error
+        raise ValueError(f"the {what} isn't UTF-8 text") from error
     if not text.strip():
-        raise ValueError("the message is empty")
+        raise ValueError(f"the {what} is empty")
     if len(text) > steer.MAX_CHARACTERS:
-        raise ValueError(f"the message is longer than {steer.MAX_CHARACTERS:,} characters")
+        raise ValueError(f"the {what} is longer than {steer.MAX_CHARACTERS:,} characters")
     return text
 
 
@@ -502,7 +502,7 @@ def _describe(current: dict) -> str:
         detail = "running, waiting for an agent slot: " + ", ".join(w["node"] for w in current["agents_waiting"])
     else:
         detail = status
-    return f"{run_id} [{current.get('workflow')}]: {detail}"
+    return f"{run_id} [{current.get('workflow')}]: {detail}" + (f" (follow-up {n})" if (n := current.get("follow_up")) else "")
 
 
 def _chosen(args, dry_runs: bool | None) -> list[runs.Run] | None:
@@ -671,6 +671,38 @@ def _graph(args) -> int:
         return 1
     sys.stdout.write(diagram.mermaid(workflow))
     return 0
+
+
+# ---------- wf continue ----------
+
+
+def _continue_command(commands, no_input: dict, runs_dir: dict) -> None:
+    following = commands.add_parser(
+        "continue", help="give a run that succeeded a follow-up request, and run it again from its follow-up node",
+        description="Give a run that succeeded a follow-up request. The run goes on from the node that its "
+                    "workflow's `follow_up` names, on the same branches, with each `session: continue` node's "
+                    "last session, fresh route counters, and a budget of its own. A run that runs, waits or failed "
+                    "is refused: wf retry and wf answer continue those.")
+    following.add_argument("run_id", metavar="run-id")
+    following.add_argument("message", nargs="?", metavar="request", help="what the run should do now (or use --file)")
+    following.add_argument("--file", type=Path, metavar="FILE", help="read the request from FILE (- for stdin)")
+    following.add_argument("--no-input", **no_input)
+    following.add_argument("--detach", action="store_true", help="continue in the background")
+    following.add_argument("--json", action="store_true", help="with --detach: print the run id and follow-up number as JSON")
+    following.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE",
+                           help="a limit for this follow-up instead of the file's, counted from its start: cost_usd=20, "
+                                "tokens=5000000, duration=2h, or NAME=none for no limit (repeat for several)")
+    following.add_argument("--runs-dir", **runs_dir)
+    following.set_defaults(handler=_continue)
+
+
+def _continue(args) -> int:
+    try:
+        request = _message(args, "request")
+    except ValueError as error:
+        print(f"wf continue: {error}", file=sys.stderr)
+        return 1
+    return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir)
 
 
 if __name__ == "__main__":  # `python -m workflow.cli`, as detached runs start it

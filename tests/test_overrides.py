@@ -373,7 +373,7 @@ def test_a_limit_and_an_override_are_kept_together_or_not_at_all(repo, no_real_h
     assert cli.main(["run", "two.yaml", "--dry-run", script(steps)]) == 1  # paused at the limit
     before = record()
 
-    def full_disk(self, limits, overrides):
+    def full_disk(self, limits, overrides, follow_up=0):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(runs.Run, "keep", full_disk)

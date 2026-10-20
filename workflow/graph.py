@@ -25,6 +25,11 @@ four nodes, and the workflow's own graph lives in the state:
   stopped: see nodes._run_sub.)
 - finish computes end.output.
 
+`wf continue` gives a run that reached END a follow-up request. It writes the
+request into the state as an input of the graph, so the run's next step is
+schedule again. That step takes it in (state.Progress.follow_up), and starts
+the nodes that the workflow's `follow_up` names.
+
 LangGraph runs in steps ("supersteps"): every task started in a step finishes
 before the next step begins. So schedule runs once per step, after all of that
 step's jobs, with all their results in the inbox. The cost: a fast branch
@@ -67,9 +72,12 @@ async def schedule(state: RunState, runtime: Runtime[RunContext]) -> Command:
     ctx.trace.know(progress.vars)  # the secret values the run holds now, also after `wf retry`
 
     elapsed = ctx.elapsed()
+    if (state.get("follow_up") or {}).get("pending"):  # `wf continue`: a new pass of a run that succeeded
+        progress.follow_up(elapsed)
     progress.s["elapsed_s"] = elapsed
     if not ctx.nested:  # execute tasks check limits against this (a sub-workflow adds to it)
         ctx.usage = dict(progress.s["usage"])
+        ctx.budget_from = (progress.s.get("follow_up") or {}).get("from")
     name, reason = ctx.limit_check() or (None, None)  # e.g. ("tokens", "used 5,000 tokens, limit 1,000")
     jobs = []
     if state.get("retry"):  # `wf retry` on a failed or paused run, unless a limit is still reached
@@ -140,6 +148,12 @@ async def finish(state: RunState, runtime: Runtime[RunContext]) -> dict:
         return {"status": "failed", "failure": {"node": "end", "error": error}}
     runtime.stream_writer({"event": "run_finished", "status": "succeeded"})
     return {"status": "succeeded", "output": output}
+
+
+async def follow_up(compiled, config: dict, given: dict) -> None:
+    """Give a run that reached END a follow-up request ({request, number, limits, pending}) in one write.
+    The request is an input of the graph, so the next step is schedule."""
+    await compiled.aupdate_state(config, {"follow_up": given}, as_node=GRAPH_START)
 
 
 def variables(state: dict | None, ctx: RunContext) -> dict:

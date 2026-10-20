@@ -34,7 +34,7 @@ Then the runner, built on LangGraph:
     nodes.py       running one job: agents, commands, human questions via interrupt()
     graph.py       the LangGraph wiring: schedule -> Send -> execute -> schedule
     ask.py         questions at the terminal
-    runner.py      wf run / wf retry: streaming, interrupts, Command(resume=...)
+    runner.py      wf run / wf retry / wf continue: streaming, interrupts, Command(resume=...)
     cli.py         the `wf` command
 
 Then the tools around runs, none of which LangGraph knows about:

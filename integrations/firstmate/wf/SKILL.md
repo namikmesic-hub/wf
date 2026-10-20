@@ -4,7 +4,7 @@ description: >-
   Agent-only procedure for running wf workflows (YAML graphs of agent, command,
   human and sub-workflow steps) and supervising them as process-event sources.
   Load before starting a wf run, on any `procevent wf <source-id> <sequence>`
-  check wake, and before answering, retrying or reporting a wf run.
+  check wake, and before answering, retrying, continuing or reporting a wf run.
 user-invocable: false
 ---
 
@@ -110,10 +110,43 @@ acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`.
   take it as an input, such as `branch=fm/<task>`). Their worktrees are already
   removed. wf never merges or pushes unless the workflow does. Hand any branch
   to the project's normal ship path. The source retires itself.
+  `follow_up` is in the state when the run took follow-ups: it is the number of the latest one.
 
 To abandon a run, retire its source with the printed owner token
 (`bin/fm-procevent.sh retire wf-<run-id> --if-owner <token>`) and tell the
 captain; the run folder stays for inspection.
+
+## Giving a run a follow-up
+
+When the captain asks for more work on what a run delivered, such as a change to its pull request, give the run a follow-up.
+Don't start a new run, and don't start a worker of your own.
+
+```sh
+wf continue <run-id> "<request>" --detach --json
+wf continue <run-id> --file <request.md> --detach --json
+```
+
+The run goes on from the node that its workflow's `follow_up` names.
+It works on the same branches, with the same agent sessions where the harness keeps them.
+Its routes count from zero again, so its review loop gets all of its rounds again.
+The follow-up has a budget of its own: the limits of the workflow file, or `--limit` values that you give.
+Spending more than the file's limits is the captain's call.
+
+The JSON gives `follow_up`, the number of the follow-up.
+The source of the earlier pass retired when the run succeeded, so watch the follow-up as a new source on the same run folder:
+
+```sh
+bin/fm-procevent.sh register-extension wf wf-<run-id>-f<follow_up> --config-ref "wf-run:<run folder>"
+bin/fm-procevent.sh reconcile
+```
+
+Each wake then carries `follow_up`, and you handle its states as for any run.
+
+`wf continue` takes only a run that succeeded.
+It refuses a run that runs, waits, failed, stopped or is at a limit, and names the command for it: `wf answer` or `wf retry`.
+It also refuses a run whose workflow file had no `follow_up` when the run started, and a run whose branch is gone.
+When a node of the follow-up works in the project folder itself, the folder must be on the branch that the run worked on.
+Then take the request to the captain.
 
 ## Steering an agent while it works
 

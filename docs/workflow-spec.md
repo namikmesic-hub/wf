@@ -134,6 +134,7 @@ end:
 | `wf graph <file>` | Prints the workflow as a Mermaid diagram. |
 | `wf run <file> [name=value ...]` | Validates, then runs the workflow. Inputs come from `name=value` pairs (a value that parses as JSON is used as JSON), from `--input file.json`, or from prompts for anything missing. Prints progress, then the end output. |
 | `wf retry <run-id> [--limit NAME=VALUE] [--model NODE=MODEL]` | Continues a failed or paused run from its last checkpoint, or one a limit stopped (with a bigger limit). Finished nodes and items aren't rerun. `--model`, with `--harness` and `--effort`, gives a node or one item another model for the rest of the run (see [Another model on retry](#another-model-on-retry)). |
+| `wf continue <run-id> <request> [--limit NAME=VALUE]` | Gives a run that succeeded a follow-up request. The run goes on from the nodes that its workflow's `follow_up` names, on the same branches (see [Follow-ups](#follow-ups)). |
 | `wf trace <run-id> [--node N] [--pass P] [--field F] [--var PATH] [--json]` | Shows what one run read, decided and did, from its trace: how each template rendered, why each route was taken, each attempt, turn and tool call. See [The trace](#the-trace). |
 | `wf status <run-id>` | Says where a run stands, and how far it is on its way from `start` to `end`, as an estimate (see [Watching runs](#watching-runs)). `--json` gives the same as JSON. |
 | `wf sessions [run-id]` | Lists the agent sessions that run now, in one run or in each run of the repo, with the last tool call of each. |
@@ -147,7 +148,7 @@ end:
 `wf run` exit codes: 0 succeeded, 1 failed or stopped by a limit, 2 paused waiting for a person
 (only with `--no-input` or when there's no terminal).
 
-Every command that makes or finds runs (`run`, `retry`, `answer`, `wait`, `status`, `list`,
+Every command that makes or finds runs (`run`, `retry`, `continue`, `answer`, `wait`, `status`, `list`,
 `report`, `discard`, `sessions`, `watch`, `ui`, `steer`) takes `--runs-dir <dir>`, to keep run folders outside the repo (see
 [Run folder](#run-folder)). The commands that wf prints for a run in a runs folder, like
 `wf retry <run-id>`, include the option, so they find the run whether or not
@@ -208,6 +209,7 @@ end:
 | `start` | yes | The workflow's inputs. |
 | `nodes` | yes | The steps: a map from node id to node. |
 | `end` | yes | The workflow's outputs. |
+| `follow_up` | no | The nodes where a follow-up request goes in ([Follow-ups](#follow-ups)). |
 
 Unknown keys anywhere in the file are errors, so typos fail early.
 
@@ -293,7 +295,7 @@ end:
 
 Node ids start with a lowercase letter, followed by lowercase letters, digits or `_`. They
 become template variables, so `-` isn't allowed. These names are reserved: `start`, `end`,
-`run`, `history`, `workspace`, `errors`, `item`, `index`, `session`.
+`run`, `history`, `workspace`, `errors`, `item`, `index`, `session`, `follow_up`.
 
 A node's kind is set by which of these keys it has, and it must have exactly one:
 `instruction` (agent), `command`, `human` or `workflow`.
@@ -459,6 +461,9 @@ build:
 - The sub-workflow uses its own `defaults` and gets its own route counters. Its `limits`
   are ignored: the top-level run's limits, `run.cost_usd` and `run.tokens` cover everything.
 - The node's `workspace` becomes the sub-workflow's `repo`.
+- The node's next pass gives its sub-workflow the sessions that the last pass ended with.
+  So a node of the sub-workflow with `session: continue` continues its session, also in a follow-up.
+  A `for_each` item starts its sub-workflow without sessions, as an agent node's item does (see [Sessions](#sessions)).
 
 ### defaults
 
@@ -506,6 +511,7 @@ retry the limit held back runs, and a sub-workflow the limit stopped continues i
 rather than starting over. `wf retry` without a big enough limit leaves the run as it is
 and says which limit is still reached. `wf run <file> --limit ...` starts a run with a
 different limit.
+A follow-up has a budget of its own (see [Follow-ups](#follow-ups)).
 
 - **Tokens** are input plus output tokens, as each harness reports them (cached input
   included).
@@ -538,6 +544,7 @@ Variables:
 | `errors.<node>` | For `for_each` nodes with `on_item_error: continue`: a list of `{index, item, error}` for the items that failed. |
 | `run` | `{id, dir, cost_usd, tokens, elapsed_s, base}`. `base` is the commit the repo was at when the run started. |
 | `session` | `{continued}`: true while rendering a pass that continues an earlier session (see [Sessions](#sessions)). Not in `model` and `effort`, which are chosen before the session starts. |
+| `follow_up` | `{request, number}` of the latest follow-up request, or `none` before the first one (see [Follow-ups](#follow-ups)). |
 
 Rules:
 - An unknown name or field is an error, never an empty string. The same goes for reading
@@ -706,7 +713,7 @@ The tests named below are in `tests/test_overrides.py`, unless another file is n
 | A later `wf retry` has no override options, or the node starts another pass | The overrides in `run.json` still apply. | `workflow/runner.py:221` | `test_an_override_holds_for_later_retries_and_later_passes` |
 | A later override names the same target | It replaces the earlier one, settings it leaves out included. | `workflow/runs.py:135` | `test_a_later_override_replaces_the_earlier_one` |
 | `wf retry --detach` | wf checks and keeps the overrides before the run goes to the background, and the background process reads them from `run.json`. | `workflow/runner.py:221` | `test_a_detached_retry_hands_the_override_to_its_background_process` |
-| `wf report` | It leaves `override` events out, so a node that never ran gets no row, and the time of a pass doesn't count from an override. | `workflow/report.py:81` | `test_a_report_leaves_overrides_out` |
+| `wf report` | It leaves `override` events out, so a node that never ran gets no row, and the time of a pass doesn't count from an override. | `workflow/report.py:86` | `test_a_report_leaves_overrides_out` |
 
 ### Sessions
 
@@ -731,6 +738,8 @@ gets depends on `session`:
   - The pass starts fresh instead, and an event says why, when: the harness or model differs
     from the previous pass, the session can't be found, it's a Cursor retry after a failed
     continued attempt, or the two passes before it both continued.
+  - The items of a `for_each` node always start fresh, also in a workflow node.
+    Each pass renders the list again, so the item at an index can be a different task.
 
 ### Agent slots
 
@@ -825,6 +834,152 @@ The tests named below are in `tests/test_steer.py`, unless another file is named
 | The process finds several requests, or one sent more than 15 seconds ago, in the future, or in an earlier boot | It takes them oldest first, by the time that `wf steer` puts in the name of each request. It answers an old one that there is no live session, and never delivers it. Both processes tell time by `CLOCK_MONOTONIC` and the boot it counts from, so a change of the wall clock changes nothing. | `workflow/steer.py:250`, `workflow/steer.py:528`, `workflow/steer.py:575`, `workflow/steer.py:170` | `test_requests_go_oldest_first_and_an_old_one_is_answered_but_never_delivered`, `test_the_oldest_request_goes_first_even_when_its_file_was_written_last` |
 | The system doesn't say which boot it is in | `wf steer` says so, and exits 1. The driver reads no request, and a time from an unknown boot counts as old. wf reads the boot from `/proc` on Linux, and from `sysctlbyname()` on macOS, so it runs no program from `PATH`. | `workflow/steer.py:241`, `workflow/steer.py:448`, `workflow/steer.py:143`, `workflow/steer.py:152` | `test_with_no_boot_id_wf_steer_is_off_and_no_request_counts_as_new`, `test_the_boot_id_comes_from_the_system_and_no_program_on_path_runs` |
 
+### Follow-ups
+
+A run ends when it gets to `end`.
+`wf continue` gives a run that succeeded a follow-up request.
+Then the run goes on as a new pass of the same run, in the same run folder:
+
+```sh
+wf continue <run-id> "Also add a --quiet flag"
+wf continue <run-id> --file request.md --limit cost_usd=20 --detach --json
+```
+
+The top-level key `follow_up` says where a request goes in.
+`to` is a node id, or a list of node ids, as in a route.
+These nodes become pending when the follow-up starts, and each one starts once its `needs` are settled.
+The request gets to the templates in the variable `follow_up`, which is `none` until the first follow-up:
+
+```yaml
+follow_up:
+  to: implement
+
+nodes:
+  implement:
+    needs: [plan]
+    workspace: new
+    access: edit
+    session: continue
+    instruction: |
+      {% if follow_up and not review %}
+      A follow-up request for the change on this branch: {{ follow_up.request }}
+      {% elif not review %}
+      {{ start.task }}
+      {% else %}
+      Fix these problems: {{ review.blocking_issues | tojson }}
+      {% endif %}
+```
+
+`follow_up.request` is the text of the latest request, and `follow_up.number` counts the follow-ups from 1.
+The run keeps only the latest request.
+The trace keeps each request.
+
+What a follow-up keeps, and what starts again:
+
+- **Outputs.** The follow-up runs again the part of the graph that `to` can lead to.
+  In that part, each node reads `none` until it runs again, and its `errors` are empty.
+  So the template that a node uses on its first pass also works on its first pass in a follow-up.
+  Each other node, and `start`, keeps its output.
+  `history.<node>` keeps each output of each pass.
+- **Passes.** The pass numbers of each node go on.
+  So the folders, the events and the trace of the earlier passes stay as they are.
+- **Routes.** Each route counts from zero again.
+  So a loop with `max: 3` can go back 3 times in each follow-up.
+- **Limits.** A follow-up has a budget of its own.
+  Its limits are those of the workflow file, with the `--limit` values of `wf continue` on top.
+  They count only what the follow-up spends, and the time that it runs.
+  The `--limit` values that earlier passes got don't apply.
+  `wf retry --limit` changes the limits for the rest of the follow-up.
+  `run.cost_usd`, `run.tokens` and `run.elapsed_s` still count all of the run.
+- **Worktrees and branches.** A run that succeeded removed its worktrees, and kept their branches.
+  `wf continue` brings back each worktree that the run had, on its branch, with the worktrees of its sub-workflows.
+  A temp folder that a node shares comes back empty.
+  So the follow-up works on the commits that each branch has now.
+  When a branch is gone, or another worktree has it, `wf continue` says so and changes nothing.
+- **Bases.** A worktree keeps the base that its node gives.
+  By default, that is the commit that the run started at, so `git diff {{ workspace.implement.base }}...HEAD` shows all the work of the run.
+  A `base` that names a branch gives the commit that the branch has at each pass.
+- **Your checkout.** When a node that the follow-up can reach works in `repo`, the checkout must be on the branch that the run worked on.
+  Else `wf continue` says so and changes nothing.
+- **Sessions.** On its first pass in a follow-up, a `session: continue` node continues its last session.
+  It does so also when the two passes before it both continued, and the count of continued passes in a row starts again there.
+  When the harness can't find the session, the pass starts fresh, and a `session_fresh` event says why.
+  A node in a sub-workflow continues its session too, because a workflow node gives its next pass the sessions of its sub-workflow.
+  The items of a `for_each` node start fresh, as in each pass.
+- **Models.** The overrides that `wf retry --model` gave still apply.
+- **Status and checkpoints.** `wf continue` first sets the status to `running`, with the number of the follow-up.
+  Then one write of the checkpoints holds the request and its limits, as an input of the graph.
+  The next step of the graph takes them in.
+  When wf stops before that write, `wf retry <run-id>` finds that the run ended, and the run succeeded again without the follow-up.
+  When wf stops after it, `wf retry <run-id>` starts the follow-up.
+
+`wf continue` refuses a run that runs, waits for a person, failed, stopped or is paused at a limit.
+`wf retry` and `wf answer` continue those runs.
+It also refuses a run of a workflow without `follow_up`.
+A run keeps the workflow files that it started with.
+So a run that started before its workflow file got `follow_up` can't take a follow-up.
+
+`--detach`, `--json` and `--no-input` work as for `wf retry`.
+With `--detach --json`, wf prints the run id, the run folder, the process id of the background process and the number of the follow-up.
+The request is UTF-8 text of at most 100,000 characters.
+`--file <file>` reads it from a file, and `--file -` from stdin.
+
+A follow-up shows as a new pass of the run:
+
+- `wf status` and `wf list` say `(follow-up 2)`, and their JSON has `"follow_up": 2`.
+  The Firstmate adapter gives the same JSON.
+- `events.jsonl` gets a `follow_up` event with the number and the nodes, but not the request.
+- The trace gets a `run` record `continued`, with the number and the request.
+  A request that feeds a `secret_env` value shows as `[secret]`.
+- `wf status` counts a follow-up as a new lap from the nodes that `to` names.
+  A node that the follow-up leaves out is `skipped`.
+- `wf report` counts the follow-ups of each run.
+  The time that a run waited for a follow-up isn't part of its duration.
+- `wf graph` shows a `follow-up` box, with a dotted arrow to each node that `to` names.
+
+A dry run's follow-up takes the next entries of its script.
+A dry run deletes its branches when it succeeds, so their worktrees start again where the run left them.
+
+The name `follow_up` is reserved, so a node named `follow_up` must get another name.
+
+The tests named below are in `tests/test_continue.py`.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| A run succeeded, and its workflow has `follow_up` | `wf continue` brings back the worktrees, sets the status, and writes the request into the checkpoints. Then it drives the run from the nodes that `to` names. | `workflow/runner.py:682`, `workflow/runner.py:739`, `workflow/runner.py:741`, `workflow/graph.py:156`, `workflow/runner.py:252` | `test_a_follow_up_runs_again_from_its_node_on_the_same_branch_with_the_request`, `test_each_follow_up_has_its_number_and_wf_list_says_it` |
+| The follow-up starts | The nodes that `to` can lead to read `none`, and the others keep their outputs. The routes count from zero, and a `follow_up` event goes to `events.jsonl`. | `workflow/graph.py:76`, `workflow/state.py:206`, `workflow/state.py:216`, `workflow/state.py:218`, `workflow/state.py:221` | `test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest`, `test_routes_count_from_zero_again_in_a_follow_up` |
+| `to` names several nodes | Each of them starts, and a node that needs them all runs after them. | `workflow/state.py:222`, `workflow/validate.py:1110` | `test_a_follow_up_can_start_at_several_nodes` |
+| A template reads `follow_up` | It gets `{request, number}` of the latest request, or `none` before the first follow-up. The state keeps no list of earlier requests. | `workflow/state.py:83`, `workflow/state.py:131`, `workflow/state.py:385` | `test_the_trace_shows_each_follow_up_as_a_new_pass_of_the_run`, `test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest` |
+| A `session: continue` node runs its first pass in a follow-up | It continues its last session, also after two continued passes in a row. | `workflow/state.py:220`, `workflow/state.py:390`, `workflow/nodes.py:663` | `test_a_session_continue_node_continues_its_last_session_in_a_follow_up` |
+| A workflow node runs a later pass, in a follow-up or in a loop | Its new sub-workflow thread starts with the sessions that the last one ended with, so a `session: continue` node in it continues its session. A `for_each` item's thread starts without sessions. | `workflow/state.py:309`, `workflow/nodes.py:804`, `workflow/nodes.py:813` | `test_a_session_continue_node_in_a_sub_workflow_continues_its_session_in_a_follow_up`, `test_a_workflow_node_passes_its_sub_workflows_sessions_to_its_next_pass` in `tests/test_sessions.py` |
+| The follow-up spends tokens or dollars, or runs for some time | Its limits are those of the file, with its own `--limit` values on top. They count only what it spends after it starts. | `workflow/state.py:214`, `workflow/graph.py:80`, `workflow/limits.py:69`, `workflow/context.py:142`, `workflow/runner.py:752` | `test_a_follow_up_has_a_budget_of_its_own_from_the_command_line`, `test_a_follow_up_counts_cost_and_time_from_its_start` |
+| `wf retry` continues a follow-up, also with `--limit` | Its limits are the follow-up's, with the ones that `wf retry` kept in this follow-up on top. The `--limit` values of earlier passes don't apply. | `workflow/runner.py:189`, `workflow/runner.py:191`, `workflow/runner.py:301`, `workflow/runner.py:835`, `workflow/runs.py:121`, `workflow/runs.py:129` | `test_a_follow_up_has_a_budget_of_its_own_from_the_command_line`, `test_limits_that_earlier_passes_got_dont_apply_to_a_follow_up` |
+| A job runs again before the first step of a stream | It sees the clock, the usage and the start of the follow-up as the saved state has them. | `workflow/runner.py:455`, `workflow/context.py:220` | `test_a_job_that_runs_again_before_the_first_step_counts_only_the_follow_ups_time` |
+| The run succeeds | wf records the branch and the commit of each worktree in `worktrees.json`, before the worktrees go. | `workflow/runner.py:560`, `workflow/runs.py:286` | `test_a_sub_workflows_worktree_comes_back_on_its_branch_and_a_gone_one_is_refused` |
+| A follow-up starts | wf brings back each worktree in `worktrees.json` on its branch, and each temp folder that a node shares, empty. | `workflow/runner.py:802`, `workflow/runner.py:811`, `workflow/runner.py:817`, `workflow/workspaces.py:498` | `test_a_follow_up_finds_the_workspaces_of_nodes_it_doesnt_run_again`, `test_a_sub_workflows_worktree_comes_back_on_its_branch_and_a_gone_one_is_refused` |
+| A branch is gone, another worktree has it checked out, or a folder can't be made | `wf continue` says why, removes the worktrees that it brought back, exits 1 and changes nothing else. | `workflow/workspaces.py:514`, `workflow/runner.py:819`, `workflow/runner.py:821` | `test_a_branch_that_is_gone_or_checked_out_elsewhere_changes_nothing`, `test_a_workspace_that_cant_come_back_changes_nothing` |
+| A node that the follow-up can reach works in `repo`, and the checkout is on another branch than the run's | `wf continue` names both branches, exits 1 and changes nothing. | `workflow/runner.py:785`, `workflow/runner.py:796` | `test_a_follow_up_that_works_in_your_checkout_needs_the_branch_the_run_worked_on` |
+| The checkpoints can't be written | The status goes back to what it was, and the worktrees go again. wf says why and exits 1. Ctrl-C, SIGTERM and a lost terminal wait until the writes end. | `workflow/runner.py:743`, `workflow/runner.py:746` | `test_a_follow_up_that_cant_be_written_into_the_checkpoints_changes_nothing` |
+| wf stopped after it set the status, and before it wrote the request | `wf retry` finds that the run ended, so the run succeeded again, without the follow-up number. | `workflow/runner.py:558`, `workflow/runs.py:528` | `test_a_follow_up_that_stopped_before_its_request_was_written_leaves_the_run_as_it_was` |
+| wf stopped after it wrote the request | The state says `running` with the number, never `succeeded` with the old output. `wf continue` refuses another request, and `wf retry` starts the follow-up. | `workflow/runs.py:189`, `workflow/runner.py:773`, `workflow/runner.py:265` | `test_a_follow_up_that_never_started_is_taken_in_by_wf_retry` |
+| The run waits for a person, failed, is paused at a limit, or stopped | `wf continue` names the command that continues it, exits 1 and changes nothing. | `workflow/runner.py:766`, `workflow/runner.py:768`, `workflow/runner.py:770`, `workflow/runner.py:773` | `test_a_run_that_waits_or_failed_is_refused_and_stays_as_it_was`, `test_a_run_at_a_limit_or_one_that_stopped_is_refused` |
+| Another process drives the run | `wf continue` says so, and names `wf wait`. | `workflow/runner.py:705` | `test_a_run_that_still_runs_is_refused` |
+| The workflow of the run has no `follow_up`, or the checkpoints don't hold the run's end | `wf continue` says so, and exits 1. | `workflow/runner.py:777`, `workflow/runner.py:781` | `test_a_workflow_without_follow_up_is_refused`, `test_a_run_whose_end_isnt_in_its_checkpoints_is_refused` |
+| `wf retry` of a run that succeeded, whose workflow has `follow_up` | It says how to give the run a follow-up. | `workflow/runner.py:263` | `test_a_branch_that_is_gone_or_checked_out_elsewhere_changes_nothing` |
+| The request is missing, given twice, empty or too long | `wf continue` says so before it reads the run. | `workflow/cli.py:699`, `workflow/cli.py:475`, `workflow/cli.py:477` | `test_the_request_is_checked_before_the_run_is_read`, `test_the_request_can_come_from_stdin` |
+| `--detach --json` | wf prints the run, its folder, the process id and the number of the follow-up, and a background `wf retry` drives the follow-up. | `workflow/runner.py:756`, `workflow/runner.py:757` | `test_a_detached_follow_up_prints_json_and_wait_reports_it` |
+| `wf status`, `wf list`, `wf wait` and the Firstmate adapter read a run that took a follow-up | The state has `follow_up` with its number, from `status.json`, and the text says `(follow-up N)`. | `workflow/runs.py:189`, `workflow/cli.py:505`, `workflow/firstmate.py:168` | `test_each_follow_up_has_its_number_and_wf_list_says_it`, `test_a_detached_follow_up_prints_json_and_wait_reports_it`, `test_firstmate_sees_the_follow_up_as_a_new_pass_of_the_same_run` |
+| The trace of a run with a follow-up | It has a `run` record `continued` with the number and the request, and `wf trace` shows them. A request that feeds a secret shows as `[secret]`, and no event holds it. | `workflow/runner.py:855`, `workflow/state.py:221`, `workflow/trace_view.py:204` | `test_the_trace_shows_each_follow_up_as_a_new_pass_of_the_run`, `test_a_secret_request_stays_out_of_the_trace_and_the_events` |
+| `wf status` estimates a follow-up | It starts a new lap from the nodes that `to` names. Each loop counts from zero, and a node that the follow-up leaves out is `skipped`. | `workflow/progress.py:184`, `workflow/progress.py:189` | `test_wf_status_counts_a_follow_up_as_a_new_lap_from_its_node`, `test_wf_status_says_a_node_that_a_follow_up_skips_is_skipped` |
+| `wf report` reads a run with a follow-up, or `wf status` learns from it | It counts the follow-up, and leaves the time that the run waited for it out of the duration. What wf learnt from a run is learnt again when its events grow. | `workflow/report.py:80`, `workflow/progress.py:136`, `workflow/progress.py:517` | `test_wf_report_counts_follow_ups_and_not_the_time_the_run_waited_for_them`, `test_what_earlier_runs_teach_is_learnt_again_once_a_follow_up_adds_to_them` |
+| `wf ui` shows a run that took a follow-up | The page reads only the events of the follow-up. Its states, numbers and progress are those that `wf status` and `wf report` give, and the time that the run waited doesn't count. | `workflow/progress.py:184`, `workflow/report.py:80`, `workflow/report.py:187` | `test_wf_ui_reads_only_the_follow_up_into_the_view_of_a_run_it_has_shown` |
+| `wf graph` draws a workflow with `follow_up` | A `follow-up` box has a dotted arrow to each node that `to` names. | `workflow/diagram.py:34` | `test_wf_graph_shows_where_a_follow_up_comes_in` |
+| A dry run takes a follow-up | It takes the next entries of its script, and its branches start again where the run left them. | `workflow/runner.py:717`, `workflow/workspaces.py:512` | `test_a_dry_run_takes_the_next_entries_of_its_script_and_makes_its_branches_again` |
+| `follow_up.to` names `start`, `end` or a node that doesn't exist, or `follow_up` has another key, or a node is named `follow_up` | `wf validate` errors. | `workflow/validate.py:1068`, `workflow/spec.py:306`, `workflow/spec.py:47` | `test_follow_up_names_nodes_of_the_workflow` |
+| A template reads `follow_up` | `wf validate` errors in a workflow without `follow_up`. It warns when a field is read outside `{% if follow_up %}`, and when a command puts it into the shell unquoted. | `workflow/validate.py:276`, `workflow/validate.py:407`, `workflow/validate.py:1049`, `workflow/validate.py:481` | `test_a_template_reads_follow_up_only_in_a_workflow_that_has_it_and_checks_it_first` |
+| No node that a follow-up runs again reads `follow_up` | `wf validate` warns, also when a node before the entry reads it. | `workflow/validate.py:1076` | `test_a_template_reads_follow_up_only_in_a_workflow_that_has_it_and_checks_it_first` |
+| A template reads a node whose output a follow-up clears, and that node might not run again before it | `wf validate` warns, and says that this is because of a follow-up. It steps the rules of the scheduler through the follow-up in each way it can go. Any job can fail and run again later, any route can be taken while its `max` allows, and a `for_each` list can be empty. A node counts as run before another, or before the end, only when it finished first in each of those ways. It steps each state once, so it ends for each workflow, also for a list that leads back to its node many times. With more than about ten nodes that run at once, only the nodes that each way to a node passes through count. | `workflow/validate.py:418`, `workflow/validate.py:1080`, `workflow/validate.py:1152`, `workflow/validate.py:1198`, `workflow/validate.py:1226` | `test_a_template_that_reads_a_node_a_follow_up_clears_gets_a_warning`, `test_a_workflow_with_follow_up_validates`, `test_a_follow_up_can_start_at_several_nodes`, `test_an_entry_that_only_a_route_leads_from_isnt_certain_before_another_entry`, `test_an_entry_that_the_scheduler_starts_first_to_break_a_wait_reads_no_later_entry`, `test_a_node_after_an_entry_counts_as_run_before_a_join_that_waits_for_it`, `test_an_entry_waits_for_a_later_entry_it_needs_when_no_wait_can_lock`, `test_a_node_that_an_entry_leads_to_isnt_run_before_a_join_that_the_scheduler_can_start_first`, `test_a_node_that_a_join_waits_for_runs_first_when_both_become_pending_together`, `test_each_read_that_validate_doesnt_warn_about_finds_an_output_however_a_follow_up_runs`, `test_validate_ends_for_an_empty_list_that_leads_back_to_itself_many_times` |
+
 ## The output tool
 
 Each agent attempt gets one tool, `submit_result`. Its input schema is the node's
@@ -907,7 +1062,8 @@ the context to fix them.
 - The commit skips git hooks, and it is signed when your git config signs commits.
   "Commit signing" below has the rules.
 - When a run succeeds, its worktrees are removed and its branches are kept. A failed run
-  keeps its worktrees for `wf retry`.
+  keeps its worktrees for `wf retry`. `wf continue` brings them back from their branches
+  (see [Follow-ups](#follow-ups)).
 - `wf validate` warns when two `edit` nodes could run at the same time in the same workspace.
 
 ### Commit signing
@@ -945,8 +1101,9 @@ The tests named below are in `tests/test_workspaces.py`.
   input.json
   run.json                      the workflow's name, and the limits and models that `wf retry` keeps
   branches.json                 the branches `branch` named, and where the run left them
+  worktrees.json                the branch and commit of each worktree when the run last succeeded, for wf continue
   output.json                   the end output, once the run succeeds
-  status.json                   running | waiting | succeeded | failed | limit
+  status.json                   running | waiting | succeeded | failed | limit, and the latest follow-up's number
   events.jsonl                  one line per event: node started, finished, route taken, agent session started, override, ...
   trace.jsonl                   one record per line of what the run read, decided and did (see The trace)
   blobs/                        values too long for a line of the trace, by their sha256
@@ -987,7 +1144,7 @@ A sub-workflow writes to the trace of its top-level run.
 
 | `kind` | Written when | Holds |
 |---|---|---|
-| `run` | A `wf run` or `wf retry` process starts to drive the run. | `started` or `retried`, the workflow and the input. |
+| `run` | A `wf run`, `wf retry` or `wf continue` process starts to drive the run. | `started`, `retried` or `continued`, the workflow and the input. For `continued`, the number of the follow-up and its request. |
 | `pass` | A node starts a pass. | The node and pass, and for a `for_each` node the number of items. |
 | `job` | A pass of a node, or an item, starts in this process. | The item, and the number of its first attempt. |
 | `render` | wf renders a template or evaluates an expression. | The field, the template, each variable path that it read with its value, and the result or the error. |
@@ -1065,7 +1222,7 @@ The tests named below are in `tests/test_trace.py`, unless another file is named
 | A value has more than 1,000 characters, or looks like a reference to a blob | It goes to `blobs/` once, and each record refers to it by its sha256. | `workflow/trace.py:154` | `test_a_large_value_is_stored_once_and_referenced`, `test_wf_trace_reads_only_blobs_of_the_run` |
 | A command node names an `env` value in `secret_env` | The trace shows `[secret]` for it, for the input that it comes from, and for its text in each later record, also after `wf retry`. | `workflow/trace.py:372`, `workflow/runner.py:456` | `test_a_secret_never_enters_the_trace` |
 | The secret value comes from `item` | The trace hides the item in that node only. It also hides the element of the `for_each` list, or all that the `for_each` reads when it isn't a plain path. An index such as `[-1]` counts as any element. | `workflow/trace.py:292` | `test_a_secret_item_is_hidden_whatever_its_for_each_and_only_in_its_node` |
-| The secret value comes from the output of a workflow node, or from its `history` | The sub-workflow hides the end output that gives it, and what that end output reads. All of a node's `history`, or all of `history`, hides each end output. | `workflow/trace.py:264`, `workflow/graph.py:122` | `test_a_secret_that_a_sub_workflow_returns_is_hidden_inside_it_too` |
+| The secret value comes from the output of a workflow node, or from its `history` | The sub-workflow hides the end output that gives it, and what that end output reads. All of a node's `history`, or all of `history`, hides each end output. | `workflow/trace.py:264`, `workflow/graph.py:130` | `test_a_secret_that_a_sub_workflow_returns_is_hidden_inside_it_too` |
 | A secret value is short | Its text is removed all the same. | `workflow/trace.py:118` | `test_a_short_secret_is_removed_wherever_it_shows` |
 | A harness reports a `submit_result` call before `submit_result` runs | The `tool_call` hides the secret fields of the result, as the `submit_result` record does. | `workflow/trace.py:536` | `test_a_secret_in_an_agents_result_is_hidden_from_its_harness_record_of_the_call` |
 | `secret_env` names a variable that `env` doesn't set | `wf validate` errors. | `workflow/validate.py:352` | `tests/test_validate.py::test_secret_env_names_only_what_env_sets` |
@@ -1078,7 +1235,7 @@ The tests named below are in `tests/test_trace.py`, unless another file is named
 | A command's log or stream file can't be opened | The command doesn't start. | `workflow/nodes.py:714` | `test_a_command_whose_stream_file_cant_be_opened_never_starts` |
 | `wf retry` stops without driving the run: it still waits for a person, or the run has ended | It writes no `run` record. Each `run` record has a `run_stopped` record. | `workflow/runner.py:265` | `test_each_run_record_has_a_run_stopped_record_whatever_wf_retry_does` |
 | `wf trace <run-id> --var <path>` | It shows the value of the path in each render that read it, pass after pass. | `workflow/trace_view.py:119` | `test_wf_trace_var_shows_a_value_across_the_passes_of_a_loop` |
-| `wf trace <run-id> --field routes` | It shows each route with its `when`, the values that it read, its result and its `max`, and the route that the node took. | `workflow/trace_view.py:259` | `test_wf_trace_says_why_a_route_was_taken` |
+| `wf trace <run-id> --field routes` | It shows each route with its `when`, the values that it read, its result and its `max`, and the route that the node took. | `workflow/trace_view.py:261` | `test_wf_trace_says_why_a_route_was_taken` |
 | `wf trace --json` | Each value from `blobs/` comes back in full. | `workflow/trace_view.py:62` | `test_wf_trace_reads_blobs_back_in_json_and_shows_a_missing_one_as_its_reference` |
 | A reference names a file outside `blobs/`, or a blob that is gone | `wf trace` shows the reference, and reads no other file. | `workflow/trace_view.py:47`, `workflow/trace_view.py:188` | `test_wf_trace_reads_only_blobs_of_the_run`, `test_wf_trace_reads_blobs_back_in_json_and_shows_a_missing_one_as_its_reference` |
 
@@ -1208,19 +1365,19 @@ It is three plain files in `workflow/ui/`, with no build step and nothing from a
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| A run of a workflow with a loop, and no earlier runs that succeeded | Each step weighs 1, and the loop counts up to its `max`. Event by event, the percentage goes up and never down. That holds also between a node's end and its route. | `workflow/progress.py:330`, `workflow/progress.py:213` | `test_without_earlier_runs_each_step_weighs_one_and_each_loop_counts_to_its_max`, `test_the_percentage_never_goes_down_event_by_event_even_before_a_route_is_chosen` |
-| A loop's way back has no `max` | The smallest `max` of another route in the loop bounds it. Only the way back counts its laps. | `workflow/shape.py:111`, `workflow/progress.py:376` | `test_a_loop_whose_way_back_has_no_max_is_bounded_by_the_route_that_has_one_and_counted_by_its_own` |
+| A run of a workflow with a loop, and no earlier runs that succeeded | Each step weighs 1, and the loop counts up to its `max`. Event by event, the percentage goes up and never down. That holds also between a node's end and its route. | `workflow/progress.py:341`, `workflow/progress.py:224` | `test_without_earlier_runs_each_step_weighs_one_and_each_loop_counts_to_its_max`, `test_the_percentage_never_goes_down_event_by_event_even_before_a_route_is_chosen` |
+| A loop's way back has no `max` | The smallest `max` of another route in the loop bounds it. Only the way back counts its laps. | `workflow/shape.py:111`, `workflow/progress.py:387` | `test_a_loop_whose_way_back_has_no_max_is_bounded_by_the_route_that_has_one_and_counted_by_its_own` |
 | A heavier path leads into a loop | A lap counts only the loop's own path. | `workflow/shape.py:88` | `test_a_lap_is_the_loop_s_own_path_not_a_heavier_one_into_it` |
-| A needs edge closes a loop | The lap counts when the step that the edge leaves finishes, after the step that the edge goes to has run. When `start` also leads into the step that the edge leaves, its first end is not a lap. When a route made the step that the edge goes to pending already, that end is not a lap. The edge doesn't send the run back. | `workflow/progress.py:218`, `workflow/progress.py:378` | `test_a_loop_that_a_needs_edge_closes_counts_its_lap_when_it_goes_back`, `test_a_needs_edge_loop_counts_no_lap_before_its_first_step_ran`, `test_a_needs_edge_loop_counts_no_lap_when_a_route_made_its_first_step_pending_already` |
-| The runs folder holds earlier runs of the workflow that succeeded | Steps weigh their mean time and loops their mean count, from `wf report`. `left_s` gives the time left. A dry run counts only for a dry run. The numbers belong to the version of the workflow that asks for them. | `workflow/progress.py:112`, `workflow/progress.py:128` | `test_with_earlier_runs_steps_weigh_their_time_and_loops_their_mean_count`, `test_wf_status_says_how_far_a_run_is_and_learns_from_earlier_real_runs` |
-| A step that no earlier run ran | It weighs the mean of the other steps, and its time so far counts against that mean. | `workflow/progress.py:328`, `workflow/progress.py:359` | `test_a_step_that_no_earlier_run_ran_weighs_the_mean_of_the_others` |
-| The run has gone past a loop | The loop counts no more. | `workflow/progress.py:382` | `test_a_loop_the_run_has_left_counts_no_more` |
-| A route leaves out a branch | The nodes on it are `skipped`. The steps, the percentage and the time left leave them out. | `workflow/progress.py:365`, `workflow/progress.py:437` | `test_a_branch_a_route_left_out_is_skipped_and_counts_no_more` |
-| A branch that a route left out leads back into the chosen branch | Its steps weigh nothing, in the time and in the step count. | `workflow/progress.py:330`, `workflow/progress.py:331` | `test_a_branch_left_out_that_leads_back_into_the_chosen_one_counts_no_more` |
-| Parallel steps are in progress | The step with the most left decides the estimate. Of steps with as much left, the one with the least done decides, whatever the order of the steps. | `workflow/progress.py:365` | `test_a_slow_parallel_step_holds_the_estimate_back`, `test_open_steps_with_as_much_left_are_told_apart_by_the_least_done_not_by_chance` |
-| A run waits for a person, is at a limit, or stopped | Its steps in progress are `paused`, and the time of each step stops at the run's last event. | `workflow/progress.py:430`, `workflow/progress.py:321` | `test_a_step_in_progress_of_a_run_that_does_not_move_is_paused`, `test_a_run_that_does_not_move_stops_its_clock_at_its_last_event` |
-| A `for_each` step, or a sub-workflow, is in progress | Its items that finished, or its sub-workflow's own estimate, count for it in part, before its time does. | `workflow/progress.py:354`, `workflow/progress.py:343` | `test_the_items_that_finished_beat_the_time_a_step_took`, `test_a_sub_workflow_in_progress_counts_its_own_steps_and_items` |
-| A run's files go while `wf status` reads them | It says where the run stands, with no estimate. | `workflow/progress.py:409`, `workflow/report.py:358` | `test_wf_status_still_says_where_a_run_stands_when_its_files_change_meanwhile` |
+| A needs edge closes a loop | The lap counts when the step that the edge leaves finishes, after the step that the edge goes to has run. When `start` also leads into the step that the edge leaves, its first end is not a lap. When a route made the step that the edge goes to pending already, that end is not a lap. The edge doesn't send the run back. | `workflow/progress.py:229`, `workflow/progress.py:389` | `test_a_loop_that_a_needs_edge_closes_counts_its_lap_when_it_goes_back`, `test_a_needs_edge_loop_counts_no_lap_before_its_first_step_ran`, `test_a_needs_edge_loop_counts_no_lap_when_a_route_made_its_first_step_pending_already` |
+| The runs folder holds earlier runs of the workflow that succeeded | Steps weigh their mean time and loops their mean count, from `wf report`. `left_s` gives the time left. A dry run counts only for a dry run. The numbers belong to the version of the workflow that asks for them. | `workflow/progress.py:115`, `workflow/progress.py:131` | `test_with_earlier_runs_steps_weigh_their_time_and_loops_their_mean_count`, `test_wf_status_says_how_far_a_run_is_and_learns_from_earlier_real_runs` |
+| A step that no earlier run ran | It weighs the mean of the other steps, and its time so far counts against that mean. | `workflow/progress.py:339`, `workflow/progress.py:370` | `test_a_step_that_no_earlier_run_ran_weighs_the_mean_of_the_others` |
+| The run has gone past a loop | The loop counts no more. | `workflow/progress.py:393` | `test_a_loop_the_run_has_left_counts_no_more` |
+| A route leaves out a branch | The nodes on it are `skipped`. The steps, the percentage and the time left leave them out. | `workflow/progress.py:376`, `workflow/progress.py:448` | `test_a_branch_a_route_left_out_is_skipped_and_counts_no_more` |
+| A branch that a route left out leads back into the chosen branch | Its steps weigh nothing, in the time and in the step count. | `workflow/progress.py:341`, `workflow/progress.py:342` | `test_a_branch_left_out_that_leads_back_into_the_chosen_one_counts_no_more` |
+| Parallel steps are in progress | The step with the most left decides the estimate. Of steps with as much left, the one with the least done decides, whatever the order of the steps. | `workflow/progress.py:376` | `test_a_slow_parallel_step_holds_the_estimate_back`, `test_open_steps_with_as_much_left_are_told_apart_by_the_least_done_not_by_chance` |
+| A run waits for a person, is at a limit, or stopped | Its steps in progress are `paused`, and the time of each step stops at the run's last event. | `workflow/progress.py:441`, `workflow/progress.py:332` | `test_a_step_in_progress_of_a_run_that_does_not_move_is_paused`, `test_a_run_that_does_not_move_stops_its_clock_at_its_last_event` |
+| A `for_each` step, or a sub-workflow, is in progress | Its items that finished, or its sub-workflow's own estimate, count for it in part, before its time does. | `workflow/progress.py:365`, `workflow/progress.py:354` | `test_the_items_that_finished_beat_the_time_a_step_took`, `test_a_sub_workflow_in_progress_counts_its_own_steps_and_items` |
+| A run's files go while `wf status` reads them | It says where the run stands, with no estimate. | `workflow/progress.py:420`, `workflow/report.py:363` | `test_wf_status_still_says_where_a_run_stands_when_its_files_change_meanwhile` |
 | An agent session opens, and closes | `events.jsonl` gets `session_started`, and then `session_ended`. | `workflow/nodes.py:504`, `workflow/nodes.py:569` | `test_each_session_starts_and_ends_with_an_event`, `test_a_session_inside_a_sub_workflow_names_its_transcript_from_the_run_folder` |
 | What the attempt of an agent session has used changes | `events.jsonl` gets `agent_usage` with the tokens and cost so far: after each turn, every 30 seconds while a turn runs, and when the session closes. | `workflow/nodes.py:509`, `workflow/nodes.py:519`, `workflow/nodes.py:539`, `workflow/nodes.py:563` | `test_a_session_tells_what_its_attempt_has_used_so_far_while_and_after_each_turn_runs`, `test_a_timed_out_turn_still_counts_the_tokens_it_used` |
 | A session has no `session_ended`, its attempt goes on, and its process drives the run | `wf sessions` lists it. | `workflow/observe.py:88` | `test_wf_sessions_lists_the_agent_sessions_that_run_now` |
@@ -1237,12 +1394,12 @@ It is three plain files in `workflow/ui/`, with no build step and nothing from a
 | `events.jsonl` was cut back and grew again since the page last asked | The server reads the run again from its start. | `workflow/ui.py:214` | `test_a_refresh_starts_over_when_events_jsonl_is_cut_back_and_grows_again` |
 | A look for a file of an attempt fails for another reason than a missing file | The server looks again at the next request, also for a node that finished. | `workflow/ui.py:382`, `workflow/ui.py:363` | `test_an_error_while_looking_for_a_finished_node_s_files_hides_its_attempt_only_until_the_next_refresh` |
 | A sub-workflow attempt starts over | The page lists the attempts of each of its steps in both sub-workflow attempts. | `workflow/ui.py:322` | `test_a_sub_workflow_attempt_that_starts_over_lists_the_attempts_of_both` |
-| The page shows the steps | Each step has its state, also a step in a sub-workflow, from the run's events. The graph shows the same state. A step whose attempt around it ended is `failed`, and a step of a workflow node that the run goes back to is `waiting`. When the workflow node is done, a step that its sub-workflow didn't reach is `skipped`. | `workflow/progress.py:296`, `workflow/progress.py:307`, `workflow/progress.py:313`, `workflow/progress.py:310` | `test_each_step_has_a_state_and_a_step_that_runs_shows_its_numbers_so_far`, `test_each_step_of_a_sub_workflow_has_a_state_from_its_own_events` |
-| A step runs | Its numbers on the page add the attempt that runs, and the time since its pass started. They also add the last `agent_usage` of each of its sessions, in its sub-workflow too. A step inside an attempt that ended adds nothing more. | `workflow/report.py:146`, `workflow/report.py:160`, `workflow/report.py:203` | `test_each_step_has_a_state_and_a_step_that_runs_shows_its_numbers_so_far`, `test_a_pass_that_runs_adds_what_it_has_done_so_far_also_when_its_sub_workflow_starts_over`, `test_the_spending_so_far_of_items_and_of_agents_inside_workflow_items_adds_up` |
-| An agent attempt waits for its agent slot | The page doesn't count it as an attempt until it has the slot. | `workflow/report.py:98` | `test_an_agent_attempt_that_waits_for_its_slot_has_not_started`, `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
-| A node fails before it starts, and `wf retry` starts it | Only its pass counts in its time, in `wf report` and on the page. | `workflow/report.py:85`, `workflow/report.py:131` | `test_a_node_that_failed_before_it_started_adds_no_time_once_its_pass_ran` |
-| The same attempt of a workflow node goes on after a limit, a question or a crash | Its steps keep their states, times and spending. An attempt with a new number starts them over. | `workflow/progress.py:245`, `workflow/report.py:91` | `test_a_sub_workflow_attempt_that_goes_on_keeps_what_its_steps_did`, `test_a_sub_workflow_attempt_that_goes_on_keeps_the_time_and_spending_of_its_steps` |
-| A workflow file can't be read, for another reason than a missing or damaged file | wf ui reads it again at the next request, and then plays the events that came before. A missing or damaged file isn't read again. | `workflow/progress.py:280`, `workflow/progress.py:285`, `workflow/ui.py:183` | `test_a_sub_workflow_that_can_t_be_read_for_now_gets_its_events_once_it_can`, `test_a_workflow_file_that_can_t_be_read_for_now_is_read_at_the_next_refresh` |
+| The page shows the steps | Each step has its state, also a step in a sub-workflow, from the run's events. The graph shows the same state. A step whose attempt around it ended is `failed`, and a step of a workflow node that the run goes back to is `waiting`. When the workflow node is done, a step that its sub-workflow didn't reach is `skipped`. | `workflow/progress.py:307`, `workflow/progress.py:318`, `workflow/progress.py:324`, `workflow/progress.py:321` | `test_each_step_has_a_state_and_a_step_that_runs_shows_its_numbers_so_far`, `test_each_step_of_a_sub_workflow_has_a_state_from_its_own_events` |
+| A step runs | Its numbers on the page add the attempt that runs, and the time since its pass started. They also add the last `agent_usage` of each of its sessions, in its sub-workflow too. A step inside an attempt that ended adds nothing more. | `workflow/report.py:151`, `workflow/report.py:165`, `workflow/report.py:208` | `test_each_step_has_a_state_and_a_step_that_runs_shows_its_numbers_so_far`, `test_a_pass_that_runs_adds_what_it_has_done_so_far_also_when_its_sub_workflow_starts_over`, `test_the_spending_so_far_of_items_and_of_agents_inside_workflow_items_adds_up` |
+| An agent attempt waits for its agent slot | The page doesn't count it as an attempt until it has the slot. | `workflow/report.py:103` | `test_an_agent_attempt_that_waits_for_its_slot_has_not_started`, `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
+| A node fails before it starts, and `wf retry` starts it | Only its pass counts in its time, in `wf report` and on the page. | `workflow/report.py:90`, `workflow/report.py:136` | `test_a_node_that_failed_before_it_started_adds_no_time_once_its_pass_ran` |
+| The same attempt of a workflow node goes on after a limit, a question or a crash | Its steps keep their states, times and spending. An attempt with a new number starts them over. | `workflow/progress.py:256`, `workflow/report.py:96` | `test_a_sub_workflow_attempt_that_goes_on_keeps_what_its_steps_did`, `test_a_sub_workflow_attempt_that_goes_on_keeps_the_time_and_spending_of_its_steps` |
+| A workflow file can't be read, for another reason than a missing or damaged file | wf ui reads it again at the next request, and then plays the events that came before. A missing or damaged file isn't read again. | `workflow/progress.py:291`, `workflow/progress.py:296`, `workflow/ui.py:183` | `test_a_sub_workflow_that_can_t_be_read_for_now_gets_its_events_once_it_can`, `test_a_workflow_file_that_can_t_be_read_for_now_is_read_at_the_next_refresh` |
 | More than 64 runs move | The server keeps what it read of each run that a page asked for in the last minute. So each refresh of the list reads only the new events of each run. | `workflow/ui.py:255` | `test_the_views_of_runs_that_a_page_asks_for_stay_when_more_than_64_move` |
 | The server can't read a run that moves | The list shows that run without its progress, and the other runs with theirs. | `workflow/ui.py:130` | `test_a_damaged_run_leaves_out_only_its_own_progress_from_the_run_list` |
 | An item of a `for_each` workflow node ends, or its attempt does | The server stops looking for the files of the attempts inside it, and goes on for the other items. | `workflow/ui.py:350` | `test_attempts_inside_workflow_items_end_with_their_item_or_their_attempt_and_not_a_sibling_s` |
@@ -1287,6 +1444,8 @@ Errors:
 14. A node with `tools` can't run where its agent's commands reach the Keychain, unless it sets `tools_with_shell: true`.
 15. Each name in a node's `secret_env` is set in its `env`.
     Each name in `defaults.secret_env` is set in the `env` of a command node.
+16. `follow_up.to` names nodes of the workflow, not `start` or `end`.
+    A template reads `follow_up` only in a workflow that has the `follow_up` key.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`
@@ -1308,6 +1467,9 @@ Warnings:
   Cursor loads your account's User Rules, the skills in your home folder, and the repo's hooks.
 - An agent with `access: full` reads output from an agent with `tools`.
   Messages, notes and mail that other people write can carry instructions aimed at agents.
+- A template reads a field of `follow_up` outside an `{% if follow_up %}` that checks it.
+- The workflow has `follow_up`, and no template reads `follow_up`.
+- A template reads a node whose output a follow-up clears, and that might not run again before it in a follow-up.
 
 ## Implementation notes (Python, LangGraph)
 

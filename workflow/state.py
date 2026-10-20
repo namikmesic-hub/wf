@@ -13,13 +13,12 @@ replaces the old one) is right. `inbox` is different: in one step, every
 those lists instead of keeping only the last one. `schedule` reads the inbox
 and empties it by returning Overwrite([]), which bypasses the reducer.
 
-Progress is a working copy of RunState with the operations `schedule` needs:
-record() a finished job, starts_now() for the nodes whose needs are settled,
-retry() what failed. It uses the pure rules in scheduler.py and evaluates `when`
-and `for_each` with templates.py. It does no I/O itself, so it's easy to follow
-(and to test) without LangGraph. Progress events go to `emit`. The run's trace
-(trace.Scope, when given) gets each pass, each route decision, and each
-`for_each` and `when` with what it read.
+Progress is a working copy of RunState with the operations that `schedule` needs. Its record() takes
+in a finished job, and its starts_now() starts the nodes whose needs are settled. Its retry() reruns
+what failed, and follow_up() takes in a request from `wf continue`. It uses the rules in scheduler.py, and
+evaluates `when` and `for_each` with templates.py. It does no I/O, so it's easy to test without LangGraph.
+Progress events go to `emit`. The run's trace (trace.Scope, when given) gets each pass, each route
+decision, and each `for_each` and `when` with what it read.
 """
 
 import copy
@@ -42,7 +41,7 @@ class Job(TypedDict):
     item: Any
     attempt: int  # the number of its first attempt (after `wf retry`, numbering continues)
     vars: dict  # template variables, as they were when the node started
-    session: NotRequired[dict | None]  # session: continue: the session of the node's last pass
+    session: NotRequired[dict | None]  # the session of the node's last pass, or a workflow node's {sessions} of it
 
 
 class Finished(TypedDict):
@@ -58,7 +57,7 @@ class Finished(TypedDict):
     workspace: dict | None
     usage: dict  # {"cost_usd": float, "tokens": int}
     stopped: NotRequired[str]  # "limit": a limit stopped the job (a retry didn't start, or a sub-workflow paused)
-    session: NotRequired[dict]  # the agent session this pass ended in {harness, model, id, cost_usd, streak}
+    session: NotRequired[dict]  # the agent session this pass ended in {harness, model, id, cost_usd, streak}, or {sessions}
 
 
 class RunState(TypedDict, total=False):
@@ -81,6 +80,7 @@ class RunState(TypedDict, total=False):
     limit_name: str | None  # ...and its name (limits.py)
     retry: bool  # set when `wf retry` continues a failed run
     output: dict | None  # the end output, once the run succeeded
+    follow_up: dict  # the latest request from `wf continue`: {request, number, limits, and pending or from}
     inbox: Annotated[list[Finished], operator.add]  # results of the last step's jobs
 
 
@@ -128,7 +128,7 @@ class Progress:
             "workspace": {n: s["workspaces"].get(n) for n in nodes},
             "errors": {n: s["errors"].get(n, []) for n in nodes},
             "run": {k: run.get(k) for k in ("id", "dir", "cost_usd", "tokens", "elapsed_s", "base")},
-            "session": {"continued": False},
+            "session": {"continued": False}, "follow_up": follow_up_variable(s.get("follow_up")),
         }
 
     # ---------- changing ----------
@@ -202,6 +202,24 @@ class Progress:
             elif active["waiting"] == 0:
                 self._complete(node)  # it failed after its jobs finished, e.g. in a `when`
         return jobs
+
+    def follow_up(self, elapsed_s: float) -> None:
+        """Take in the request that `wf continue` gave a run that succeeded: a new pass of the run, from the
+        nodes that the workflow's `follow_up` names. Every node they can lead to reads none until it runs
+        again, and the others keep their outputs. Routes count from zero again, the limits count from
+        `from`, and the next pass of a `session: continue` node continues its last session."""
+        targets, given = list(self.wf.follow_up.targets), self.s["follow_up"]
+        usage = self.s["usage"]
+        self.s["follow_up"] = {**{k: v for k, v in given.items() if k != "pending"},
+                               "from": {"cost_usd": usage["cost_usd"], "tokens": usage["tokens"], "elapsed_s": elapsed_s}}
+        self.s["status"], self.s["failure"], self.s["output"] = "running", None, None
+        self.s["taken"] = {}
+        for node in self.topo.reachable(targets):
+            self.s["outputs"].pop(node, None)
+            self.s["errors"].pop(node, None)
+        _fresh_streaks(self.s["sessions"])  # the two continued passes in a row count from here
+        self.emit({"event": "follow_up", "number": given["number"], "to": targets})
+        self._make_pending(targets)
 
     # ---------- inside ----------
 
@@ -288,7 +306,8 @@ class Progress:
     def _job(self, node: str, active: dict, index: int | None, item: Any, attempt: int = 1) -> Job:
         job = Job(node=node, pass_no=active["pass"], index=index, item=item, attempt=attempt, vars=active["vars"])
         spec_node = self.wf.nodes[node]
-        if spec_node.kind == "agent" and spec_node.for_each is None and self.wf.setting(node, "session") == "continue":
+        continues = spec_node.kind == "workflow" or (spec_node.kind == "agent" and self.wf.setting(node, "session") == "continue")
+        if continues and spec_node.for_each is None:  # a workflow node passes its sub-workflow's sessions on
             job["session"] = self.s["sessions"].get(node)
         return job
 
@@ -361,3 +380,17 @@ class Progress:
         if route_event:
             self.emit(route_event)
         self._make_pending(scheduler.triggered(self.topo, node, route))
+
+
+def follow_up_variable(given: dict | None) -> dict | None:
+    """The `follow_up` template variable: the latest request and its number, or none before the first one."""
+    return {"request": given["request"], "number": given["number"]} if given else None
+
+
+def _fresh_streaks(sessions: dict) -> None:
+    """Count the continued passes in a row from zero again, also for the sessions of sub-workflows."""
+    for session in sessions.values():
+        if "sessions" in session:
+            _fresh_streaks(session["sessions"])
+        else:
+            session["streak"] = 0

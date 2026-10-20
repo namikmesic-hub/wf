@@ -32,6 +32,9 @@ step then weighs its mean time per pass in them. A step that none of them ran
 weighs the mean of the other steps. Each loop counts as many times as they
 went back on average. `left` is then in seconds: the time left.
 
+A follow-up (`wf continue`) starts a new lap from the nodes it names. The
+nodes those can lead to are ahead again, and each loop counts from zero.
+
 A step in progress counts in part: the share of its items that finished, or
 the share of its sub-workflow that is done. With earlier runs, a step with no
 items and no sub-workflow counts its time so far against its weight. While the
@@ -93,7 +96,7 @@ def _route_index(topo: Topology, node: str, event: dict) -> int | None:
 class Earlier:
     runs: int
     mean: dict[str, float]  # node -> seconds per pass
-    taken: dict[tuple[str, int], float]  # (node, route index) -> times taken per run
+    taken: dict[tuple[str, int], float]  # (node, route index) -> times taken per run, or per follow-up of one
 
 
 def earlier(run: Run, name: str) -> list[Run]:
@@ -117,7 +120,7 @@ def earlier(run: Run, name: str) -> list[Run]:
     return found
 
 
-_LEARNT: dict[tuple, Earlier] = {}  # finished runs don't change, so their numbers are kept
+_LEARNT: dict[tuple, Earlier] = {}  # by the size of each run's events: a run that `wf continue` gives a follow-up grows
 _LEARNT_MOST = 32
 _LEARNING = threading.Lock()  # wf ui asks from several threads
 
@@ -125,11 +128,12 @@ _LEARNING = threading.Lock()  # wf ui asks from several threads
 def learn(workflow: spec.Workflow, runs: list[Run]) -> Earlier:
     """What earlier runs say about each step's time and each route's use, from `wf report`. The
     numbers belong to this version of the workflow, with its nodes and routes."""
-    key = (hashlib.sha256(workflow.model_dump_json().encode()).hexdigest(), tuple(str(r.dir) for r in runs))
+    key = (hashlib.sha256(workflow.model_dump_json().encode()).hexdigest(), tuple((str(r.dir), _size(r)) for r in runs))
     with _LEARNING:
         if key in _LEARNT:
             return _LEARNT[key]
-    found, count = report.build(runs), len(runs)
+    found = report.build(runs)
+    count = sum(1 + summary["follow_ups"] for summary in found["runs"])  # each follow-up is a lap of its own
     mean = {name: node["duration_s"] / node["passes"] for name, node in found["nodes"].items()
             if name in workflow.nodes and node["passes"]}
     taken = {}
@@ -177,6 +181,13 @@ class Tracker:
         """Play one event: of a node of this workflow, or of a step in one of its sub-workflows (build[2]/implement)."""
         self.last = event.get("time", self.last)
         node = event.get("node")
+        if event.get("event") == "follow_up":  # `wf continue`: a new lap from the nodes it names, with fresh route counters
+            found, topo = self.trace, self.shape.topo
+            targets = [t for t in event.get("to") or [] if t in topo.needs]
+            found.pending, found.taken, found.back = set(targets), {}, {}
+            found.done -= topo.reachable(targets)
+            found.ran -= topo.reachable(targets)  # in this lap they haven't run yet, so a node it skips is skipped
+            return
         if not isinstance(node, str):  # run-level events
             return
         if node in self.shape.topo.needs:
@@ -501,3 +512,11 @@ def duration(seconds: float) -> str:
         return f"{round(seconds / 60)} min"
     hours, minutes = divmod(round(seconds / 60), 60)
     return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+
+
+def _size(run: Run) -> int:
+    """The size of a run's events.jsonl, which grows while it runs, and again in a follow-up."""
+    try:
+        return (run.dir / "events.jsonl").stat().st_size
+    except OSError:
+        return 0

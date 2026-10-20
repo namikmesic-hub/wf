@@ -53,6 +53,10 @@ When a model fails again and again, `--model` gives that step, or one item of it
 wf retry <run-id> --harness 'review[2]=claude-code' --model 'review[2]=claude-opus-5-5'
 ```
 
+`wf continue <run-id> "<request>"` gives a run that succeeded a follow-up request.
+The run goes on from the node that its workflow's `follow_up` names, on the same branches and agent sessions.
+Its routes count from zero again, and `--limit` gives it a budget of its own.
+
 Steps that read Slack, Granola, Linear, Notion or Gmail list them in `tools`.
 Sign in to each once per machine:
 

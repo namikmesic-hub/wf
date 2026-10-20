@@ -6,7 +6,8 @@
 
 It reads only the run folders: status.json, run.json, the copied workflow
 file, and events.jsonl, the progress events every run records. So it works on
-any run, finished or not, and costs nothing.
+any run, finished or not, and costs nothing. A run's follow-ups (`wf continue`)
+count in it, and the time the run waited for each one doesn't.
 
 Per node (items of a for_each node, and nodes inside sub-workflows, are counted
 together under one name, e.g. build[]/implement): how many runs reached it,
@@ -62,6 +63,7 @@ class Tally:
         _routes_of(run, self.routes)
         self.version = version(run)
         self.first = self.last = None  # the times of the first and the last event
+        self.follow_ups, self.waited = 0, 0.0  # `wf continue`: the follow-ups, and the seconds the run waited for them
         self.tokens, self.cost_usd = 0, 0.0
         self.seen: set[str] = set()
         self.started: dict = {}  # (node, pass) -> when the pass started, or `wf retry` ran it again: the passes that run
@@ -74,9 +76,12 @@ class Tally:
         self.spending: dict[str, tuple[int, float]] = {}  # node -> what its pass that runs has used so far, in its sub-workflow too
 
     def add(self, event: dict) -> None:
+        kind, raw = event.get("event"), event.get("node")
+        if kind == "follow_up" and self.last:  # the time the run waited for it doesn't count
+            self.follow_ups += 1
+            self.waited += _seconds(self.last, event["time"])
         if "time" in event:
             self.first, self.last = self.first or event["time"], event["time"]
-        kind, raw = event.get("event"), event.get("node")
         name = _name(raw) if isinstance(raw, str) else ""
         if not name or kind == "override":  # run-level events (limit, warnings), and what an operator gave `wf retry`
             return
@@ -175,11 +180,11 @@ class Tally:
         found = {
             "run": self.run.id, "workflow": info.get("workflow"), "status": status.get("status"),
             "dry_run": bool(info.get("dry_run")), "version": self.version, "started": self.first, "ended": self.last,
-            "duration_s": _seconds(self.first, self.last) if self.first else 0, "tokens": self.tokens,
-            "cost_usd": round(self.cost_usd, 6),
+            "duration_s": _seconds(self.first, self.last) - self.waited if self.first else 0, "tokens": self.tokens,
+            "cost_usd": round(self.cost_usd, 6), "follow_ups": self.follow_ups,
         }
         if now is not None and self.first:
-            found["duration_s"] = round(_since(self.first, now), 1)
+            found["duration_s"] = round(_since(self.first, now) - self.waited, 1)
             for node, (tokens, cost) in self._spent().items():
                 if "/" not in node:  # a sub-workflow's spending is in its workflow node's
                     found["tokens"] += tokens
