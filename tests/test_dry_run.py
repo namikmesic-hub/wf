@@ -249,6 +249,39 @@ def test_each_items_log_shows_the_harness_model_and_effort_its_templates_rendere
         assert {key: session[key] for key in seat} == seat
 
 
+def test_results_numbers_each_seat_by_its_position_with_the_harness_and_model_it_ran_on(repo):
+    Path("seats.yaml").write_text(dedent("""
+        version: 1
+        name: seats
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: claude-opus-5-5}, codex: {model: gpt-6}}}
+        start: {input: {}}
+        nodes:
+          check:
+            needs: [start]
+            for_each: '["claude-code", "codex", "claude-code"]'
+            harness: "{{ item }}"
+            retry: 0
+            on_item_error: continue
+            instruction: check it
+            output: {problems: {type: array, items: {type: string}}}
+          tally:
+            needs: [check]
+            instruction: |
+              {% for seat in results.check %}
+              {{ seat.index }} on {{ seat.harness }} {{ seat.model }}: {{ seat.output.problems | join(', ') if seat.output else 'failed' }}
+              {% endfor %}
+        end: {output: {checks: {type: integer, value: "{{ check | length }}"}}}
+    """))
+    steps = {"agents": {"check[0]": [{"problems": ["a"]}], "check[1]": [{"_fail": "crashed"}],
+                        "check[2]": [{"problems": ["c", "d"]}], "tally": [{"summary": "done"}]}}
+    assert cli.main(["run", "seats.yaml", "--dry-run", script(steps)]) == 0
+    assert output() == {"checks": 2}  # check lists only the seats that succeeded
+    asked = (only_run() / "nodes" / "tally" / "1" / "instruction.md").read_text()
+    assert asked.split("\n\n")[0] == ("0 on claude-code claude-opus-5-5: a\n"
+                                      "1 on codex gpt-6: failed\n"  # the harness and model of the attempt that failed
+                                      "2 on claude-code claude-opus-5-5: c, d")
+
+
 def test_a_fallback_after_failed_attempts_is_shown(repo, capsys):
     Path("flow.yaml").write_text(dedent("""
         version: 1

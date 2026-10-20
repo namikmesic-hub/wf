@@ -96,10 +96,12 @@ def test_duplicate_node_ids(tmp_path):
 
 
 def test_node_ids_are_lowercase_identifiers_and_not_reserved(tmp_path):
-    report = check(tmp_path, flow("Bad-id: {needs: [start], command: x}\nhistory: {needs: [start], command: x}"))
+    report = check(tmp_path, flow("Bad-id: {needs: [start], command: x}\nhistory: {needs: [start], command: x}\n"
+                                  "results: {needs: [start], command: x}"))
     assert_problems(report, [
         ("error", "nodes.Bad-id", "lowercase letter"),
         ("error", "nodes.history", "`history` is a reserved name"),
+        ("error", "nodes.results", "`results` is a reserved name"),
     ])
 
 
@@ -260,6 +262,38 @@ def test_for_each_reads_a_list_and_items_are_checked(tmp_path):
     assert_problems(report, [
         ("error", "nodes.a.for_each", "must produce a list, but `start.task` is a string"),
         ("error", "nodes.b.instruction", "`item.titel`: no field `titel` (fields: title)"),
+    ])
+
+
+def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(tmp_path):
+    report = check(tmp_path, flow("""
+        plan:
+          needs: [start]
+          instruction: plan
+          output: {tasks: {type: array, maxItems: 3, items: {type: object, properties: {title: {type: string}}, required: [title], additionalProperties: false}}}
+        build:
+          needs: [plan]
+          for_each: plan.tasks
+          on_item_error: continue
+          web: true
+          instruction: "{{ item.title }}"
+          output: {done: {type: boolean}}
+        sum:
+          needs: [build]
+          instruction: >-
+            {% for r in results.build %}{{ r.index }} {{ r.item.title }} {{ r.output.done if r.output else 'failed' }}
+            {{ r.harness }} {{ r.model }}{% endfor %}
+            {{ results.build[0].item.titel }} {{ results.build[0].output.dun }} {{ results.build[0].cost }} {{ results.plan }}
+        echo: {needs: [build], command: "echo {{ results.build[0].index }} {{ results.build[0].output.done }} {{ results.build[0].item.title }}"}
+        act: {needs: [build], access: full, instruction: "{{ results.build | tojson }}"}
+    """))
+    assert_problems(report, [
+        ("error", "nodes.sum.instruction", "`results.build[0].item.titel`: no field `titel` (fields: title)"),
+        ("error", "nodes.sum.instruction", "`results.build[0].output.dun`: no field `dun` (fields: done)"),
+        ("error", "nodes.sum.instruction", "`results.build[0].cost`: no field `cost` (fields: index, item, output, harness, model)"),
+        ("error", "nodes.sum.instruction", "`plan` isn't a for_each node, so `results.plan` doesn't exist"),
+        ("warning", "nodes.echo.command", "output from `results` into the shell unquoted"),  # the item's title, not its index
+        ("warning", "nodes.act.instruction", "reads output from `build`, which has `web: true`"),
     ])
 
 

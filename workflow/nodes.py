@@ -146,12 +146,13 @@ async def run_job(job: Job, ctx: RunContext, emit: Callable[[dict], None]) -> Fi
     node_id, index = job["node"], job["index"]
     node = ctx.workflow.nodes[node_id]
     workspace, usage = None, Usage()  # usage: what this job's attempts spent, failed ones included
-    extra: dict = {}  # more for the Finished record (an agent's session)
+    extra: dict = {}  # more for the Finished record (an agent's session, and the harness and model it ran on)
 
     def finished(ok: bool, output: Any = None, error: str | None = None, attempts: int = job["attempt"], **more) -> Finished:
+        ran = {"ran": extra["ran"]} if "ran" in extra else {}
         result = Finished(node=node_id, pass_no=job["pass_no"], index=index, ok=ok, output=output, error=error,
                           attempts=attempts, workspace=workspace,
-                          usage={"cost_usd": usage.cost_usd, "tokens": usage.tokens}, **more)
+                          usage={"cost_usd": usage.cost_usd, "tokens": usage.tokens}, **{**ran, **more})
         ctx.trace.job_end(job, result)
         return result
 
@@ -445,6 +446,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
     async def attempt(number: int, name: str, record: Attempt, deadline: asyncio.Timeout) -> dict:
         model, effort = chosen[name]
+        extra["ran"] = {"harness": name, "model": model}
         source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
         if source:  # Cursor can't fork: it loads the session itself
             session_facts = {"start": "load" if name == "cursor" else "fork", "from": source["id"]}

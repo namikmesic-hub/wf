@@ -14,10 +14,11 @@ from textwrap import dedent
 import pytest
 
 from fakes import Fake, submit, talk
-from workflow import cli, harnesses, nodes, runner, templates, trace, trace_view
+from workflow import cli, harnesses, nodes, runner, spec, templates, trace, trace_view
 from workflow.harnesses.base import TurnEnd
 from workflow.output_tool import REMINDER
 from workflow.runs import Run
+from workflow.schemas import EACH
 
 
 @pytest.fixture
@@ -300,6 +301,56 @@ def test_a_secret_that_a_sub_workflow_returns_is_hidden_inside_it_too(repo, sour
     assert of("render", field="end.output.token")[0]["result"] == trace.HIDDEN
     note = of("render", field="end.output.note")[0]["result"]
     assert note == (0 if note_shows else trace.HIDDEN)  # an output that feeds no secret shows
+
+
+@pytest.mark.parametrize("source, note_shows", [
+    ("{{ results.creds[0].output.token }}", True),
+    ("{{ results.creds | tojson }}", False),  # each item, with all of its output
+    ("{{ results | tojson }}", False),
+])
+def test_a_secret_that_a_sub_workflow_item_returns_through_results_is_hidden_inside_it_too(repo, source, note_shows):
+    Path("creds.yaml").write_text(dedent("""
+        version: 1
+        name: creds
+        start: {input: {}}
+        nodes:
+          fetch: {needs: [start], command: "printf 'tok-%s-%s' sub $((6*7))"}
+        end: {output: {token: "{{ fetch.stdout }}", note: "{{ fetch.exit_code }}"}}
+    """))
+    write("""
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          creds: {needs: [start], for_each: "[1]", workflow: creds.yaml}
+          use:
+            needs: [creds]
+            command: 'test -n "$TOKEN"'
+            env: {TOKEN: "SOURCE"}
+            secret_env: [TOKEN]
+        end: {output: {}}
+    """.replace("SOURCE", source))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert "tok-sub-42" not in everything_written()
+    (fetched,) = of("job_end", node="fetch")
+    assert (fetched["where"], fetched["output"]["stdout"]) == ("creds[0]/", trace.HIDDEN)
+    note = of("render", field="end.output.note")[0]["result"]
+    assert note == (0 if note_shows else trace.HIDDEN)
+
+
+def test_a_secret_in_the_output_of_a_for_each_node_is_secret_where_history_and_results_hold_it():
+    workflow = spec.parse(dedent("""
+        version: 1
+        name: items
+        start: {input: {}}
+        nodes:
+          fetch: {needs: [start], for_each: "[1, 2]", command: x}
+          use: {needs: [fetch], command: x, env: {TOKEN: "{{ fetch[-1].stdout }}"}, secret_env: [TOKEN]}
+        end: {output: {}}
+    """).lstrip())
+    paths = trace.find(workflow, spec.load).paths
+    assert {("fetch", EACH, "stdout"), ("history", "fetch", EACH, EACH, "stdout"),
+            ("results", "fetch", EACH, "output", "stdout")} <= paths
 
 
 def test_a_secret_in_an_agents_result_is_hidden_from_its_harness_record_of_the_call(repo, monkeypatch):

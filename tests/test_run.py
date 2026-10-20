@@ -232,6 +232,39 @@ def test_items_that_fail_can_be_skipped(repo, capsys):
     assert output(only_run()) == {"results": ["item-0\n", "item-2\n"], "failed": [1]}
 
 
+def test_results_keeps_each_item_at_its_position_and_a_failed_one_has_no_output(repo, capsys):
+    write("items.yaml", """
+        version: 1
+        name: items
+        start: {input: {}}
+        nodes:
+          each:
+            needs: [start]
+            for_each: '["a", "b", "c"]'
+            on_item_error: continue
+            command: "test {{ item }} != b && echo {{ item }}"
+            routes:
+              - {when: "results.each[1].output is none", to: report}
+              - {to: end}
+          report: {command: "true"}
+        end:
+          output:
+            lines:
+              type: string
+              value: "{% for r in results.each %}{{ r.index }} {{ r.item }} {{ r.output.stdout | trim if r.output else 'failed' }}\\n{% endfor %}"
+            results: {type: array, value: "{{ results.each }}"}
+            each: {type: array, value: "{{ each | map(attribute='stdout') | list }}"}
+            reported: {type: boolean, value: "{{ report is not none }}"}
+    """)
+    assert cli.main(["run", "items.yaml"]) == 0
+    out = output(only_run())
+    assert out["lines"] == "0 a a\n1 b failed\n2 c c\n"
+    assert [(r["index"], r["item"], r["output"] and r["output"]["stdout"], r["harness"], r["model"]) for r in out["results"]] == [
+        (0, "a", "a\n", None, None), (1, "b", None, None, None), (2, "c", "c\n", None, None)]  # a command runs no agent
+    assert out["each"] == ["a\n", "c\n"]  # <node> still lists only the items that succeeded
+    assert out["reported"] is True  # the node's own `when` reads the pass it just finished
+
+
 def test_a_failed_item_stops_the_run_and_retry_reruns_only_that_item(repo, capsys):
     write("items.yaml", ITEMS % "fail")
     Path("broken-2").touch()

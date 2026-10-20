@@ -251,6 +251,8 @@ def find(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozen
         if len(found) + sum(map(len, items.values())) == size:
             break
     found |= {("history", path[0], EACH, *path[1:]) for path in found if path[0] in workflow.nodes}
+    found |= {("results", path[0], EACH, "output", *path[2:]) for path in found
+              if path[0] in workflow.nodes and workflow.nodes[path[0]].for_each is not None}
     return Secrets(frozenset(found), {node: frozenset(paths) for node, paths in items.items()})
 
 
@@ -275,6 +277,16 @@ def outputs_reached(node_id: str, node, paths, sub) -> frozenset[str]:
             if len(path) == 2:  # every output this node has given
                 return every
             rest = path[3:]  # inside one of them
+        elif path[0] == "results":
+            if len(path) == 1 or path[1] is EACH:
+                return every
+            if path[1] != node_id:
+                continue
+            if len(path) < 4 or path[3] is EACH:  # all of an item's entry
+                return every
+            if path[3] != "output":
+                continue
+            rest = (path[2], *path[4:])  # as in the node's own list: an item, then inside its output
         elif path[0] == node_id:
             rest = path[1:]
         else:

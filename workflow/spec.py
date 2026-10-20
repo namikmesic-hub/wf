@@ -44,7 +44,8 @@ from pydantic_core import PydanticCustomError
 
 HARNESSES = ("claude-code", "codex", "cursor")
 KIND_KEYS = {"instruction": "agent", "command": "command", "human": "human", "workflow": "workflow"}
-RESERVED = frozenset({"start", "end", "run", "history", "workspace", "errors", "item", "index", "session", "follow_up"})
+RESERVED = frozenset({"start", "end", "run", "history", "workspace", "errors", "results", "item", "index", "session",
+                      "follow_up"})
 NODE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 _DURATION = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
 
