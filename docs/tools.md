@@ -205,9 +205,9 @@ The tests named below are in `tests/test_tools.py` for validation, and in `tests
 | A template picks such a harness at run time, which `wf validate` can't see, and the node doesn't set `tools_with_shell: true` | The run refuses that harness, and the node fails without a session. | `workflow/nodes.py:448` | `test_a_run_refuses_a_harness_whose_shell_reaches_the_keychain_without_the_opt_in` |
 | Such a node sets `tools_with_shell: true` | `wf validate` warns, naming the node and its tools, and the run attaches the tools. | `workflow/validate.py:628` | `test_a_node_that_opts_in_gets_a_warning_naming_it_and_its_tools`, `test_a_run_lets_a_node_that_opted_in_have_tools_and_a_shell` |
 | `tools_with_shell` isn't `true` or `false`, or is in `defaults` | `wf validate` errors: each such node says so itself. | `workflow/spec.py:193` | `test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools`, `test_tools_with_shell_goes_on_the_node_not_in_defaults` |
-| A node lists `tools`, `tools: []` included | Its agent gets those wf tools and no other MCP server or connector, at every access level. Claude Code leaves out the repo's MCP servers, yours, and your claude.ai connectors. Codex switches off the MCP servers and plugins in your config, and never loads your ChatGPT connectors. Cursor refuses other servers' tools. | `workflow/nodes.py:482`, `workflow/harnesses/claude_code.py:185`, `workflow/harnesses/codex.py:180`, `workflow/harnesses/cursor.py:513` | `test_a_node_that_lists_tools_gets_no_other_mcp_server_and_one_without_keeps_them`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools`, `test_codex_switches_off_your_mcp_servers_and_plugins_for_a_node_with_tools`, `test_cursor_refuses_other_mcp_servers_tools_for_a_node_with_tools_even_at_full`, and with a real Claude Code, `test_a_real_claude_code_node_with_tools_at_full_access_sees_no_other_mcp_server` |
-| A node doesn't list `tools` | Its agent gets the MCP servers and connectors it got before. | `workflow/nodes.py:429` | `test_codex_keeps_your_mcp_servers_for_a_node_without_tools`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools` |
-| A dry run | No tools are attached, so a dry run works without any set up. | `workflow/nodes.py:429` | `test_a_dry_run_attaches_no_tools` |
+| A node lists `tools`, `tools: []` included | Its agent gets those wf tools and no other MCP server or connector, at every access level. Claude Code leaves out the repo's MCP servers, yours, and your claude.ai connectors. Codex switches off the MCP servers and plugins in your config, and never loads your ChatGPT connectors. Cursor's SDK gets `mcpServers: {}`, which replaces the MCP servers Cursor would load, and a call to another server's tool ends the turn. Through `cursor-agent`, wf refuses other servers' tools. | `workflow/nodes.py:475`, `workflow/harnesses/claude_code.py:185`, `workflow/harnesses/codex.py:180`, `workflow/harnesses/cursor_host/src/cursor.ts:150`, `workflow/harnesses/cursor_acp.py:517` | `test_a_node_that_lists_tools_gets_no_other_mcp_server_and_one_without_keeps_them`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools`, `test_codex_switches_off_your_mcp_servers_and_plugins_for_a_node_with_tools`, `test_cursors_sdk_gets_a_custom_tool_per_operation_and_its_calls_are_relayed`, `test_a_tool_that_a_read_only_session_was_not_given_stops_the_turn` in `tests/test_cursor.py`, `test_cursor_refuses_other_mcp_servers_tools_for_a_node_with_tools_even_at_full`, and with a real Claude Code, `test_a_real_claude_code_node_with_tools_at_full_access_sees_no_other_mcp_server` |
+| A node doesn't list `tools` | Its agent gets the MCP servers and connectors it got before. | `workflow/nodes.py:422` | `test_codex_keeps_your_mcp_servers_for_a_node_without_tools`, `test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools` |
+| A dry run | No tools are attached, so a dry run works without any set up. | `workflow/nodes.py:422` | `test_a_dry_run_attaches_no_tools` |
 
 ## What counts as a read
 
@@ -240,7 +240,8 @@ wf is the vendor server's only MCP client.
 The agent sees each tool the way it sees `submit_result`: as a server that wf hosts in its own process.
 On Claude Code that's an SDK MCP server named after the tool (`mcp__linear__list_issues`).
 On Codex it's a namespace of dynamic tools (`linear`).
-On Cursor it's an MCP server named after the tool, at a URL on 127.0.0.1.
+On Cursor's SDK it's a custom tool of the SDK for each operation (`linear__list_issues`), which the Cursor host passes back to wf.
+Through `cursor-agent` it's an MCP server named after the tool, at a URL on 127.0.0.1.
 Only this session gets that URL, and it sits next to the one that serves `submit_result`.
 Each call comes back to wf, which passes it on to the vendor with the stored token.
 This keeps two promises the same way on every harness:
@@ -299,8 +300,8 @@ Which agents can do that depends on the harness and the access level:
 
 | Access | Claude Code | Codex | Cursor |
 |---|---|---|---|
-| `read-only` | No: no shell, only file tools and wf's `git` tool | No: commands run in Codex's read-only sandbox, which keeps them from the Keychain | No: commands are refused |
-| `edit` | Yes: commands run without a sandbox | No: commands run in Codex's workspace-write sandbox, which keeps them from the Keychain | Yes: commands run without a sandbox |
+| `read-only` | No: no shell, only file tools and wf's `git` tool | No: commands run in Codex's read-only sandbox, which keeps them from the Keychain | No: no shell, only wf's file tools and `git` tool |
+| `edit` | Yes: commands run without a sandbox | No: commands run in Codex's workspace-write sandbox, which keeps them from the Keychain | Yes: through `cursor-agent`, commands run without a sandbox |
 | `full` | Yes | Yes: there's no sandbox | Yes |
 
 On 2026-10-19, `security show-keychain-info` failed in Codex's read-only and workspace-write sandboxes, and worked in `danger-full-access`.

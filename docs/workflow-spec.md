@@ -163,10 +163,18 @@ Each harness needs its own login, and only the harnesses a workflow uses need to
 - **Codex**: the `codex` CLI, signed in with `codex login`. `wf` is tested against one Codex
   version and warns when the installed one differs, because the parts of Codex it uses are
   marked experimental.
-- **Cursor**: `cursor-agent`, signed in with `cursor-agent login`.
-  Runs use that login, not an API key: the runner removes `CURSOR_API_KEY` from the environment Cursor and its agents see.
+- **Cursor**: Node.js 22.18 or later, and a Cursor API key.
+  wf runs Cursor through Cursor's SDK (`@cursor/sdk`), in the Cursor host, a program in TypeScript that ships with wf.
+  Create the key in the Cursor dashboard, then run `wf runtimes cursor signin`, which keeps it in the macOS Keychain.
+  Or name a file that holds the key with `cursor_api_key_file` in `~/.wf/config.yaml`.
+  wf never reads the key from the environment, and removes `CURSOR_API_KEY` from the environment that Cursor and its agents see.
+  An agent that runs commands at `edit` or `full` access could still read the key from the Keychain.
+  It could read every other sign-in there too ([docs/tools.md](tools.md)).
+  The first Cursor session installs the SDK beside the host, from the host's lockfile, with `npm ci`.
+  `wf runtimes cursor doctor` checks Node, the SDK, the key, and what your model ids map to.
+  `edit` nodes still run through `cursor-agent`, signed in with `cursor-agent login` (see [Harness adapters](#harness-adapters)).
+  For one release, `cursor_runtime: acp` in `~/.wf/config.yaml` (or `WF_CURSOR_RUNTIME=acp`) runs every Cursor node through `cursor-agent`, as before.
   Each cursor-agent process gets a settings folder of its own, outside the repo, so your `~/.cursor` settings don't apply and aren't changed.
-  `wf` is tested against one cursor-agent version and warns when the installed one differs, because it reads the messages Cursor writes.
 - **Tools** (Slack, Granola, Linear, Notion, Gmail): only the ones a workflow's nodes list.
   `wf tools <name> setup` signs in once per machine.
   [docs/tools.md](tools.md) has the steps.
@@ -355,14 +363,15 @@ instruction files (`CLAUDE.md`, `AGENTS.md`). Where the harness allows it, user-
 settings and memory aren't loaded, so a workflow behaves the same on every machine.
 Codex and Cursor are the exceptions.
 Codex always loads your global `~/.codex/AGENTS.md` and the skills in your home folder, such as `~/.agents/skills`.
-Cursor loads your Cursor account's User Rules and the skills in your home folder, such as `~/.claude/skills` and `~/.agents/skills`.
+Through `cursor-agent`, Cursor loads your Cursor account's User Rules and the skills in your home folder, such as `~/.claude/skills` and `~/.agents/skills`.
+Through Cursor's SDK, a session loads only the repo's layer of Cursor's settings, and with `false` no layer at all.
 
 A repo's instruction files can give an agent a role that isn't the workflow's.
 For example, firstmate's `AGENTS.md` tells each agent that loads it that it is the first mate.
 `project_instructions: false` keeps the repo's files out of a node's sessions, and the node's instruction still reaches the agent.
 The default, `true`, loads them as before.
 A sub-workflow uses its own `defaults`, so a workflow that sets `false` in its `defaults` sets it in each sub-workflow too.
-The tests named below are in `tests/test_claude_code.py`, `tests/test_codex.py` and `tests/test_cursor.py` for the rows of those harnesses.
+The tests named below are in `tests/test_claude_code.py`, `tests/test_codex.py`, `tests/test_cursor.py` (Cursor's SDK) and `tests/test_cursor_acp.py` (`cursor-agent`) for the rows of those harnesses.
 The tests of the other rows are in `tests/test_validate.py`, unless another file is named.
 
 | Condition | Effect | Source line | Conformance assertion |
@@ -371,18 +380,20 @@ The tests of the other rows are in `tests/test_validate.py`, unless another file
 | `false` on Claude Code | No setting source loads: no `CLAUDE.md` or `AGENTS.md` at any level, no `.claude/rules`, no `.claude/settings.json`, and no skills in `.claude/skills`. Claude Code's own system prompt stays. | `workflow/harnesses/claude_code.py:182` | `test_without_project_instructions_no_setting_source_loads`, `test_a_real_node_without_project_instructions_does_not_get_the_repos_claude_md` (`-m harness`) |
 | `false` on Codex | The thread gets `project_doc_max_bytes: 0`, so no `AGENTS.md` and no fallback file such as `CLAUDE.md`. Each skill that `skills/list` finds in the repo is switched off in the thread's config. | `workflow/harnesses/codex.py:182`, `workflow/harnesses/codex.py:217` | `test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill` |
 | `false` on Codex, and `skills/list` doesn't answer | Codex is unavailable for the attempt, so the next harness in the node's list runs. | `workflow/harnesses/codex.py:223` | `test_a_codex_that_does_not_list_its_skills_is_unavailable_to_a_node_without_project_instructions` |
-| `false` on Cursor | cursor-agent starts in a new empty folder in the system's temp folder, because it reads rules, `AGENTS.md`, `CLAUDE.md` and skills from the folder it starts in, the folders above it, and the repo it is in. `session/new` still gives the workspace, where the agent reads, edits and runs commands. The folder goes with the session. | `workflow/harnesses/cursor.py:298`, `workflow/harnesses/cursor.py:450` | `test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace`, `test_by_default_cursor_agent_starts_in_the_workspace` |
-| `false` on Cursor, and the temp folder is in a git repo, or a folder above it holds `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `.cursorrules`, `.cursor/rules`, or a `skills` folder in `.cursor`, `.claude`, `.codex`, `.grok` or `.agents`, as when `TMPDIR` is in a repo | Cursor is unavailable for the attempt, and the message names what it found, so the next harness in the node's list runs. The skills folders in your home folder don't count, because they load wherever Cursor starts. | `workflow/harnesses/cursor.py:464` | `test_a_temp_folder_under_what_cursor_loads_makes_it_unavailable_without_project_instructions`, `test_your_home_folders_skills_above_the_temp_folder_do_not_count` |
+| `false` on Cursor's SDK | The session loads no layer of Cursor's settings: the host leaves out `settingSources`. With `true`, it loads the `project` layer. | `workflow/harnesses/cursor_host/src/cursor.ts:163` | `test_without_project_instructions_no_cursor_settings_layer_loads`, `test_a_real_cursor_node_without_project_instructions_gets_no_repo_rules` (`-m harness`, with a Cursor API key) |
+| `false` on Cursor through `cursor-agent` | cursor-agent starts in a new empty folder in the system's temp folder, because it reads rules, `AGENTS.md`, `CLAUDE.md` and skills from the folder it starts in, the folders above it, and the repo it is in. `session/new` still gives the workspace, where the agent reads, edits and runs commands. The folder goes with the session. | `workflow/harnesses/cursor_acp.py:302`, `workflow/harnesses/cursor_acp.py:454` | `test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace`, `test_by_default_cursor_agent_starts_in_the_workspace` |
+| `false` on Cursor through `cursor-agent`, and the temp folder is in a git repo, or a folder above it holds `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `.cursorrules`, `.cursor/rules`, or a `skills` folder in `.cursor`, `.claude`, `.codex`, `.grok` or `.agents`, as when `TMPDIR` is in a repo | Cursor is unavailable for the attempt, and the message names what it found, so the next harness in the node's list runs. The skills folders in your home folder don't count, because they load wherever Cursor starts. | `workflow/harnesses/cursor_acp.py:468` | `test_a_temp_folder_under_what_cursor_loads_makes_it_unavailable_without_project_instructions`, `test_your_home_folders_skills_above_the_temp_folder_do_not_count` |
 | `false` where a harness still loads a file | `wf validate` warns once for each harness, where the setting is. On Codex, your global `~/.codex/AGENTS.md` and the skills in your home folder stay. On Cursor, your account's User Rules and the skills in your home folder stay, and so do the repo's hooks in `.cursor/hooks.json` and `.claude/settings.json`. | `workflow/validate.py:635`, `workflow/harnesses/__init__.py:51` | `test_project_instructions_off_warns_once_per_harness_that_keeps_a_file` |
 | `false`, and a template picks the harness | `wf validate` can't tell which harness runs, so it warns about each harness that keeps a file. | `workflow/validate.py:641` | `test_project_instructions_off_warns_about_every_harness_a_template_could_pick` |
 
-On Cursor, `false` has a cost: Cursor's semantic code search and lint diagnostics don't cover the workspace.
+Through `cursor-agent`, `false` has a cost: Cursor's semantic code search and lint diagnostics don't cover the workspace.
 Claude Code loads no skill from your home folder.
 Codex and Cursor load those skills as before.
 Each harness row was checked live, with Claude Code 2.1.301 (the one the Agent SDK bundles), Codex 0.163.0 and cursor-agent 2026.10.18-ea085cb.
 In each check, a repo's `AGENTS.md` or `CLAUDE.md`, its rules and its skills held code words.
 A node with the default told them, and a node with `false` told none, and still did its task.
 These checks are tests marked `-m harness`: `test_a_real_node_without_project_instructions_does_not_get_the_repos_claude_md`, `test_a_real_codex_node_without_project_instructions_gets_no_repo_agents_md_or_skill` and `test_a_real_cursor_node_without_project_instructions_gets_no_repo_rules_and_still_edits`.
+The same check for Cursor's SDK is `test_a_real_cursor_node_without_project_instructions_gets_no_repo_rules`, which needs a Cursor API key.
 
 ##### Tools and a shell
 
@@ -491,8 +502,13 @@ for Codex, the default model in the app server's model list. Cursor has no defau
 node that can run on Cursor needs a `model`.
 A Cursor model id carries its own effort, as in `gpt-5.6-sol-max-fast`, `gemini-4-argon-high` or `claude-fable-5-1-thinking-max`.
 So `effort` doesn't apply to Cursor, and `wf validate` warns when it's set.
-The id must be one that `cursor-agent --list-models` lists.
-Any other makes Cursor unavailable for that attempt, so the next harness in the node's list runs.
+Workflows name the ids that `cursor-agent --list-models` lists.
+Cursor's SDK names a model and its parameters apart, such as `gpt-5.6-sol` with `reasoning=max` and `fast=true`.
+So the Cursor host maps an id to the catalog model that the id starts with.
+The words after that name one variant of the model, with its parameters.
+`gpt-5.6-sol[reasoning=max,fast=true]` gives the parameters as they are, as `cursor-agent` also takes them.
+An id that names no model, or no single variant, makes Cursor unavailable for that attempt, so the next harness in the node's list runs.
+`wf runtimes cursor doctor --model <id>` shows what an id maps to, and each attempt's transcript records the model and parameters of its session.
 
 ### limits
 
@@ -516,7 +532,7 @@ A follow-up has a budget of its own (see [Follow-ups](#follow-ups)).
 - **Tokens** are input plus output tokens, as each harness reports them (cached input
   included).
   Claude Code and Codex report them.
-  Cursor doesn't.
+  Cursor reports them through its SDK, but not for `edit` nodes, which run through `cursor-agent`.
 - **Cost** only counts harnesses that report it in dollars.
   Claude Code does.
   Codex and Cursor don't.
@@ -638,7 +654,8 @@ sub-workflow fails.
   attempts. If a harness reports a usage limit or can't start, the runner moves to the next
   harness straight away.
 - A harness can ask for a short wait before the retry, after an error that a retry can clear.
-  Cursor does this for a `RetriableError`: the retry on Cursor starts 30 seconds later.
+  Cursor does this for a `RetriableError`, and for a lost connection that its SDK's own retries didn't carry over.
+  Then the retry on Cursor starts 30 seconds later.
   There's no wait before the next harness, or when no attempt follows.
   A limit reached before or during the wait ends it, and the retry doesn't start.
 - An agent attempt that waits for an [agent slot](#agent-slots) hasn't started yet: the
@@ -700,8 +717,8 @@ The tests named below are in `tests/test_overrides.py`, unless another file is n
 | The node has `tools`, the harness could reach the Keychain at the node's access level, and the node doesn't set `tools_with_shell: true` | The same. | `workflow/overrides.py:273` | `test_a_wrong_override_changes_nothing` |
 | The run has ended | The same: no node is left to run. | `workflow/runner.py:275` | `test_an_override_for_a_run_that_has_ended_changes_nothing` |
 | `--answers` is given too, and the answers or the overrides are wrong | wf tells every problem of both, and the run stays as it was. | `workflow/runner.py:200` | `test_an_override_and_a_wrong_answer_are_both_reported_and_change_nothing` |
-| The models of the target | For each job of the target that is still to run in the pass in progress, the model is the one that its next attempt gets, rendered as the attempt renders it, without spaces around it. Both use the same code. wf doesn't check a finished job, because it doesn't run again. A job with no workspace yet renders its settings without one. A model or an effort that can't render, or that renders to no text, makes wf refuse the override. When the job has no workspace yet, the message asks for `--model` or `--effort`. For a target with no such job, wf takes the override's model, or the workflow's model when it isn't a template. | `workflow/overrides.py:135`, `workflow/overrides.py:250`, `workflow/overrides.py:302`, `workflow/overrides.py:319`, `workflow/nodes.py:425` | `test_a_model_that_a_template_gives_the_failed_item_on_the_new_harness_is_checked`, `test_a_workflow_model_with_spaces_around_it_is_checked_as_the_run_uses_it`, `test_a_node_override_checks_only_the_items_that_run_again`, `test_an_item_that_failed_before_it_had_a_workspace_has_its_model_checked`, `test_a_setting_that_reads_a_workspace_the_item_doesnt_have_yet_must_be_given` |
-| Every other check passed | wf opens each harness as a run does, in a folder outside the run that it then removes, and asks it about the models of the target. It refuses a harness that doesn't start, and a model that Cursor doesn't list. A dry run skips this check, because its script plays every harness. | `workflow/runner.py:208`, `workflow/overrides.py:337`, `workflow/harnesses/cursor.py:190` | `test_the_harness_check_comes_last_and_opens_the_harness_outside_the_run`, `test_a_harness_that_cant_start_here_changes_nothing`, `test_a_model_the_harness_doesnt_have_changes_nothing`, `test_a_model_that_the_workflow_gives_for_the_new_harness_is_checked_too` |
+| The models of the target | For each job of the target that is still to run in the pass in progress, the model is the one that its next attempt gets, rendered as the attempt renders it, without spaces around it. Both use the same code. wf doesn't check a finished job, because it doesn't run again. A job with no workspace yet renders its settings without one. A model or an effort that can't render, or that renders to no text, makes wf refuse the override. When the job has no workspace yet, the message asks for `--model` or `--effort`. For a target with no such job, wf takes the override's model, or the workflow's model when it isn't a template. | `workflow/overrides.py:135`, `workflow/overrides.py:250`, `workflow/overrides.py:302`, `workflow/overrides.py:319`, `workflow/nodes.py:418` | `test_a_model_that_a_template_gives_the_failed_item_on_the_new_harness_is_checked`, `test_a_workflow_model_with_spaces_around_it_is_checked_as_the_run_uses_it`, `test_a_node_override_checks_only_the_items_that_run_again`, `test_an_item_that_failed_before_it_had_a_workspace_has_its_model_checked`, `test_a_setting_that_reads_a_workspace_the_item_doesnt_have_yet_must_be_given` |
+| Every other check passed | wf opens each harness as a run does, in a folder outside the run that it then removes, and asks it about the models of the target. It refuses a harness that doesn't start, and a model that Cursor can't run. A dry run skips this check, because its script plays every harness. | `workflow/runner.py:208`, `workflow/overrides.py:337`, `workflow/harnesses/remote.py:288` | `test_the_harness_check_comes_last_and_opens_the_harness_outside_the_run`, `test_a_harness_that_cant_start_here_changes_nothing`, `test_a_model_the_harness_doesnt_have_changes_nothing`, `test_a_model_that_the_workflow_gives_for_the_new_harness_is_checked_too` |
 | wf can't make the folder to open the harnesses in | wf refuses the override, and tells why. | `workflow/overrides.py:339` | `test_no_folder_to_open_the_harnesses_in_changes_nothing` |
 | wf can't remove that folder, or the folder that Cursor makes by its name | wf refuses the override, and names the folder that stays. | `workflow/overrides.py:345`, `workflow/overrides.py:355` | `test_a_check_folder_that_stays_changes_nothing` |
 | The harness is Claude Code | Opening it looks for the Claude Code program as the Claude Agent SDK does. So a machine without it, or with a file there that you may not run, is refused. A program that breaks when it runs, or a missing sign-in, shows when the attempt runs. | `workflow/harnesses/claude_code.py:136`, `workflow/harnesses/claude_code.py:149` | `test_opening_finds_the_claude_code_program_as_the_sdk_does` in `tests/test_claude_code.py` |
@@ -731,7 +748,8 @@ gets depends on `session`:
   - The next pass *forks* that session: Claude Code with `fork_session`, Codex with
     `thread/fork`. The earlier session is never changed, so a retry forks from the same
     point again.
-    Cursor can't fork, so it loads the previous session itself (`session/load`).
+    Cursor can't fork, so it loads the previous session itself: its SDK resumes the agent
+    (`Agent.resume`), and `cursor-agent` loads the session (`session/load`).
   - The rendered instruction is sent as the next message. `session.continued` is true while
     it renders, so the template can send just the new feedback instead of the whole task.
     The runner adds that a new `submit_result` call is needed.
@@ -792,8 +810,10 @@ How soon depends on the harness:
   `wf steer` says `queued`, and the run records `delivered` when Claude Code reads it.
   Claude Code tells the agent that the user sent the message while it worked.
   All the same, in one of two live checks with Haiku 5.5, the agent took the message for tool output and ignored it.
-- **Cursor** can't add a message to a running turn.
-  `wf steer` says `queued`, and the runner keeps the message for the next turn.
+- **Cursor**, through its SDK, offers the message to the running turn (`run.steer`).
+  When Cursor takes it, `wf steer` says `delivered`.
+  When Cursor sends it back, `wf steer` says `queued`, and the runner keeps the message for the next turn.
+  Through `cursor-agent`, for `edit` nodes, Cursor can't add a message to a running turn, so the message is always `queued`.
 
 The messages that the runner keeps go together as the next turn, when the agent's turn ends without a result, before any reminder.
 They count as `delivered` when that turn ends.
@@ -816,11 +836,12 @@ The tests named below are in `tests/test_steer.py`, unless another file is named
 |---|---|---|---|
 | The node has a live session | `wf steer` hands the message to the wf process that drives the run, and waits for the answer. It prints `delivered`, `queued` or `unconfirmed`, with the attempt and the harness, and exits 0. `--json` prints the answer as JSON. | `workflow/steer.py:228`, `workflow/steer.py:336` | `test_a_message_from_wf_steer_joins_the_running_turn` in `tests/test_codex.py`, `test_a_message_reaches_a_node_in_a_sub_workflow_from_stdin` |
 | Codex runs a turn | The message goes into that turn with `turn/steer`, which names the turn, so it can't go into a later one: `delivered`. | `workflow/harnesses/codex.py:235` | `test_a_message_from_wf_steer_joins_the_running_turn` in `tests/test_codex.py` |
+| Cursor's SDK runs a turn | The message goes to the run's `steer`. Cursor's `complete_delivered` is `delivered`. When Cursor sends the message back, or the run has no `steer`, it is `queued` for the next turn. No answer within 8 seconds is `unconfirmed`. | `workflow/harnesses/cursor_host/src/cursor.ts:328`, `workflow/harnesses/remote.py:497` | `test_a_message_from_wf_steer_joins_the_running_turn`, `test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn` in `tests/test_cursor.py` |
 | Codex doesn't answer `turn/steer` within 10 seconds | `unconfirmed`, with the reason, and the run records that. The message isn't sent again, because Codex may have taken it. | `workflow/harnesses/codex.py:240`, `workflow/steer.py:399` | `test_a_message_codex_never_answers_for_is_unconfirmed_and_never_sent_again` in `tests/test_codex.py` |
 | Claude Code runs a turn, and has repeated a message in the session | The message goes to Claude Code with an id: `queued`. With `--replay-user-messages`, Claude Code repeats the id when it reads the message, and the run records `delivered`. When it reads the message before the write returns, `wf steer` says `delivered`, and the run records that once. | `workflow/harnesses/claude_code.py:258`, `workflow/harnesses/claude_code.py:316` | `test_claude_code_reads_a_message_from_wf_steer_at_its_next_step`, `test_claude_code_takes_a_message_only_mid_turn_once_it_repeated_one`, `test_a_message_claude_code_reads_during_its_write_is_recorded_once_as_delivered` in `tests/test_claude_code.py` |
 | Claude Code reads the message only after the turn's last step | Claude Code gives the message a turn of its own. The runner reads that turn to its result, counts the tokens and cost of both results, and sends no reminder before it. When a timeout cuts off the message's turn, the first result still counts. A result that comes during a write waits for the write: a write that fails gets no turn. A result that ends the attempt, because the agent submitted or the turn failed, ends the turn at once. | `workflow/harnesses/claude_code.py:359`, `workflow/harnesses/claude_code.py:361`, `workflow/harnesses/claude_code.py:363`, `workflow/harnesses/claude_code.py:256` | `test_a_message_after_the_last_step_gets_a_turn_of_its_own_and_no_reminder_goes`, `test_a_turn_cut_off_after_a_message_from_wf_steer_still_counts_the_result_before_it`, `test_a_write_that_fails_after_the_turns_result_doesnt_leave_the_turn_waiting`, `test_a_result_that_ends_the_attempt_doesnt_wait_for_a_write_that_stalls` in `tests/test_claude_code.py` |
-| The harness can't take the message now: Cursor, a session between turns, a turn that ended as `turn/steer` came, Claude Code before it repeated a message, or a session that breaks as its harness takes the message | `queued`. When the turn ends without a result, the kept messages go together as the next turn, before any reminder. Messages that the harness is still taking when the turn ends go too. The run records `delivered` when that turn ends, or `unconfirmed` when it fails. | `workflow/nodes.py:551`, `workflow/steer.py:395`, `workflow/steer.py:403`, `workflow/steer.py:413` | `test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn` in `tests/test_cursor.py`, `test_a_message_whose_hand_over_breaks_is_kept_for_the_next_turn`, `test_a_message_that_misses_the_turn_goes_as_the_next_turn_before_a_reminder` in `tests/test_codex.py`, `test_a_message_reaches_an_item_from_a_file_and_waits_for_the_turn_to_end`, `test_a_message_the_harness_still_takes_as_the_turn_ends_goes_before_a_reminder`, `test_the_next_turn_waits_for_a_message_that_comes_as_the_last_one_is_handed_over`, `test_messages_kept_together_go_as_one_turn_and_no_more_wait_than_the_limit`, `test_a_turn_that_fails_leaves_the_message_it_carried_unconfirmed` |
-| The attempt ends before the agent reads the message: the agent submitted its result, or the attempt failed or timed out | A kept message is dropped, and the run records why. A message in a turn that didn't end is `unconfirmed`. | `workflow/steer.py:433`, `workflow/harnesses/base.py:176`, `workflow/harnesses/claude_code.py:379` | `test_a_message_for_cursor_is_dropped_when_the_agent_submits_first` in `tests/test_cursor.py`, `test_a_message_codex_never_took_is_dropped_when_the_agent_submits_first` in `tests/test_codex.py`, `test_a_message_claude_code_hasnt_read_when_the_agent_submits_is_dropped` in `tests/test_claude_code.py`, `test_a_message_kept_for_the_next_turn_is_dropped_when_the_attempt_fails`, `test_a_timeout_leaves_the_carried_message_unconfirmed_and_drops_the_kept_one` |
+| The harness can't take the message now: Cursor through `cursor-agent`, Cursor's SDK when it sends the message back, a session between turns, a turn that ended as `turn/steer` came, Claude Code before it repeated a message, or a session that breaks as its harness takes the message | `queued`. When the turn ends without a result, the kept messages go together as the next turn, before any reminder. Messages that the harness is still taking when the turn ends go too. The run records `delivered` when that turn ends, or `unconfirmed` when it fails. | `workflow/nodes.py:527`, `workflow/steer.py:395`, `workflow/steer.py:403`, `workflow/steer.py:413` | `test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn` in `tests/test_cursor.py` and `tests/test_cursor_acp.py`, `test_a_message_whose_hand_over_breaks_is_kept_for_the_next_turn`, `test_a_message_that_misses_the_turn_goes_as_the_next_turn_before_a_reminder` in `tests/test_codex.py`, `test_a_message_reaches_an_item_from_a_file_and_waits_for_the_turn_to_end`, `test_a_message_the_harness_still_takes_as_the_turn_ends_goes_before_a_reminder`, `test_the_next_turn_waits_for_a_message_that_comes_as_the_last_one_is_handed_over`, `test_messages_kept_together_go_as_one_turn_and_no_more_wait_than_the_limit`, `test_a_turn_that_fails_leaves_the_message_it_carried_unconfirmed` |
+| The attempt ends before the agent reads the message: the agent submitted its result, or the attempt failed or timed out | A kept message is dropped, and the run records why. A message in a turn that didn't end is `unconfirmed`. | `workflow/steer.py:433`, `workflow/harnesses/base.py:176`, `workflow/harnesses/claude_code.py:379` | `test_a_message_for_cursor_is_dropped_when_the_agent_submits_first` in `tests/test_cursor.py` and `tests/test_cursor_acp.py`, `test_a_message_codex_never_took_is_dropped_when_the_agent_submits_first` in `tests/test_codex.py`, `test_a_message_claude_code_hasnt_read_when_the_agent_submits_is_dropped` in `tests/test_claude_code.py`, `test_a_message_kept_for_the_next_turn_is_dropped_when_the_attempt_fails`, `test_a_timeout_leaves_the_carried_message_unconfirmed_and_drops_the_kept_one` |
 | The attempt ends while the harness takes a message | The hand-over finishes first, for up to 12 seconds, so `wf steer` gets a true answer. A hand-over that takes longer is cut: `wf steer` says `unconfirmed`, with the reason, and the run records that. A message that Claude Code repeated before the cut stays `delivered`, whether the turn's result came before or after the end of the write. When the agent submitted its result, a node timeout that comes during the hand-over cuts the hand-over, and the result stays. Any other cancellation, such as Ctrl-C, cancels the attempt as before, also when it comes with the node timeout. | `workflow/steer.py:423`, `workflow/steer.py:387`, `workflow/steer.py:328`, `workflow/cli.py:446`, `workflow/harnesses/claude_code.py:270` | `test_a_message_being_handed_over_as_the_attempt_ends_gets_a_true_answer`, `test_a_hand_over_cut_when_the_attempt_ends_is_unconfirmed_not_queued_or_none`, `test_a_result_stays_when_the_nodes_timeout_comes_while_a_hand_over_finishes`, `test_a_cancellation_from_outside_during_a_hand_over_cancels_an_attempt_that_has_its_result`, `test_wf_steer_says_when_wf_cant_tell_whether_the_agent_read_the_message`, `test_a_message_claude_code_read_stays_delivered_when_the_result_comes_during_its_write` in `tests/test_claude_code.py` |
 | A message reaches a live session | `events.jsonl` gets a `steer` event, and the attempt's log a `steer` line, each with the message's id: `delivered`, `queued` or `unconfirmed` with the text, then `delivered`, `dropped` or `unconfirmed`, with the reason. The terminal shows each one. A log line that can't be written is lost alone: the event still goes, and neither the message nor the attempt fails. | `workflow/harnesses/base.py:167`, `workflow/harnesses/base.py:171`, `workflow/runner.py:614` | `test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn` in `tests/test_cursor.py`, `test_a_log_line_that_cant_be_written_fails_nothing_and_the_event_still_goes` |
 | The node isn't an agent node of the run, a `for_each` node has no `--item`, a node without `for_each` has one, or the run's copy of its workflow is damaged | `wf steer` says what is wrong, and exits 1. | `workflow/steer.py:180` | `test_a_message_for_what_isnt_an_agent_node_is_refused`, `test_wf_steer_says_what_is_wrong_with_the_node_or_the_message`, `test_a_run_whose_copy_of_its_workflow_is_damaged_says_so` |
@@ -1005,7 +1026,9 @@ Each agent attempt gets one tool, `submit_result`. Its input schema is the node'
   `claude_code_chat/native_tools.py`.
 - **Codex**: a dynamic tool, declared when the thread starts. The app server sends each call
   to the runner as an `item/tool/call` request on the same connection.
-- **Cursor**: an MCP server the runner serves over HTTP on 127.0.0.1, given to Cursor when the session starts.
+- **Cursor**, through its SDK: a custom tool of the SDK, which the Cursor host gives the session.
+  The host runs one session, and passes each call to the runner as a `call` frame over its stdin and stdout.
+- **Cursor**, through `cursor-agent`: an MCP server the runner serves over HTTP on 127.0.0.1, given to Cursor when the session starts.
   Each session gets its own URL, with an unguessable token in it.
   A request from a web page (an Origin header that isn't 127.0.0.1 or localhost) gets no answer.
 
@@ -1015,7 +1038,7 @@ So a result can only reach the attempt it belongs to.
 A node's `tools` reach the agent the same way.
 wf connects to each vendor's MCP server itself, and offers the agent the operations the node may use as tools of its own.
 Claude Code gets an SDK MCP server per tool, and Codex a namespace of dynamic tools per tool.
-Cursor gets an MCP server over HTTP per tool.
+Cursor gets a custom tool per operation through its SDK, and an MCP server over HTTP per tool through `cursor-agent`.
 Each call comes back to the runner, which passes it on with the stored sign-in, so the secret never reaches the agent.
 
 The runner uses this tool instead of each harness's own structured-output feature because
@@ -1226,10 +1249,10 @@ The tests named below are in `tests/test_trace.py`, unless another file is named
 | A secret value is short | Its text is removed all the same. | `workflow/trace.py:118` | `test_a_short_secret_is_removed_wherever_it_shows` |
 | A harness reports a `submit_result` call before `submit_result` runs | The `tool_call` hides the secret fields of the result, as the `submit_result` record does. | `workflow/trace.py:536` | `test_a_secret_in_an_agents_result_is_hidden_from_its_harness_record_of_the_call` |
 | `secret_env` names a variable that `env` doesn't set | `wf validate` errors. | `workflow/validate.py:352` | `tests/test_validate.py::test_secret_env_names_only_what_env_sets` |
-| An agent uses a wf tool | The `tool_call` holds the arguments. The `tool_result` holds only the size of the answer, on each harness. | `workflow/harnesses/claude_code.py:341`, `workflow/harnesses/codex.py:335`, `workflow/harnesses/cursor.py:404` | `tests/test_tool_sessions.py::test_claude_code_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned`, `tests/test_tool_sessions.py::test_codex_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned`, `tests/test_tool_sessions.py::test_cursor_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned` |
-| A timeout stops a tool call on Codex or Cursor | The trace has its `tool_call`, written when the call started. | `workflow/harnesses/codex.py:268`, `workflow/harnesses/cursor.py:393`, `workflow/harnesses/cursor.py:429` | `tests/test_tool_sessions.py::test_codex_reports_a_tool_call_that_a_timeout_stops_for_the_trace`, `tests/test_tool_sessions.py::test_cursor_reports_a_tool_call_that_a_timeout_stops_for_the_trace` |
-| The harness gives more of a call's arguments after the call started | The `tool_call` record repeats with the same id and all the arguments. | `workflow/harnesses/cursor.py:394`, `workflow/trace.py:536` | `tests/test_tool_sessions.py::test_cursor_reports_a_tool_call_again_when_its_input_comes_late` |
-| An agent attempt fails before its session opens | Its `attempt` record has the harness, model, effort, access and workspace all the same. | `workflow/nodes.py:439` | `test_an_attempt_that_fails_before_its_session_has_its_settings` |
+| An agent uses a wf tool | The `tool_call` holds the arguments. The `tool_result` holds only the size of the answer, on each harness. | `workflow/harnesses/claude_code.py:341`, `workflow/harnesses/codex.py:335`, `workflow/harnesses/remote.py:443`, `workflow/harnesses/cursor_acp.py:408` | `tests/test_tool_sessions.py::test_claude_code_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned`, `tests/test_tool_sessions.py::test_codex_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned`, `tests/test_tool_sessions.py::test_cursors_sdk_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned`, `tests/test_tool_sessions.py::test_cursor_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned` |
+| A timeout stops a tool call on Codex or Cursor | The trace has its `tool_call`, written when the call started. | `workflow/harnesses/codex.py:268`, `workflow/harnesses/remote.py:462`, `workflow/harnesses/cursor_acp.py:397`, `workflow/harnesses/cursor_acp.py:433` | `tests/test_tool_sessions.py::test_codex_reports_a_tool_call_that_a_timeout_stops_for_the_trace`, `tests/test_tool_sessions.py::test_cursors_sdk_reports_a_tool_call_that_a_timeout_stops_for_the_trace`, `tests/test_tool_sessions.py::test_cursor_reports_a_tool_call_that_a_timeout_stops_for_the_trace` |
+| The harness gives more of a call's arguments after the call started | The `tool_call` record repeats with the same id and all the arguments. | `workflow/harnesses/remote.py:462`, `workflow/harnesses/cursor_acp.py:398`, `workflow/trace.py:536` | `tests/test_cursor.py::test_progress_the_transcript_and_the_trace_show_text_and_tool_calls`, `tests/test_tool_sessions.py::test_cursor_reports_a_tool_call_again_when_its_input_comes_late` |
+| An agent attempt fails before its session opens | Its `attempt` record has the harness, model, effort, access and workspace all the same. | `workflow/nodes.py:432` | `test_an_attempt_that_fails_before_its_session_has_its_settings` |
 | A wf tool gets its token | The token goes into no file in the run folder or in `~/.wf`, the trace included. | `workflow/tools/relay.py:199` | `tests/test_tool_sessions.py::test_no_secret_reaches_an_agent_or_the_run_folder` |
 | A value holds text that UTF-8 can't hold, such as a lone surrogate | The trace writes it escaped, and the attempt goes on. `wf trace` prints it escaped too. | `workflow/trace.py:127`, `workflow/trace_view.py:158` | `test_writing_the_trace_survives_text_that_utf8_cannot_hold`, `test_wf_trace_prints_text_that_utf8_cannot_hold_escaped` |
 | A command's log or stream file can't be opened | The command doesn't start. | `workflow/nodes.py:714` | `test_a_command_whose_stream_file_cant_be_opened_never_starts` |
@@ -1464,7 +1487,7 @@ Warnings:
 - A node sets `tools_with_shell: true`: its agent could read every stored sign-in.
 - A node with `project_instructions: false` can run on a harness that still loads an instruction file.
   Codex loads your global `~/.codex/AGENTS.md` and the skills in your home folder.
-  Cursor loads your account's User Rules, the skills in your home folder, and the repo's hooks.
+  Cursor, through `cursor-agent`, loads your account's User Rules, the skills in your home folder, and the repo's hooks.
 - An agent with `access: full` reads output from an agent with `tools`.
   Messages, notes and mail that other people write can carry instructions aimed at agents.
 - A template reads a field of `follow_up` outside an `{% if follow_up %}` that checks it.
@@ -1487,8 +1510,11 @@ workflow/
     base.py         the Harness and Session interfaces
     claude_code.py  Claude Agent SDK
     codex.py        codex app-server, JSON-RPC over stdio
-    cursor.py       cursor-agent acp, the Agent Client Protocol over stdio
-    mcp_http.py     submit_result as an MCP server over HTTP, for Cursor
+    remote.py       a harness whose sessions run in another program: the wf-session protocol
+    cursor.py       Cursor's SDK, in the Cursor host (cursor_host/, TypeScript), through remote.py
+    files_tool.py   read and search files, only where the step may, for read-only agents on Cursor's SDK
+    cursor_acp.py   cursor-agent acp, the Agent Client Protocol over stdio: `edit`, and `cursor_runtime: acp`
+    mcp_http.py     submit_result as an MCP server over HTTP, for cursor-agent
   settings.py       ~/.wf/config.yaml: wf's own settings, and the names it knows
   capacity.py       the agent slots: one cap on live agent sessions across all runs
   tools/            wf tools: the five vendor servers, sign-in and the Keychain, the relay, doctor
@@ -1512,7 +1538,8 @@ The `wf` command is a `[project.scripts]` entry in `pyproject.toml`:
 Dependencies to add to `pyproject.toml`: `jinja2`, `pyyaml`, `jsonschema` and
 `langgraph-checkpoint-sqlite`.
 (`pyyaml` and `jsonschema` are already installed through LangChain, but the package should list what it imports.)
-Codex and Cursor need no Python package: the runner talks to the `codex` and `cursor-agent` CLIs.
+Codex needs no Python package: the runner talks to the `codex` CLI.
+Cursor needs Node.js: the runner starts the Cursor host, which installs `@cursor/sdk` beside it from its lockfile, and `edit` nodes run `cursor-agent`.
 
 ### Harness adapters
 
@@ -1545,19 +1572,19 @@ A `failed` `TurnEnd` can also set `retry_after`, the seconds the runner waits be
 
 | | Claude Code | Codex | Cursor |
 |---|---|---|---|
-| Runs as | `claude-agent-sdk`: one process per session | one `codex app-server --disable hooks --disable apps` per run, JSON-RPC over stdio, one thread per session | `cursor-agent --model <model> acp`, JSON-RPC over stdio: one process per session, because the agent keeps one model per process, each with a settings folder of its own, outside the repo |
-| `submit_result` | SDK MCP server | dynamic tool (`experimentalApi`) | MCP server over HTTP, a URL per session |
-| `read-only` | Read, Grep, Glob, and Bash limited to read-only git commands | sandbox `read-only` | ask mode and a `Write(**)` deny rule; reads and the runner's `git` tool allowed, commands refused |
-| `edit` | Read, Edit, Write, Bash with `permission_mode="dontAsk"` | sandbox `workspace-write` | agent mode; writes inside the workspace and commands allowed, writes to temp folders and `~/.cursor` denied |
-| `full` | `permission_mode="bypassPermissions"` | sandbox `danger-full-access` | everything allowed |
-| `web: false` | no WebSearch or WebFetch | `web_search: "disabled"` (the default is `cached`) | web search and fetch requests refused |
-| Repo instructions | `setting_sources=["project"]`, `claude_code` system prompt | `AGENTS.md` and the repo's skills | the repo's rules, `AGENTS.md` and skills, but not its `.cursor/cli.json` |
-| `project_instructions: false` | `setting_sources=[]` | `project_doc_max_bytes: 0`, and each repo skill off | cursor-agent starts in an empty folder, and `session/new` gives the workspace |
-| Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | the turn's last message: a sign-in, plan or payment notice, or a `[resource_exhausted]` error that isn't a `RetriableError`. A `RetriableError` fails the attempt, and the retry waits 30 seconds |
-| Usage | tokens and dollars | tokens | none |
-| `session: continue` | fork with `fork_session` | fork with `thread/fork` | `session/load` (no fork) |
-| wf tools | an SDK MCP server per tool | a namespace of dynamic tools per tool | an MCP server over HTTP per tool, a URL per session |
-| `wf steer` | a user message, read at the agent's next step; `--replay-user-messages` says when | `turn/steer` into the running turn | the next `session/prompt`, when the turn ends |
+| Runs as | `claude-agent-sdk`: one process per session | one `codex app-server --disable hooks --disable apps` per run, JSON-RPC over stdio, one thread per session | the Cursor host, `node wf-cursor-host.js`, on `@cursor/sdk`: one process per session, which speaks the wf-session protocol over stdio, with the SDK's own reconnects on (`enableAgentRetries`) |
+| `submit_result` | SDK MCP server | dynamic tool (`experimentalApi`) | a custom tool of the SDK: each call is a `call` frame to the runner |
+| `read-only` | Read, Grep, Glob, and Bash limited to read-only git commands | sandbox `read-only` | none of Cursor's own tools: wf's file tools and `git` tool read only the workspace and the wf folders the instruction names. Cursor's sandbox is on, and no other MCP server is offered |
+| `edit` | Read, Edit, Write, Bash with `permission_mode="dontAsk"` | sandbox `workspace-write` | through `cursor-agent`'s ACP: agent mode, with writes inside the workspace and commands allowed, and writes to temp folders and `~/.cursor` denied |
+| `full` | `permission_mode="bypassPermissions"` | sandbox `danger-full-access` | all of Cursor's tools but `askQuestion`, with the sandbox off |
+| `web: false` | no WebSearch or WebFetch | `web_search: "disabled"` (the default is `cached`) | no `webSearch` or `webFetch` tool |
+| Repo instructions | `setting_sources=["project"]`, `claude_code` system prompt | `AGENTS.md` and the repo's skills | Cursor's `project` settings layer |
+| `project_instructions: false` | `setting_sources=[]` | `project_doc_max_bytes: 0`, and each repo skill off | no settings layer (`settingSources` left out) |
+| Usage limit | a `RateLimitEvent` that isn't `allowed` | `codexErrorInfo: "usageLimitExceeded"` with `willRetry: false` | a `RateLimitError` that a retry can't clear, a plan or payment notice, or a `[resource_exhausted]` error that isn't a `RetriableError`. A `RetriableError` or a lost connection fails the attempt, and the retry waits 30 seconds |
+| Usage | tokens and dollars | tokens | tokens, but none for `edit` (ACP) |
+| `session: continue` | fork with `fork_session` | fork with `thread/fork` | the SDK resumes the last pass's agent (`Agent.resume`), with no fork |
+| wf tools | an SDK MCP server per tool | a namespace of dynamic tools per tool | a custom tool of the SDK per operation |
+| `wf steer` | a user message, read at the agent's next step; `--replay-user-messages` says when | `turn/steer` into the running turn | the run's `steer`, into the running turn. When Cursor sends it back: the next turn |
 
 Notes:
 - Every setting is passed on every session. Codex fills any gap from your
@@ -1569,6 +1596,28 @@ Notes:
   timeout of its own. So the runner always replies, even on errors.
 - Codex's app-server login is for local use on your own account. Don't run `wf` as a hosted
   service on someone else's ChatGPT login.
+- Cursor's SDK can't refuse one call as it comes, as ACP lets the runner do.
+  So the host sets up front which tools a session gets, and cancels the turn when Cursor still calls another one.
+  For example, a turn of a read-only session fails when it runs a shell, a search of Cursor's own, or another MCP server's tool.
+- A read-only session on the SDK reads and searches files only through wf's tools (`read_file`, `search_files`, `find_files`, `list_dir`, `workflow/harnesses/files_tool.py`).
+  They read the workspace, and the run folder or another node's workspace when the instruction names it.
+  Cursor's own read and search tools take any path.
+  A search from the home folder walks other apps' private data, and macOS then asks you about each search.
+- The SDK has no answer per call to keep writes in the workspace, and no test has shown yet that Cursor's sandbox keeps them there.
+  So `edit` nodes run through `cursor-agent`'s ACP.
+  `test_cursors_sandbox_keeps_edit_writes_in_the_workspace` (`-m harness`) is the check that would let them move.
+- The Cursor host sets the SDK's `enableAgentRetries`, so the SDK carries a turn over a lost connection by itself.
+  ACP switches that loop off, so on `cursor-agent` one lost stream ended the turn.
+- The host maps the SDK's errors to classes.
+  A refused or missing API key, a usage limit, or a model Cursor can't run makes Cursor unavailable.
+  A lost connection that the SDK couldn't carry over fails the attempt, and the retry waits 30 seconds.
+- Each turn's tokens come from the SDK's usage report.
+  Cursor bills later, so a session's cost in dollars isn't counted, and the transcript keeps what Cursor reported as billed when the session closed.
+- The host ships as its TypeScript source, which Node 22.18 or later runs as it is.
+  The SDK can't be bundled into one file, so the first Cursor session installs it beside the host with `npm ci --omit=dev --ignore-scripts`, from the host's `package-lock.json`.
+  The protocol's frames are in `workflow/harnesses/cursor_host/protocol/`, as JSON Schema and an example of each.
+
+Through `cursor-agent`'s ACP, for `edit` nodes and for every node with `cursor_runtime: acp`:
 - Cursor asks before what it may not do by itself.
   The runner answers from the node's access level with "allow once" or "reject".
   It never answers "allow always", which Cursor would save.
