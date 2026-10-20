@@ -97,9 +97,12 @@ def _trace(shape: Shape, events: list[dict]) -> _Trace:
             if topo.routes.get(node):
                 found.routing.add(node)  # the route event follows
             else:
-                found.pending.update(topo.dependents.get(node, ()))
-                # A lap only once the loop's first step has run: start can also lead into its last step
-                for target in (t for t in topo.dependents.get(node, ()) if (node, t) in needs_back and t in found.ran):
+                targets = topo.dependents.get(node, ())
+                # A lap needs the loop's first step to have run, because start can also lead into its last
+                # step. And the first step isn't pending already: then the edge doesn't send the run back
+                back = [t for t in targets if (node, t) in needs_back and t in found.ran and t not in found.pending]
+                found.pending.update(targets)
+                for target in back:
                     found.back[(node, target)] = found.back.get((node, target), 0) + 1
                     found.done -= shape.after(target)  # a loop: its steps are ahead again
         elif kind == "node_failed":

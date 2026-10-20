@@ -309,6 +309,32 @@ def test_a_needs_edge_loop_counts_no_lap_before_its_first_step_ran(repo):
     assert found == sorted(found)
 
 
+def test_a_needs_edge_loop_counts_no_lap_when_a_route_made_its_first_step_pending_already(repo):
+    Path("both.yaml").write_text(dedent("""
+        version: 1
+        name: both
+        start: {input: {}}
+        nodes:
+          a:
+            needs: [start, b]
+            command: "true"
+            routes: [{to: b, max: 1}, {to: c}]
+          b: {needs: [start], command: "true"}
+          c:
+            command: "true"
+            routes: [{to: [a, b], max: 1}, {to: end}]
+        end: {output: {}}
+    """).lstrip())
+    assert cli.main(["run", "both.yaml"]) == 0
+    workflow, events = spec.load(Path("both.yaml")), report.events(Run.at(newest()))
+    needs_loop = next(n for n, loop in enumerate(Shape(workflow).loops) if loop.route is None)
+    ends = [n for n, e in enumerate(events) if e.get("event") == "node_finished"]
+    assert [events[n]["node"] for n in ends] == ["b", "a", "b", "a", "c", "b", "a", "c"]
+    laps = [progress.estimate(workflow, events[:n + 1], "running")["loops"][needs_loop]["taken"]
+            for n in ends if events[n]["node"] == "b"]
+    assert laps == [0, 1, 1]  # c's route made a pending, so b's last end doesn't send the run back to it
+
+
 @pytest.mark.parametrize("first, second", [("a", "b"), ("b", "a")])
 def test_open_steps_with_as_much_left_are_told_apart_by_the_least_done_not_by_chance(tmp_path, first, second):
     steps = {"a": '{needs: [start], for_each: "[1, 2, 3, 4]", command: "true"}',
