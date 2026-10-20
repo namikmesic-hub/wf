@@ -82,7 +82,7 @@ import time
 from pathlib import Path
 
 from .. import output_tool
-from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, steered, transcript
+from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
 TESTED = "0.163.0"
 COMMAND = ["codex", "app-server", "--disable", "hooks", "--disable", "apps"]
@@ -162,7 +162,6 @@ class CodexSession:
         self._turn_start = 0
         self._counted = False  # has a token count come in yet?
         self._traced: dict[str, dict] = {}  # call id -> the arguments the trace has for it
-        self._unconfirmed: list[str] = []  # ids of wf steer messages whose turn/steer got no answer
 
     async def start(self) -> None:
         spec = self.spec
@@ -238,8 +237,7 @@ class CodexSession:
         except _RpcError:  # refused, as the turn had ended, or the app server is gone
             return None
         except TimeoutError:  # sent, but no answer: Codex may have taken it, so it isn't sent again
-            self._unconfirmed.append(ident)
-            return "queued"
+            return "unconfirmed"
         return "delivered"
 
     async def send(self, text: str) -> TurnEnd:
@@ -346,10 +344,6 @@ class CodexSession:
             self.spec.trace.tool_call(call, _tool_label(item), arguments)
 
     async def close(self) -> None:
-        for ident in self._unconfirmed:
-            steered(self.spec, ident, "unconfirmed",
-                    reason="the Codex app server didn't answer turn/steer, so wf can't tell whether the agent read it")
-        self._unconfirmed.clear()
         try:
             if self.turn and not self.rpc.dead:  # a turn still running (a timeout): stop it
                 with contextlib.suppress(Exception):

@@ -420,3 +420,25 @@ def test_a_message_claude_code_read_stays_delivered_when_the_result_comes_during
     assert answer == {"status": "delivered", "attempt": 1, "harness": "claude-code"}
     assert [(e["id"], e["status"]) for e in events if e["event"] == "steer"] == [("id-1", "delivered")]
     assert session._held == []
+
+
+def test_a_turn_cut_off_after_a_message_from_wf_steer_still_counts_the_result_before_it(tmp_path):
+    session = ClaudeSession(spec(tmp_path))
+    session._repeats = True
+    stream = session._client = _Stream(session)
+
+    async def drive():
+        sending = asyncio.get_running_loop().create_task(session.send("Say hi"))
+        await asyncio.sleep(0.05)
+        assert await session.steer("Stop", "id-1") == "queued"
+        first = _result()  # the first turn ends: the message gets a turn of its own
+        first.usage, first.total_cost_usd = {"input_tokens": 100, "output_tokens": 10}, 0.01
+        stream.out.put_nowait(first)
+        stream.out.put_nowait(AssistantMessage(content=[], model="fake", usage={"input_tokens": 50}, message_id="m-2"))
+        await asyncio.sleep(0.05)
+        sending.cancel()  # the node's timeout cuts off the message's turn
+        await asyncio.gather(sending, return_exceptions=True)
+        return session.pending_usage()
+
+    usage = asyncio.run(drive())
+    assert (usage.tokens, usage.cost_usd) == (160, 0.01)

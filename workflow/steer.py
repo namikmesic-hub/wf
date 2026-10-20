@@ -22,10 +22,11 @@ Each message is recorded with its id, in events.jsonl (event `steer`) and in
 the attempt's log (kind `steer`): `delivered`, `queued` or `unconfirmed` when
 it arrives, then `delivered`, `dropped` or `unconfirmed` (with the reason) for
 one that was queued. `unconfirmed` means the harness may have it, but wf can't
-tell whether the agent read it. Then the turn that carried it failed or was cut
-off, the attempt ended while its harness took the message, or Codex didn't
-answer turn/steer. A message for a node with no live session gets the answer
-`none`, with the reason, and changes nothing in the run.
+tell whether the agent read it. That is so when the turn that carried it failed
+or was cut off, when the attempt ended while its harness took the message, or
+when the harness didn't answer as it took the message (Codex's turn/steer). A
+message for a node with no live session gets the answer `none`, with the
+reason, and changes nothing in the run.
 
 A live session is one that an agent attempt has open: from when its harness
 opened it until the attempt ends. The process that drives the run keeps them in
@@ -99,6 +100,7 @@ NOT_RUNNING = {"waiting": "the run is waiting for a person", "limit": "the run i
                "failed": "the run failed", "succeeded": "the run succeeded"}
 STOPPED = "the run paused or ended before a session took the message"
 CUT_OFF = "the attempt ended while its harness took the message, so wf can't tell whether the agent read it"
+UNANSWERED = "{} didn't answer as it took the message, so wf can't tell whether the agent read it"
 FULL = ("the run is full: {} messages from wf steer wait for it or are being answered. Nothing was sent. "
         "Send it again when some of them have their answers")
 NO_BOOT = ("this system doesn't say which boot it is in, so wf can't tell how old a message is, "
@@ -240,16 +242,17 @@ def send(run: Run, path: str, text: str) -> dict:
     folder = mailbox(run)
     folder.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     folder.mkdir(mode=0o700, exist_ok=True)
-    with _locked(folder):
-        if len(_names(folder, ".request")) + len(_names(folder, ".taken")) >= MAX_IN_MAILBOX:
-            raise SteerError(FULL.format(MAX_IN_MAILBOX))
-        sent = now()
-        request, reply = folder / f"{sent:.6f}-{ident}.request", folder / f"{ident}.reply"
-        write_json(request, {"path": path, "text": text, "boot": boot()})
+    request, reply = None, folder / f"{ident}.reply"
     try:
+        with _locked(folder):
+            if len(_names(folder, ".request")) + len(_names(folder, ".taken")) >= MAX_IN_MAILBOX:
+                raise SteerError(FULL.format(MAX_IN_MAILBOX))
+            request = folder / f"{now():.6f}-{ident}.request"
+            write_json(request, {"path": path, "text": text, "boot": boot()})
         answer = _await_answer(reply)
-    except BaseException:  # stopped (Ctrl-C): a request that nobody took yet goes with it
-        request.unlink(missing_ok=True)
+    except BaseException:  # stopped (Ctrl-C) or failed: a request that nobody took yet goes with it
+        if request is not None:
+            request.unlink(missing_ok=True)
         raise
     if answer is None:
         try:
@@ -305,16 +308,23 @@ class Steering:
 
     @asynccontextmanager
     async def live(self, spec: SessionSpec, attempt: int, harness: str, session: Session) -> AsyncIterator["Live"]:
-        """While an attempt's session is open. Enter it from the attempt's own task."""
+        """While an attempt's session is open. Enter it from the attempt's own task. When the attempt
+        ends with its result, a cancellation (the node's timeout) that comes while a hand-over
+        finishes cuts the hand-over, and the result stays."""
         live = Live(spec, attempt, harness, session)
         live.start()
         self._live[spec.where] = live
+        returned = False
         try:
             yield live
+            returned = True
         finally:
             del self._live[spec.where]
             try:
                 await live.stop()
+            except asyncio.CancelledError:
+                if not returned:
+                    raise
             finally:
                 live.end()
 
@@ -353,11 +363,12 @@ class Live:
         answer = asyncio.get_running_loop().create_future()
         self._idle.clear()
         self._inbox.put_nowait((message, answer))
-        status = await answer
-        if status is None:
+        outcome = await answer
+        if outcome is None:
             return {"status": "none", "reason": "the session ended before it took the message"}
+        status, reason = outcome
         return {"status": status, "attempt": self.attempt, "harness": self.harness,
-                **({"reason": CUT_OFF} if status == "unconfirmed" else {})}
+                **({"reason": reason} if reason else {})}
 
     async def _serve(self) -> None:
         while (item := await self._inbox.get()) is not None:
@@ -368,7 +379,7 @@ class Live:
                 pass
             finally:
                 if not self._handing.done():  # stopped while its harness took it: the harness may have it
-                    self._handing.set_result("unconfirmed")
+                    self._handing.set_result(("unconfirmed", CUT_OFF))
                     steered(self.spec, message.id, "unconfirmed", text=message.text, reason=CUT_OFF)
             if self._inbox.empty():
                 self._idle.set()
@@ -380,8 +391,9 @@ class Live:
             status = None
         if status is None:
             self._held.append(message)
-        answer.set_result(status or "queued")
-        steered(self.spec, message.id, status or "queued", text=message.text)
+        why = {"reason": UNANSWERED.format(self.harness)} if status == "unconfirmed" else {}
+        answer.set_result((status or "queued", why.get("reason")))
+        steered(self.spec, message.id, status or "queued", text=message.text, **why)
 
     async def next_turn(self) -> str | None:
         """The text of the messages kept for the next turn, or None. A message being handed over goes

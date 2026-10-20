@@ -128,11 +128,12 @@ class Session(Protocol):
         """What a turn that hasn't returned yet has used so far (zero between turns), so a turn
         cut off by a timeout still counts. Harnesses that can't tell return Usage()."""
 
-    async def steer(self, text: str, ident: str) -> Literal["delivered", "queued"] | None:
+    async def steer(self, text: str, ident: str) -> Literal["delivered", "queued", "unconfirmed"] | None:
         """A message from `wf steer`, with its id. "delivered": the running turn has it now.
         "queued": the harness holds it for the agent's next step, and records with steered() what
-        became of it, or steer_dropped() when the session ends first. None: the harness can't take
-        it now, so the runner sends it in the next turn."""
+        became of it, or steer_dropped() when the session ends first. "unconfirmed": the harness
+        sent it on but got no answer, so it may have it, and the runner doesn't send it again. None:
+        the harness can't take it now, so the runner sends it in the next turn."""
 
     async def close(self) -> None:
         """End the session, interrupting a turn that's still running."""

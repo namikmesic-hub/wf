@@ -41,8 +41,8 @@ Exit codes: 0 success, 1 failure (including bad arguments), 2 paused waiting
 for a person (wf run and wf retry, only with --no-input or without a
 terminal), 3 nothing new before the timeout (wf wait), 130 stopped with
 Ctrl-C. Bad arguments exit with 1, not argparse's usual 2, so a script can
-tell a pause from a typo. A message that `wf steer` finds no live session for
-fails too: exit code 1.
+tell a pause from a typo. A message that `wf steer` doesn't send fails too:
+exit code 1.
 """
 
 import argparse
@@ -432,12 +432,12 @@ def _steer(args) -> int:
         print(f"wf steer: {error}", file=sys.stderr)
         return 1
     except OSError as error:
-        print(f"wf steer: can't write the message into {steer.mailbox(run)}: {error.strerror or error}", file=sys.stderr)
+        print(f"wf steer: can't use the mailbox {steer.mailbox(run)}: {error.strerror or error}", file=sys.stderr)
         return 1
     if args.json:
         print(json.dumps({"run": run.id, "node": path, **answer}))
     elif answer["status"] == "none":
-        print(f"wf steer: no live session for {path}: {answer['reason']}. Nothing was sent.", file=sys.stderr)
+        print(f"wf steer: nothing was sent to {path}: {answer['reason']}.", file=sys.stderr)
     else:
         where = f"{path} (attempt {answer['attempt']} on {answer['harness']})"
         print({"delivered": f"Delivered to {where}: the agent reads it at its next step.",
@@ -455,7 +455,10 @@ def _message(args) -> str:
     if args.file is None:
         text = args.message
     elif str(args.file) == "-":
-        text = sys.stdin.read(most)
+        try:
+            text = sys.stdin.read(most)
+        except UnicodeDecodeError as error:
+            raise ValueError("stdin isn't UTF-8 text") from error
     else:
         try:
             with args.file.open(encoding="utf-8") as file:
@@ -464,6 +467,10 @@ def _message(args) -> str:
             raise ValueError(f"can't read {args.file}: {error.strerror or error}") from error
         except UnicodeDecodeError as error:
             raise ValueError(f"{args.file} isn't UTF-8 text") from error
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as error:  # bytes that aren't UTF-8, as the system passes them on
+        raise ValueError("the message isn't UTF-8 text") from error
     if not text.strip():
         raise ValueError("the message is empty")
     if len(text) > steer.MAX_CHARACTERS:

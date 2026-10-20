@@ -251,6 +251,18 @@ def test_an_app_server_that_stops_answering_is_unavailable_not_a_node_timeout(re
     assert "timed out after" not in out.out + out.err
 
 
+def test_a_turn_that_codex_never_starts_makes_it_unavailable_and_the_next_harness_runs_without_a_retry(
+        repo, monkeypatch, capsys):
+    from fakes import Fake, submit
+    log = codex(monkeypatch, repo, [GOOD], silent=["turn/start"])
+    claude = Fake("claude-code", submit({"summary": "from claude"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", claude.factory)
+    assert run("harness: [codex, claude-code]\nmodel: {codex: gpt-6, claude-code: opus}\nretry: 2\n") == 0
+    assert output() == {"out": "from claude"}
+    assert len(sent(log, "turn/start")) == 1  # no retry on codex
+    assert "codex is unavailable: the Codex app server stopped answering" in capsys.readouterr().out
+
+
 def test_an_app_server_that_dies_mid_turn_is_unavailable_and_the_next_harness_runs(repo, monkeypatch, capsys):
     from fakes import Fake, submit
     codex(monkeypatch, repo, [{"exit": True}])
@@ -329,11 +341,11 @@ def test_a_message_codex_never_answers_for_is_unconfirmed_and_never_sent_again(r
     log = codex(monkeypatch, repo, [{"pause": "p"}, GOOD], silent=["turn/steer"])
     steering = at_pause(repo, "p")
     assert run() == 0
-    assert steering.result().stdout.startswith("Queued for ask (attempt 1 on codex)")
+    reason = "codex didn't answer as it took the message, so wf can't tell whether the agent read it"
+    assert steering.result().stdout == f"Unconfirmed for ask (attempt 1 on codex): {reason}.\n"
     assert len(sent(log, "turn/steer")) == 1 and len(sent(log, "turn/start")) == 1
-    queued, unconfirmed = steer_events()
-    assert (queued["status"], unconfirmed["status"]) == ("queued", "unconfirmed")
-    assert unconfirmed["reason"] == "the Codex app server didn't answer turn/steer, so wf can't tell whether the agent read it"
+    (unconfirmed,) = steer_events()
+    assert (unconfirmed["status"], unconfirmed["text"], unconfirmed["reason"]) == ("unconfirmed", STEER, reason)
 
 
 def test_a_message_codex_never_took_is_dropped_when_the_agent_submits_first(repo, monkeypatch):

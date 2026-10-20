@@ -143,17 +143,18 @@ That includes an agent that can run commands as you: on Claude Code and Cursor w
   Cursor gets it as its next turn, when its turn ends.
   A turn often ends only when the agent submits its result, and then the message is dropped.
   A `steer` event in `events.jsonl` says when the message was delivered, or why it was dropped.
-  An `unconfirmed` event means that the harness may have the message, but wf can't tell whether the agent read it.
+  An `unconfirmed` event means that the turn that carried the message failed, or that the attempt ended during that turn.
+  The harness may have the message, but wf can't tell whether the agent read it.
 
 `unconfirmed`
-: The attempt ended while the harness took the message.
-  The harness may have it, but wf can't tell whether the agent read it.
-  Do not send it again to the same attempt: that attempt has ended.
+: The harness may have the message, but wf can't tell whether the agent read it.
+  The attempt ended while the harness took the message, or the harness didn't answer as it took the message (Codex).
+  Read the attempt's log before you send it again: the agent may have it already.
 
-no live session
-: Exit code 1, and nothing was sent.
-  The reason says why: the node has no agent session open now, or the run isn't running.
-  A message has at most 100,000 characters, and at most 10 can wait for one session.
+nothing was sent (`none` with `--json`)
+: Exit code 1.
+  The reason says why: the node has no agent session open now, the run isn't running, or 10 messages already wait for the session.
+  A message has at most 100,000 characters.
 
 the run is full
 : Exit code 1, and nothing was sent.

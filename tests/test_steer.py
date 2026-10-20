@@ -138,8 +138,8 @@ def test_a_run_that_isnt_running_has_no_live_session(repo, capsys):
     run = made_run()
     run.set_status("waiting", nodes=["approve"])
     assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
-    assert capsys.readouterr().err == ("wf steer: no live session for ask: the run is waiting for a person, so no agent "
-                                       "works in it. Nothing was sent.\n")
+    assert capsys.readouterr().err == ("wf steer: nothing was sent to ask: the run is waiting for a person, so no agent "
+                                       "works in it.\n")
     run.set_status("succeeded")
     assert cli.main(["steer", run.id, "ask", "Stop", "--json"]) == 1
     answer = json.loads(capsys.readouterr().out)
@@ -162,6 +162,30 @@ def test_a_message_nobody_takes_is_withdrawn_and_can_never_arrive(repo, monkeypa
         answer = steer.send(run, "ask", "Stop")
     assert (answer["status"], answer["reason"]) == (
         "none", "the wf process that drives the run didn't take the message within 0.3 seconds")
+    assert left_in_mailbox(run.dir) == []
+
+
+def test_a_wf_steer_stopped_just_after_it_writes_its_request_takes_it_back(repo, monkeypatch):
+    def written_then_stopped(path, value):
+        write_json(path, value)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(steer, "write_json", written_then_stopped)
+    run = made_run()
+    with run.driving(), pytest.raises(KeyboardInterrupt):
+        steer.send(run, "ask", "Stop")
+    assert left_in_mailbox(run.dir) == []
+
+
+def test_a_mailbox_that_wf_steer_cant_read_says_so_and_takes_the_message_back(repo, monkeypatch, capsys):
+    def unreadable(reply):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(steer, "_await_answer", unreadable)
+    run = made_run()
+    with run.driving():
+        assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
+    assert capsys.readouterr().err == f"wf steer: can't use the mailbox {steer.mailbox(run)}: Permission denied\n"
     assert left_in_mailbox(run.dir) == []
 
 
@@ -208,8 +232,7 @@ def test_a_message_for_a_node_without_a_live_session_fails_and_changes_nothing(r
     """) == 0
     done = steering.result()
     assert done.returncode == 1
-    assert done.stderr == ("wf steer: no live session for later: no agent session of it is open now. "
-                           "Nothing was sent.\n")
+    assert done.stderr == "wf steer: nothing was sent to later: no agent session of it is open now.\n"
     assert steer_events() == []
     assert STEER not in fake.sent
     assert not (run_folder() / "nodes/ask/1/attempt-1.log").exists()  # the fake keeps none: a steer line would make one
@@ -501,12 +524,62 @@ def test_a_hand_over_cut_when_the_attempt_ends_is_unconfirmed_not_queued_or_none
     assert [(e["status"], e["text"], e["reason"]) for e in events] == [("unconfirmed", "A", steer.CUT_OFF)]
 
 
+def test_a_message_whose_hand_over_breaks_is_kept_for_the_next_turn(tmp_path):
+    events = []
+
+    class Session:  # the session broke as its harness took the message
+        async def steer(self, text, ident):
+            raise OSError("Claude Code is gone")
+
+    async def drive():
+        live = steer.Live(a_spec(tmp_path, events), 1, "claude-code", Session())
+        live.start()
+        answer = await live.take(steer.Message("a", "A"))
+        turn = await live.next_turn()
+        await live.stop()
+        return answer, turn
+
+    answer, turn = asyncio.run(drive())
+    assert answer == {"status": "queued", "attempt": 1, "harness": "claude-code"}
+    assert turn == "A"
+    assert [(e["status"], e["text"]) for e in events] == [("queued", "A")]
+
+
+def test_a_result_stays_when_the_nodes_timeout_comes_while_a_hand_over_finishes(tmp_path):
+    events = []
+
+    class Session:  # a harness that takes its time to take the message
+        async def steer(self, text, ident):
+            await asyncio.sleep(60)
+
+    async def attempt():
+        async with asyncio.timeout(0.3):  # the node's timeout, as nodes._attempts sets it
+            async with steer.Steering().live(a_spec(tmp_path, events), 1, "claude-code", Session()) as live:
+                answer = asyncio.get_running_loop().create_task(live.take(steer.Message("a", "A")))
+                await asyncio.sleep(0.05)  # the agent submits while the hand-over is under way
+                result = {"summary": "done"}
+        return result, await answer
+
+    result, answer = asyncio.run(attempt())
+    assert result == {"summary": "done"}
+    assert (answer["status"], answer["reason"]) == ("unconfirmed", steer.CUT_OFF)
+    assert [(e["status"], e["reason"]) for e in events] == [("unconfirmed", steer.CUT_OFF)]
+
+
 def test_wf_steer_says_when_wf_cant_tell_whether_the_agent_read_the_message(repo, monkeypatch, capsys):
     run = made_run()
     monkeypatch.setattr(steer, "send", lambda run, path, text: {
         "id": "a", "status": "unconfirmed", "reason": steer.CUT_OFF, "attempt": 1, "harness": "claude-code"})
     assert cli.main(["steer", run.id, "ask", "Stop"]) == 0
     assert capsys.readouterr().out == f"Unconfirmed for ask (attempt 1 on claude-code): {steer.CUT_OFF}.\n"
+
+
+def test_wf_steer_says_nothing_was_sent_when_too_many_messages_wait_for_the_session(repo, monkeypatch, capsys):
+    run = made_run()
+    monkeypatch.setattr(steer, "send", lambda run, path, text: {
+        "id": "a", "status": "none", "reason": "10 messages already wait for this session"})
+    assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
+    assert capsys.readouterr().err == "wf steer: nothing was sent to ask: 10 messages already wait for this session.\n"
 
 
 def test_the_message_being_handed_over_counts_toward_the_limit(tmp_path, monkeypatch):
@@ -746,3 +819,13 @@ def test_wf_steer_reads_no_more_of_a_file_than_it_needs(repo, capsys, tmp_path):
     (tmp_path / "big.md").write_text("x" * (steer.MAX_CHARACTERS * 3))
     assert cli.main(["steer", run.id, "ask", "--file", str(tmp_path / "big.md")]) == 1
     assert "the message is longer than 100,000 characters" in capsys.readouterr().err
+
+
+def test_a_message_that_isnt_utf_8_is_refused(repo, monkeypatch, capsys):
+    run = made_run()
+    assert cli.main(["steer", run.id, "ask", "Stop \udcff now"]) == 1  # how Python passes on a byte that isn't UTF-8
+    assert capsys.readouterr().err == "wf steer: the message isn't UTF-8 text\n"
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(b"Stop \xff now"), encoding="utf-8"))
+    assert cli.main(["steer", run.id, "ask", "--file", "-"]) == 1
+    assert capsys.readouterr().err == "wf steer: stdin isn't UTF-8 text\n"
+    assert left_in_mailbox(run.dir) == []
