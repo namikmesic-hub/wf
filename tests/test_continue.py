@@ -897,6 +897,22 @@ def test_each_read_that_validate_doesnt_warn_about_finds_an_output_however_a_fol
         checked += 1
 
 
+def test_validate_ends_for_an_empty_list_that_leads_back_to_itself_many_times(repo, capsys):
+    others = "".join(f"  n{i}: {{needs: [start], command: 'true'}}\n" for i in range(39))
+    write("loop.yaml", f"""
+version: 1
+name: loop
+start: {{input: {{}}}}
+follow_up: {{to: loop}}
+nodes:
+  loop: {{needs: [start], for_each: '[]', routes: [{{to: loop, max: 1000}}, {{to: end}}], command: 'echo {{% if follow_up %}}{{{{ follow_up.number }}}}{{% endif %}}'}}
+{others}end: {{output: {{}}}}
+""")
+    assert [str(p) for p in validate.check("loop.yaml").problems] == []
+    assert cli.main(["run", "loop.yaml"]) == 0
+    assert cli.main(["continue", only_run().id, "more"]) == 0
+
+
 def random_workflow(rng: random.Random) -> str:
     """A workflow of a few nodes with random needs, routes and lists, each command reading every other node."""
     names = [f"n{i}" for i in range(rng.randint(3, 6))]
