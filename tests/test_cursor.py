@@ -545,46 +545,82 @@ def test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn(repo, monkeypat
     assert [(e["status"], e.get("text")) for e in steer_events()] == [("queued", STEER), ("delivered", None)]
 
 
-def test_a_message_that_cursor_sends_back_late_goes_at_the_start_of_the_next_turn(tmp_path):
+class StubHost:
+    """Answers a session's requests as the Cursor host would: turn.steer with `queued`. With
+    `early`, the steer.status event comes before that answer, which the protocol allows."""
+
+    name, dead = "the stub host", None
+
+    def __init__(self, early: dict | None = None):
+        self.early, self.session = early, None
+
+    async def request(self, op, args, timeout=None):
+        if op == "turn.steer" and self.early:  # the session's turn reads the event before this answer comes
+            self.session.events.put_nowait({"kind": "steer.status", "turn": "trn_0", "data": self.early})
+            self.session._take_events()
+        return {"turn.steer": {"status": "queued"}}.get(op, {})
+
+    def attach(self, session): pass
+    def detach(self, session): pass
+    async def stop(self): pass
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_a_message_that_cursor_declines_late_goes_back_to_the_runner_for_its_next_turn(tmp_path, early):
     import asyncio
-    from workflow import schemas
+    from workflow import schemas, steer
     from workflow.harnesses import cursor, remote
-    from workflow.harnesses.base import SessionSpec
-    from workflow.output_tool import REMINDER, ResultTool
-
-    class Peer:  # answers each request as the Cursor host would
-        name, dead = "the stub host", None
-
-        def __init__(self):
-            self.sent = []
-
-        async def request(self, op, args, timeout=None):
-            self.sent.append((op, args))
-            return {"turn.steer": {"status": "queued"}, "turn.start": {"turn": f"trn_{len(self.sent)}"}}.get(op, {})
-
-        def attach(self, session): pass
-        def detach(self, session): pass
-        async def stop(self): pass
+    from workflow.harnesses.base import SessionSpec, TurnEnd
+    from workflow.output_tool import ResultTool
+    declined = {"id": "st_1", "status": "declined"}
 
     async def main():
         spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="m", effort=None,
                            tool=ResultTool(schemas.object_schema({})), log=tmp_path / "attempt-1.log", emit=lambda e: None)
-        peer = Peer()
-        session = remote.RemoteSession(cursor.Cursor(), peer, spec)
-        session.session, session.turn, session.turns = "ses_a", "trn_0", 1  # its first turn runs
+        host = StubHost(declined if early else None)
+        session = remote.RemoteSession(cursor.Cursor(), host, spec)
+        host.session, session.session, session.turn = session, "ses_a", "trn_0"
+        live = steer.Live(spec, 1, "cursor", session)
+        live.start()
+        answer = await live.take(steer.Message("st_1", "Use the v2 API"))
+        if not early:
+            session.events.put_nowait({"kind": "steer.status", "turn": "trn_0", "data": declined})
+        session.turn = None  # the turn ended without a result, and no reminder may be left
+        turn = await live.next_turn()
+        live.sent(TurnEnd("done"))
+        await live.stop()
+        live.end()
+        return answer, turn
+
+    answer, turn = asyncio.run(main())
+    assert answer["status"] == "queued"
+    assert turn == "Use the v2 API"  # the runner sends it as a turn, before any reminder, or with none left
+    lines = [json.loads(line) for line in (tmp_path / "attempt-1.log").read_text().splitlines()]
+    assert [line["status"] for line in lines if line["kind"] == "steer"] == ["queued", "delivered"]
+
+
+def test_a_message_that_cursor_never_answers_for_is_unconfirmed_when_the_session_closes(tmp_path):
+    import asyncio
+    from workflow import schemas
+    from workflow.harnesses import cursor, remote
+    from workflow.harnesses.base import SessionSpec
+    from workflow.output_tool import ResultTool
+
+    async def main():
+        spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="m", effort=None,
+                           tool=ResultTool(schemas.object_schema({})), log=tmp_path / "attempt-1.log", emit=lambda e: None)
+        harness = cursor.Cursor()
+        harness.home = tmp_path
+        session = remote.RemoteSession(harness, StubHost(), spec)
+        session.session, session.turn = "", "trn_0"
         assert await session.steer("Use the v2 API", "st_1") == "queued"
         session.turn = None
-        session.events.put_nowait({"kind": "steer.status", "turn": "trn_0", "data": {"id": "st_1", "status": "declined"}})
-        session.events.put_nowait({"kind": "turn.ended", "turn": "trn_2", "data": {"status": "done", "usage": {}}})
-        end = await session.send(REMINDER)
-        return end, peer.sent
+        await session.close()
 
-    end, sent = asyncio.run(main())
-    assert end.status == "done"
-    assert sent[1] == ("turn.start", {"session": "ses_a", "kind": "reminder", "text": f"Use the v2 API\n\n{REMINDER}"})
+    asyncio.run(main())
     lines = [json.loads(line) for line in (tmp_path / "attempt-1.log").read_text().splitlines()]
-    assert [(line["kind"], line.get("id"), line.get("status")) for line in lines if line["kind"] == "steer"] == [
-        ("steer", "st_1", "delivered")]
+    (line,) = [line for line in lines if line["kind"] == "steer"]
+    assert (line["status"], line["reason"]) == ("unconfirmed", "cursor never said whether the agent read it")
 
 
 def test_a_message_for_cursor_is_dropped_when_the_agent_submits_first(repo, monkeypatch, cursor_host):

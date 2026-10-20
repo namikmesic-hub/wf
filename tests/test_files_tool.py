@@ -1,8 +1,10 @@
 """wf's file tools for read-only agents on Cursor's SDK (files_tool.py): they read and search only
 the workspace and the folders the step's instruction names."""
 
+import asyncio
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -130,3 +132,36 @@ def test_one_star_stays_in_one_folder_and_two_cross_folders(workspace):
     assert call("find_files", workspace, pattern="src/*.py")[0] == "src/a.py"
     assert call("find_files", workspace, pattern="src/**/*.py")[0] == "src/a.py\nsrc/deep/b.py"
     assert call("find_files", workspace, pattern="*.py")[0] == "src/a.py\nsrc/deep/b.py"  # a name alone: any depth
+
+
+def test_a_glob_that_would_backtrack_a_regular_expression_is_matched_at_once():
+    began = time.monotonic()
+    assert not files_tool._matches("a" * 32 + "!", "*a" * 16 + "b")
+    assert not files_tool._matches("/".join(["a"] * 40), "/".join(["**"] * 20) + "/b")
+    assert time.monotonic() - began < 1
+
+
+def test_a_cancelled_search_stops_its_process(workspace, monkeypatch):
+    (workspace / "long.txt").write_text("a" * 40 + "!\n")
+    started = []
+    real = asyncio.create_subprocess_exec
+
+    async def watched(*args, **kwargs):
+        started.append(await real(*args, **kwargs))
+        return started[-1]
+
+    monkeypatch.setattr(files_tool.asyncio, "create_subprocess_exec", watched)
+
+    async def main():
+        task = asyncio.ensure_future(files_tool.run_async("search_files", workspace, [], {"pattern": "(a+)+$"}))
+        while not started:
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    began = time.monotonic()
+    asyncio.run(main())
+    assert time.monotonic() - began < 5  # not the 30 seconds that a search may take
+    assert started[0].returncode is not None  # and its process is gone

@@ -351,8 +351,8 @@ export class CursorSession {
     const answer = run.steer(text).then((outcome) => outcome === "complete_delivered" ? "delivered" as const : "declined" as const,
       () => "declined" as const);
     const outcome = await Promise.race([answer, sleep(STEER_MS).then(() => "queued" as const)]);
-    if (outcome === "queued") {
-      void answer.then((status) => this.wire.event(this.id, turn, "steer.status", { id, status }));
+    if (outcome === "queued") { // after the answer to turn.steer has gone, even when Cursor answers at once
+      setImmediate(() => void answer.then((status) => this.wire.event(this.id, turn, "steer.status", { id, status })));
     }
     return outcome;
   }

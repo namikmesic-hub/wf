@@ -405,6 +405,9 @@ class Live:
         first: if the harness can't take it, it's in this turn too."""
         while not self._idle.is_set():  # another message can come between the wake-up and this check
             await self._idle.wait()
+        given_back = getattr(self.session, "given_back", None)  # messages it took as queued, and gave back later
+        if given_back is not None:
+            self._held += [Message(ident, text) for ident, text in given_back()]
         if not self._held:
             return None
         self._sending, self._held = self._held, []

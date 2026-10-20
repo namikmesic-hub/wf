@@ -137,7 +137,9 @@ class Session(Protocol):
         "queued": the harness holds it for the agent's next step, and records with steered() what
         became of it, or steer_dropped() when the session ends first. "unconfirmed": the harness
         sent it on but got no answer, so it may have it, and the runner doesn't send it again. None:
-        the harness can't take it now, so the runner sends it in the next turn."""
+        the harness can't take it now, so the runner sends it in the next turn. A harness whose
+        runtime can decline a queued message later has given_back() too: the runner takes those
+        messages for its next turn, as if steer() had returned None."""
 
     async def close(self) -> None:
         """End the session, interrupting a turn that's still running."""

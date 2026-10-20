@@ -30,8 +30,9 @@ How the operations map onto base.py's interfaces:
 - Session.steer() is turn.steer. `delivered`: the running turn has the message. `declined` is
   None here, so the runner sends the message as the next turn. `unconfirmed` is passed on, and so
   is no answer in STEER_TIMEOUT seconds. `queued`: the peer waits for the runtime's answer, and a
-  steer.status event brings it. A message the runtime then declines goes at the start of the
-  session's next turn, and one that no turn carries is dropped when the session closes.
+  steer.status event brings it. A message the runtime then declines goes back to the runner
+  (given_back()), which sends it as the next turn, as it sends the ones that steer() returned None
+  for. One that the runtime never answers for is unconfirmed when the session closes.
 - Session.close() is turn.cancel when a turn still runs, usage.read for the transcript, and
   session.close.
 
@@ -415,8 +416,7 @@ class RemoteSession:
         self.closed = False
         self.late = Usage()  # what a turn that close() cancelled reported beyond pending_usage()
         self.steering: dict[str, str] = {}  # `wf steer` messages the runtime hasn't answered for: id -> text
-        self.carried: dict[str, str] = {}  # those it declined, for the next turn
-        self.carrying: list[str] = []  # the ids that the running turn carries
+        self.given: list[tuple[str, str]] = []  # those it declined later, for the runner's next turn
         self.extra: dict = {}  # the harness's own record of the session
 
     async def open(self, args: dict) -> None:
@@ -433,29 +433,25 @@ class RemoteSession:
 
     async def send(self, text: str) -> TurnEnd:
         spec, name = self.spec, self.harness.name
-        self._take_events()
         kind = "instruction" if self.turns == 0 else "reminder" if text == output_tool.REMINDER else "steer"
         self.turns += 1
-        self.carrying, carried = list(self.carried), list(self.carried.values())
-        self.carried = {}
-        text = "\n\n".join([*carried, text])
         transcript(spec.log, "sent", text=text)
         self.text, self.pending = "", Usage()
         try:
             answer = await self.peer.request("turn.start", {"session": self.session, "kind": kind, "text": text})
         except RemoteError as error:
-            return self._carried(self.harness.ended(error.error, Usage()))
+            return self.harness.ended(error.error, Usage())
         except FrameTooBig as error:
-            return self._carried(TurnEnd("failed", f"{name}: the turn's text is too big to send: {error}"))
+            return TurnEnd("failed", f"{name}: the turn's text is too big to send: {error}")
         except (PeerGone, TimeoutError) as error:
-            return self._carried(TurnEnd("failed", f"{name}: {error or f'{self.peer.name} did not start the turn'}"))
+            return TurnEnd("failed", f"{name}: {error or f'{self.peer.name} did not start the turn'}")
         self.turn = answer.get("turn")
         try:
             while True:
                 event = await self.events.get()
                 if event is CLOSED:
                     self.turn = None
-                    return self._carried(TurnEnd("failed", f"{name}: {self.peer.dead}", self.pending))
+                    return TurnEnd("failed", f"{name}: {self.peer.dead}", self.pending)
                 kind, data = event.get("kind"), event.get("data") or {}
                 if kind == "turn.text":
                     self.text += str(data.get("text") or "")
@@ -468,7 +464,7 @@ class RemoteSession:
                     self._steer_status(data)
                 elif kind == "turn.ended" and event.get("turn") == self.turn:
                     self.turn = None
-                    return self._carried(self._ended(data))
+                    return self._ended(data)
         finally:
             self._flush()
 
@@ -493,17 +489,14 @@ class RemoteSession:
         if data.get("status") == "delivered":
             steered(self.spec, ident, "delivered")
         else:
-            self.carried[ident] = text
+            self.given.append((ident, text))
 
-    def _carried(self, end: TurnEnd) -> TurnEnd:
-        """Record what became of the `wf steer` messages that this turn carried."""
-        for ident in self.carrying:
-            if end.status == "done":
-                steered(self.spec, ident, "delivered")
-            else:
-                steered(self.spec, ident, "unconfirmed", reason=f"the turn that carried it failed: {end.message}")
-        self.carrying = []
-        return end
+    def given_back(self) -> list[tuple[str, str]]:
+        """The `wf steer` messages that the runtime declined after steer() said `queued`, as (id, text),
+        for the runner to send as the next turn (steer.Live.next_turn)."""
+        self._take_events()
+        given, self.given = self.given, []
+        return given
 
     def _ended(self, data: dict) -> TurnEnd:
         error, used = data.get("error") or {}, usage(data.get("usage"))
@@ -560,7 +553,7 @@ class RemoteSession:
             text, is_error = await asyncio.to_thread(git_tool.run, spec.cwd, given or [])
             return [_text(text)], is_error
         if server is None and tool in files_tool.NAMES and spec.access == "read-only" and self.harness.file_tools:
-            text, is_error = await asyncio.to_thread(files_tool.run, str(tool), spec.cwd, spec.read_roots, args)
+            text, is_error = await files_tool.run_async(str(tool), spec.cwd, spec.read_roots, args)
             return [_text(text)], is_error
         found = next((s for s in spec.tools if s.name == server), None)
         if found is None:
@@ -573,16 +566,19 @@ class RemoteSession:
     async def steer(self, text: str, ident: str) -> str | None:
         if not self.turn or self.peer.dead:
             return None
+        self.steering[ident] = text  # before the answer: its steer.status may come first
         try:
             answer = await self.peer.request("turn.steer", {"session": self.session, "id": ident, "text": text},
                                              timeout=STEER_TIMEOUT)
         except TimeoutError:  # sent, but no answer: the agent may have it, so it isn't sent again
+            self.steering.pop(ident, None)
             return "unconfirmed"
         except (RemoteError, PeerGone, FrameTooBig):
+            self.steering.pop(ident, None)
             return None
         status = answer.get("status")
-        if status == "queued":  # a steer.status event brings the runtime's answer
-            self.steering[ident] = text
+        if status != "queued":  # queued: a steer.status event brings the runtime's answer
+            self.steering.pop(ident, None)
         return status if status in ("delivered", "queued", "unconfirmed") else None
 
     async def close(self) -> None:
@@ -604,9 +600,11 @@ class RemoteSession:
         finally:  # even when cancelled: the peer must stop
             self._flush()
             self._take_events()
-            for ident in [*self.carried, *self.steering]:
+            for ident, _ in self.given:  # the runner didn't take them for another turn
                 steer_dropped(self.spec, ident)
-            self.carried, self.steering = {}, {}
+            for ident in self.steering:
+                steered(self.spec, ident, "unconfirmed", reason=f"{self.harness.name} never said whether the agent read it")
+            self.given, self.steering = [], {}
             self.peer.detach(self)
             await self.harness.done(self)
 
@@ -631,7 +629,6 @@ class RemoteSession:
                 final = usage(data.get("usage"))
                 self.late = Usage(max(final.tokens - counted.tokens, 0), max(final.cost_usd - counted.cost_usd, 0.0))
                 self.turn = None
-                self._carried(TurnEnd("failed", "the attempt ended during the turn"))
                 return
 
 

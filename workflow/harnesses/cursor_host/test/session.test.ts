@@ -87,6 +87,29 @@ test("a late answer to a message comes as a steer.status event", async () => {
   }
 });
 
+test("an answer that comes just after the wait still follows the turn.steer answer", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const out = new PassThrough();
+    const frames: Array<Record<string, unknown>> = [];
+    out.on("data", (chunk: Buffer) => chunk.toString().trim().split("\n").forEach((line) => frames.push(JSON.parse(line))));
+    const wire = new Wire(out);
+    const made = new CursorSession(wire, "key");
+    const inside = made as unknown as Inside;
+    inside.run = { status: "running", cancel: async () => undefined,
+      steer: () => new Promise((resolve) => setTimeout(() => resolve("revert_to_followup"), 8_001)) };
+    const status = made.steer("st_1", "Use the v2 API");
+    mock.timers.tick(8_001);
+    assert.equal(await status, "queued");
+    wire.respond("r1", { status: "queued" }, made.id); // as main.ts answers, once steer() returns
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(frames.map((frame) => frame.t === "ev" ? frame.kind : frame.t), ["res", "steer.status"]);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("an event too big for a frame keeps its small fields", () => {
   const out = new PassThrough();
   let line = "";

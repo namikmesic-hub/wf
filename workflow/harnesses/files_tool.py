@@ -21,14 +21,17 @@ Only regular files are read: a named pipe or a device is refused, and opened wit
 
 An agent's regular expression can take time that grows without bound, and Python can't stop a
 thread that runs one. So search_files runs in a Python process of its own, stopped after
-SEARCH_SECONDS.
+SEARCH_SECONDS, and at once when its call is cancelled (run_async).
 
 A glob pattern's `*` and `?` stay within one folder, and `**` crosses folders. A pattern without
-a `/` matches a file's name at any depth.
+a `/` matches a file's name at any depth. Globs are matched without regular expressions, in time
+that grows with the path times the pattern at most, so no pattern can hold a call.
 
 run() is plain Python. Each adapter wraps it in its own tool type, like submit_result.
 """
 
+import asyncio
+import contextlib
 import json
 import os
 import re
@@ -82,24 +85,36 @@ class _Refused(Exception):
 
 
 def run(name: str, cwd: Path, roots: list[Path], args: object) -> tuple[str, bool]:
-    """Returns (text for the agent, is_error). `roots` are the folders besides `cwd` it may read."""
+    """Returns (text for the agent, is_error). `roots` are the folders besides `cwd` it may read.
+    In an event loop, use run_async()."""
+    if name == "search_files":
+        return asyncio.run(run_async(name, cwd, roots, args))
+    tool = {"read_file": _read, "find_files": _find, "list_dir": _list}.get(name)
+    if tool is None:
+        return f"Error: there's no file tool called `{name}`.", True
     if not isinstance(args, dict):
         return "Error: pass the arguments as an object.", True
-    allowed = _unique([Path(cwd).resolve(), *(Path(root).resolve() for root in roots)])
     try:
-        if name == "read_file":
-            text = _read(Path(cwd), allowed, args)
-        elif name == "search_files":
-            text = _search_apart(Path(cwd), allowed, args)
-        elif name == "find_files":
-            text = _find(Path(cwd), allowed, args)
-        elif name == "list_dir":
-            text = _list(Path(cwd), allowed, args)
-        else:
-            return f"Error: there's no file tool called `{name}`.", True
+        return _cut(tool(Path(cwd), _allowed(cwd, roots), args)), False
     except _Refused as refusal:
         return f"Error: {refusal}", True
-    return _cut(text), False
+
+
+async def run_async(name: str, cwd: Path, roots: list[Path], args: object) -> tuple[str, bool]:
+    """run(), for an event loop. A search's process stops when the call is cancelled, and the
+    other tools run in a thread."""
+    if name != "search_files":
+        return await asyncio.to_thread(run, name, cwd, roots, args)
+    if not isinstance(args, dict):
+        return "Error: pass the arguments as an object.", True
+    try:
+        return _cut(await _search_apart(Path(cwd), _allowed(cwd, roots), args)), False
+    except _Refused as refusal:
+        return f"Error: {refusal}", True
+
+
+def _allowed(cwd: Path, roots: list[Path]) -> list[Path]:
+    return _unique([Path(cwd).resolve(), *(Path(root).resolve() for root in roots)])
 
 
 def _target(cwd: Path, allowed: list[Path], given: object, default: str | None = None) -> Path:
@@ -126,21 +141,30 @@ def _shown(cwd: Path, path: Path) -> str:
         return str(path)
 
 
-def _search_apart(cwd: Path, allowed: list[Path], args: dict) -> str:
-    """search_files, in a Python process of its own that stops after SEARCH_SECONDS."""
-    request = json.dumps({"cwd": str(cwd), "roots": [str(root) for root in allowed], "args": args})
+async def _search_apart(cwd: Path, allowed: list[Path], args: dict) -> str:
+    """search_files, in a Python process of its own. It stops after SEARCH_SECONDS, or when the
+    call is cancelled."""
+    request = json.dumps({"cwd": str(cwd), "roots": [str(root) for root in allowed], "args": args}).encode()
     try:
-        done = subprocess.run([sys.executable, "-I", "-m", __name__], input=request, capture_output=True, text=True,
-                              timeout=SEARCH_SECONDS)
-    except subprocess.TimeoutExpired:
-        raise _Refused(f"the search took longer than {SEARCH_SECONDS} seconds, so it stopped: "
-                       "make the pattern simpler, or search a smaller folder") from None
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-I", "-m", __name__, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
     except OSError as error:
         raise _Refused(f"the search didn't start: {error}") from None
     try:
-        text, refused = json.loads(done.stdout)
+        out, err = await asyncio.wait_for(process.communicate(request), SEARCH_SECONDS)
+    except BaseException as error:  # too slow, or the call was cancelled: the search stops
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        if isinstance(error, TimeoutError):
+            raise _Refused(f"the search took longer than {SEARCH_SECONDS} seconds, so it stopped: "
+                           "make the pattern simpler, or search a smaller folder") from None
+        raise
+    try:
+        text, refused = json.loads(out)
     except ValueError:
-        raise _Refused(f"the search failed: {done.stderr.strip()[-500:] or 'no answer'}") from None
+        raise _Refused(f"the search failed: {err.decode(errors='replace').strip()[-500:] or 'no answer'}") from None
     if refused:
         raise _Refused(text)
     return text
@@ -226,33 +250,84 @@ def _list(cwd: Path, allowed: list[Path], args: dict) -> str:
     return "\n".join(entries) if entries else "(the folder is empty)"
 
 
+STAR, ANY = object(), object()  # a glob's `*` and `?`
+
+
 def _matches(path: str, pattern: str) -> bool:
-    """Does a relative path match a glob? A pattern without `/` is matched against the file's name."""
-    return _glob(pattern).match(path if "/" in pattern else path.rsplit("/", 1)[-1]) is not None
-
-
-def _glob(pattern: str) -> re.Pattern:
-    """A glob as a regular expression: `**/` is any folders or none, `**` anything, `*` and `?`
-    anything within one folder, and `[...]` one of its characters (`[!...]` none of them)."""
-    out, at = [], 0
-    while at < len(pattern):
-        if pattern.startswith("**/", at):
-            out.append("(?:.*/)?")
-            at += 3
-        elif pattern.startswith("**", at):
-            out.append(".*")
-            at += 2
-        elif pattern[at] in "*?":
-            out.append("[^/]*" if pattern[at] == "*" else "[^/]")
-            at += 1
-        elif pattern[at] == "[" and (end := pattern.find("]", at + 2)) != -1:
-            inside = pattern[at + 1:end].replace("\\", "\\\\")
-            out.append("[" + ("^" + inside[1:] if inside.startswith("!") else inside) + "]")
-            at = end + 1
+    """Does a relative path match a glob? A pattern without `/` is matched against the file's name.
+    A `**` step stands for any folders or none, and each other step matches one name (_name)."""
+    if "/" not in pattern:
+        return _name(path.rsplit("/", 1)[-1], _tokens(pattern))
+    names = path.split("/")
+    reach = {0}  # how many of the path's names the steps so far can stand for
+    for step in pattern.split("/"):
+        if step == "**":
+            reach = set(range(min(reach), len(names) + 1))
         else:
-            out.append(re.escape(pattern[at]))
-            at += 1
-    return re.compile("".join(out) + r"\Z")
+            tokens = _tokens(step)
+            reach = {at + 1 for at in reach if at < len(names) and _name(names[at], tokens)}
+        if not reach:
+            return False
+    return len(names) in reach
+
+
+def _tokens(step: str) -> list:
+    """One step of a glob: STAR, ANY, (negated, character ranges) for `[...]`, or a character."""
+    out, at = [], 0
+    while at < len(step):
+        char = step[at]
+        if char == "*":
+            while at < len(step) and step[at] == "*":
+                at += 1
+            out.append(STAR)
+            continue
+        if char == "[" and (end := step.find("]", at + 2)) != -1:
+            inside = step[at + 1:end]
+            negated = inside.startswith("!")
+            inside = inside[1:] if negated else inside
+            ranges, i = [], 0
+            while i < len(inside):
+                if i + 2 < len(inside) and inside[i + 1] == "-":
+                    ranges.append((inside[i], inside[i + 2]))
+                    i += 3
+                else:
+                    ranges.append((inside[i], inside[i]))
+                    i += 1
+            out.append((negated, tuple(ranges)))
+            at = end + 1
+            continue
+        out.append(ANY if char == "?" else char)
+        at += 1
+    return out
+
+
+def _name(name: str, tokens: list) -> bool:
+    """Does one name match one step's tokens? Only the last STAR is ever tried again, so this takes
+    time that grows with the name times the step at most."""
+    at = token = 0
+    star, mark = -1, 0
+    while at < len(name):
+        if token < len(tokens) and tokens[token] is not STAR and _one(tokens[token], name[at]):
+            token, at = token + 1, at + 1
+        elif token < len(tokens) and tokens[token] is STAR:
+            star, mark, token = token, at, token + 1
+        elif star != -1:
+            mark += 1
+            token, at = star + 1, mark
+        else:
+            return False
+    while token < len(tokens) and tokens[token] is STAR:
+        token += 1
+    return token == len(tokens)
+
+
+def _one(token, char: str) -> bool:
+    if token is ANY:
+        return True
+    if isinstance(token, tuple):
+        negated, ranges = token
+        return any(low <= char <= high for low, high in ranges) != negated
+    return token == char
 
 
 def _files(folder: Path, allowed: list[Path]) -> Iterator[Path]:
