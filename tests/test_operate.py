@@ -175,7 +175,7 @@ def test_a_run_whose_process_died_is_reported_stopped_and_can_be_retried(repo, c
     assert state["status"] == "stopped"
     assert state["retry"] == f"wf retry {run_id}"
     assert cli.main(["status", run_id]) == 0
-    line = capsys.readouterr().out.strip()
+    line = capsys.readouterr().out.splitlines()[0]
     assert line.startswith(f"{run_id} [slow]: stopped: no wf process") and line.endswith(f"(wf retry {run_id})")
     assert cli.main(["retry", run_id]) == 0
     assert json.loads((folder / "output.json").read_text()) == {"said": "done\n"}
@@ -197,7 +197,7 @@ def test_a_failed_run_reports_why_and_retries_in_the_background(repo, capsys):
     assert "exited with code 1" in state["error"]
     for command in (["status", run_id], ["list"]):
         assert cli.main(command) == 0
-        line = capsys.readouterr().out.strip()
+        line = capsys.readouterr().out.splitlines()[0]
         assert line.startswith(f"{run_id} [flaky]: failed: check: exited with code 1")
         assert line.endswith(f"(wf retry {run_id})")
     Path("ready").touch()

@@ -118,6 +118,9 @@ class Codex:
             if installed and installed != TESTED:
                 self.warning = f"codex {installed} is installed; wf is tested with {TESTED}, and the app server is experimental"
 
+    def check_model(self, model: str | None) -> None:
+        pass  # model/list gives defaults, and wf doesn't take it as the list of every model the account can use
+
     async def session(self, spec: SessionSpec) -> "CodexSession":
         if self.rpc is None or self.rpc.dead:
             raise Unavailable(self.rpc.dead if self.rpc else "the Codex app server isn't running")

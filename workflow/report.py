@@ -21,26 +21,26 @@ wf-workflows skill (skills/wf-workflows/improving.md).
 """
 
 import hashlib
-import json
 import re
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
 from . import spec
-from .runs import Run
+from .runs import Run, read_events
 
 
 def build(runs: list[Run]) -> dict:
     summaries, nodes, routes, failures_at = [], defaultdict(_empty), {}, Counter()
     for run in runs:
-        events = _events(run)
+        logged = events(run)
         status = run.status()
         summary = {
             "run": run.id, "workflow": run.info().get("workflow"), "status": status.get("status"),
             "dry_run": bool(run.info().get("dry_run")), "version": version(run),
-            "started": events[0]["time"] if events else None, "ended": events[-1]["time"] if events else None,
-            "duration_s": _seconds(events[0]["time"], events[-1]["time"]) if events else 0,
+            "started": logged[0]["time"] if logged else None, "ended": logged[-1]["time"] if logged else None,
+            "duration_s": _seconds(logged[0]["time"], logged[-1]["time"]) if logged else 0,
             "tokens": 0, "cost_usd": 0.0,
         }
         if status.get("status") == "failed":
@@ -49,9 +49,9 @@ def build(runs: list[Run]) -> dict:
         seen, started, counted = set(), {}, {}  # counted: what each (node, pass) has reported spending
         failed_pass: dict = {}  # node -> its pass that failed: `wf retry` reruns it, timed from its next event
         taken_here: Counter = Counter()  # by the route's key and the exact place (build[2]/review)
-        for event in events:
+        for event in logged:
             kind, name = event.get("event"), _name(event.get("node") or "")
-            if not name:  # run-level events (limit, warnings) belong to no node
+            if not name or kind == "override":  # run-level events (limit, warnings), and what an operator gave `wf retry`
                 continue
             node = nodes[name]
             raw = event.get("node")
@@ -246,17 +246,31 @@ def text(found: dict) -> str:
     return "\n".join(lines)
 
 
-def _events(run: Run) -> list[dict]:
+_READ: dict[Path, tuple[int, int, list[dict]]] = {}  # events.jsonl -> (its inode, the bytes read, their events)
+_READ_MOST = 64
+_READING = threading.Lock()  # wf ui asks from several threads
+
+
+def events(run: Run) -> list[dict]:
+    """The run's events.jsonl, one dict per line (a damaged line is left out). The file only grows,
+    so a later call reads only the lines added since the last one: wf ui asks every few seconds."""
     path = run.dir / "events.jsonl"
-    if not path.exists():
+    try:
+        stat = path.stat()
+    except OSError:  # no events yet, or the run is being discarded
         return []
-    found = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            found.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return found
+    with _READING:
+        inode, offset, found = _READ.get(path, (None, 0, []))
+    if inode != stat.st_ino or stat.st_size < offset:
+        offset, found = 0, []
+    new, offset = read_events(path, offset)
+    found = found + new
+    with _READING:
+        _READ.pop(path, None)
+        _READ[path] = (stat.st_ino, offset, found)
+        while len(_READ) > _READ_MOST:
+            del _READ[next(iter(_READ))]
+    return list(found)
 
 
 def _name(node: str) -> str:

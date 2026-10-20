@@ -5,7 +5,8 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
     .wf/runs/<run-id>/              <run-id> is like 20261018-1432-implement-k3f9
       workflow/                     copies of the workflow files as they were run
       input.json
-      run.json                      the workflow's name and `repo` workspace, for starting it later
+      run.json                      the workflow's name and `repo` workspace, for starting it later,
+                                    and the --limit and --model values that `wf retry` keeps (keep())
       branches.json                 the branches `branch` named, by node path, and where the run left them
       output.json                   the end output, once the run succeeds
       status.json                   running | waiting | succeeded | failed | limit, with a sequence
@@ -121,10 +122,17 @@ class Run:
         """The limits given with --limit for this run (limits.py), by name; None removes one."""
         return self.info().get("limits") or {}
 
-    def set_limits(self, overrides: dict) -> None:
-        """Keep new --limit values for the rest of the run (call it holding the run's lock)."""
+    def overrides(self) -> dict[str, dict]:
+        """The models given with --model, --harness and --effort (overrides.py), by node or item."""
+        return self.info().get("overrides") or {}
+
+    def keep(self, limits: dict, overrides: dict[str, dict]) -> None:
+        """Keep new --limit values and overrides for the rest of the run, in one write of run.json. Each
+        replaces an earlier one with its name or target (call it holding the run's lock)."""
         info = self.info()
-        info["limits"] = {**(info.get("limits") or {}), **overrides}
+        for name, new in (("limits", limits), ("overrides", overrides)):
+            if new:
+                info[name] = {**(info.get(name) or {}), **new}
         write_json(self.dir / "run.json", info)
 
     def branches(self) -> dict[str, str]:
@@ -246,6 +254,25 @@ class Run:
         with (self.dir / "events.jsonl").open("a", encoding="utf-8") as file:
             file.write(json.dumps({"time": now(), **event}, ensure_ascii=False, default=str) + "\n")
 
+    def add_events(self, events: list[dict]) -> int:
+        """Append events to events.jsonl, all of them or none: a write that fails is cut off again.
+        Returns the file's size before, for take_back_events (call it holding the run's lock)."""
+        path, at = self.dir / "events.jsonl", now()
+        lines = "".join(json.dumps({"time": at, **event}, ensure_ascii=False, default=str) + "\n" for event in events)
+        size = path.stat().st_size if path.exists() else 0
+        try:
+            with path.open("a", encoding="utf-8") as file:
+                file.write(lines)
+        except BaseException:
+            self.take_back_events(size)
+            raise
+        return size
+
+    def take_back_events(self, size: int) -> None:
+        """Cut events.jsonl back to `size` bytes, the size that add_events returned."""
+        with (self.dir / "events.jsonl").open("r+b") as file:
+            file.truncate(size)
+
     def set_output(self, output: dict) -> None:
         write_json(self.dir / "output.json", output)
 
@@ -255,6 +282,27 @@ class Run:
             return json.loads((self.dir / "output.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+
+
+def read_events(path: Path, offset: int = 0) -> tuple[list[dict], int]:
+    """The events after byte `offset` of an events.jsonl, and the offset after its last whole line.
+    A line still being written stays for the next read, and a damaged line is left out."""
+    try:
+        with path.open("rb") as file:
+            file.seek(offset)
+            data = file.read()
+    except OSError:  # not there yet, or the run is being discarded
+        return [], offset
+    whole = data[: data.rfind(b"\n") + 1]
+    found = []
+    for line in whole.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            found.append(event)
+    return found, offset + len(whole)
 
 
 LOCK_FD = "WF_LOCK_FD"

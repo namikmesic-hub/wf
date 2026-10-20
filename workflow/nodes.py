@@ -38,6 +38,11 @@ submit_result call. It starts fresh instead, with an event saying why, when
 the harness or model differs from the last pass, the fork fails, or the two
 passes before it both continued.
 
+Each agent attempt records the harness, model and effort that it runs with in
+an `agent_model` event. An override from `wf retry --model` (overrides.py)
+runs the job on the override's harness only, with the model and effort that it
+gives. Then the event also names the override.
+
 With a cap on live agent sessions (capacity.py), each agent attempt first takes
 one of the agent slots, and holds it until the attempt ends. An
 attempt that waits for one isn't failing: the wait uses no retry, the node's
@@ -90,13 +95,14 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
-from . import capacity, dryrun, output_tool, schemas, templates, workspaces
+from . import capacity, dryrun, output_tool, overrides, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
 from .harnesses import SessionSpec, Unavailable, Usage, reaches_keychain
@@ -400,9 +406,13 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     fresh = render(False)
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
-    harness = wf.setting(node_id, "harness")
-    names = list(harness) if isinstance(harness, list) else [ctx.trace.render(job, "harness", harness, variables).strip()]
-    chosen = {name: tuple(_rendered_setting(job, ctx, name, key, variables) for key in ("model", "effort")) for name in names}
+    target, override = ctx.override(node_id, job["index"]) or (None, {})
+    render_setting = partial(ctx.trace.render, job)  # the trace records how the harness, model and effort render
+    names = overrides.job_harnesses(wf, node_id, override, variables, render_setting)
+    try:  # the same choice that `wf retry` checks an override with
+        chosen = {name: overrides.job_setting(wf, node_id, name, override, variables, render_setting) for name in names}
+    except overrides.SettingError as error:
+        raise _Failed(str(error), job["attempt"]) from None
     schema = schemas.node_output_schema(wf, node_id)
     listed = None if ctx.root.script else wf.setting(node_id, "tools")  # None: the node doesn't list tools
     uses = listed or ()
@@ -436,6 +446,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         """One session: the instruction, then reminders, until submit_result has a result.
         `source` is the session to continue, and `session_facts` the trace's record of it."""
         model, effort = chosen[name]
+        emit({"event": "agent_model", **_label(job), "attempt": number, "harness": name, "model": model, "effort": effort,
+              **({"override": target} if target else {})})
         if why_not:
             emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": why_not})
         spec = SessionSpec(
@@ -476,6 +488,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         if source:
             emit({"event": "session_continued", **_label(job), "attempt": number})
             (folder / "instruction.md").write_text(instruction, encoding="utf-8")
+        spec.emit({"event": "session_started", "model": model, "effort": effort, "pid": os.getpid(),
+                   "log": _in_run(ctx, spec.log)})
         spent_before, spent = usage.cost_usd, Usage()
         try:
             for turn, text in enumerate([instruction] + [output_tool.REMINDER] * output_tool.REMINDERS, 1):
@@ -508,7 +522,10 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             ctx.add_usage(cut_off)
             session_facts["id"] = session.id
             record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
-            await session.close()
+            try:
+                await session.close()
+            finally:
+                spec.emit({"event": "session_ended"})
 
     result, number = await _attempts(job, ctx, emit, attempt, names,
                                      slot=lambda number, name: _agent_slot(job, ctx, emit, number, name))
@@ -523,20 +540,12 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 DONT_COMMIT = "Don't commit: the runner commits your changes when you're done."
 
 
-def _rendered_setting(job: Job, ctx: RunContext, harness: str, name: str, variables: dict) -> str | None:
-    """`model` or `effort` for one harness, rendered: a template like "{{ item.model }}" gives each item its own."""
-    where, source = ctx.workflow.harness_setting_at(job["node"], harness, name)
-    if source is None:
-        return None
+def _in_run(ctx: RunContext, path: Path) -> str:
+    """A path in the run folder, as the run folder's events name it: nodes/<node>/<pass>/attempt-<n>.log."""
     try:
-        value = ctx.trace.render(job, name, source, variables, templates.render_value, harness=harness, set_in=where)
-    except templates.TemplateError as error:
-        raise templates.TemplateError(f"{name}: {error}") from error
-    if not isinstance(value, str) or not value.strip():
-        shown = "none" if value is None else json.dumps(value, ensure_ascii=False, default=str)
-        raise _Failed(f"`{name}` of node `{job['node']}` renders to {shown} for {harness}, "
-                      "but it must be a non-empty string", job["attempt"])
-    return value.strip()
+        return str(path.relative_to(ctx.root.run.dir))
+    except ValueError:
+        return str(path)
 
 
 @asynccontextmanager

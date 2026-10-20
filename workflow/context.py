@@ -19,7 +19,8 @@ are ignored; `limits` is the file's, with any `--limit` the run was given on
 top: limits.py), the agent cap and the attempts waiting for it, the open
 harnesses, the git lock, the checkpointer and the trace file. `trace` is the
 trace as this workflow writes it (trace.Scope): a sub-workflow's ids start with
-the attempt that runs it (`trace_parent`).
+the attempt that runs it (`trace_parent`). The models that `wf retry`
+gives (overrides.py) are for the run's own nodes, so a sub-workflow has none.
 """
 
 import asyncio
@@ -27,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import harnesses, spec
+from . import harnesses, overrides, spec
 from .harnesses import Harness, Usage
 from .harnesses.scripted import Scripted
 from .limits import check
@@ -53,6 +54,7 @@ class RunContext:
     max_agents: int | None = None  # the cap on live agent sessions across runs (capacity.py), if any
     trace_parent: str = "run"  # in the trace, the attempt that runs this sub-workflow
     secret_outputs: frozenset[str] = frozenset()  # its end outputs that feed a secret of the parent
+    overrides: dict = field(default_factory=dict)  # models from `wf retry --model`, by node or item (overrides.py)
     _clock_start: float = field(default_factory=time.monotonic)
     _elapsed_before: float = 0.0
     _slots: dict = field(default_factory=dict)
@@ -100,6 +102,10 @@ class RunContext:
                 root._trace_file = Trace(root.run.dir)
             self._trace = Scope(root._trace_file, self.workflow, self.load, self.trace_parent, self.where, self.secret_outputs)
         return self._trace
+
+    def override(self, node: str, index: int | None) -> tuple[str, dict] | None:
+        """The override for a job of this workflow, as (its target, its settings), or None."""
+        return None if self.nested else overrides.find(self.overrides, node, index)
 
     def load(self, path: Path) -> Workflow:
         """A sub-workflow file, parsed once per process."""

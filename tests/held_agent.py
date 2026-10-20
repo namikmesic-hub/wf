@@ -2,8 +2,9 @@
 
     python held_agent.py <marks folder> <release file> <wf arguments>...
 
-When its session is live, the agent writes <marks>/<pid>.started, waits until
-the release file exists, writes <marks>/<pid>.ended, then submits a summary.
+When its session is live, the agent reads notes.txt (an agent_tool event), writes
+<marks>/<pid>.started, waits until the release file exists, writes
+<marks>/<pid>.ended, then submits a summary.
 Each mark holds time.time(). test_capacity.py starts several of these to see
 which sessions were live together.
 """
@@ -24,6 +25,7 @@ from workflow.harnesses.base import TurnEnd, Usage
 def held(marks: Path, release: Path):
     async def turn(session):
         mark = marks / str(os.getpid())
+        session.spec.emit({"event": "agent_tool", "tool": "Read", "detail": "notes.txt"})
         Path(f"{mark}.started").write_text(str(time.time()))
         while not release.exists():
             await asyncio.sleep(0.05)

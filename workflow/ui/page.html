@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>wf</title>
+  <link rel="stylesheet" href="page.css">
+  <script src="page.js" defer></script>
+</head>
+<body class="viz-root">
+  <header class="top">
+    <h1>wf</h1>
+    <span id="folder" class="muted"></span>
+    <span id="problem" class="problem" role="status"></span>
+  </header>
+  <main class="layout">
+    <nav class="runs" aria-label="Runs">
+      <h2>Runs</h2>
+      <ul id="run-list"></ul>
+      <p id="no-runs" class="muted" hidden>No runs in this folder yet. Start one with wf run.</p>
+    </nav>
+    <section id="run" class="run" hidden>
+      <div class="run-head">
+        <h2 id="run-id"></h2>
+        <span id="run-workflow" class="muted"></span>
+        <span id="run-status" class="badge"></span>
+      </div>
+      <p id="run-detail" class="secondary"></p>
+
+      <section class="card progress" aria-label="Progress">
+        <div class="hero"><span id="percent"></span></div>
+        <div class="meter" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="meter">
+          <div class="meter-fill" id="meter-fill"></div>
+        </div>
+        <p id="progress-text"></p>
+        <p id="progress-basis" class="muted small"></p>
+      </section>
+
+      <section class="card" aria-label="Workflow">
+        <h3>Workflow</h3>
+        <div id="legend" class="legend"></div>
+        <div id="graph" class="graph"></div>
+      </section>
+
+      <section class="card" aria-label="Agent sessions that run now">
+        <h3>Agent sessions now</h3>
+        <table id="sessions" class="grid"></table>
+      </section>
+
+      <section class="card" aria-label="Steps">
+        <h3>Steps</h3>
+        <table id="metrics" class="grid"></table>
+        <ul id="notes" class="notes"></ul>
+      </section>
+
+      <div class="split">
+        <section class="card" aria-label="Events">
+          <h3>Events</h3>
+          <ol id="events" class="events"></ol>
+        </section>
+        <section class="card" aria-label="Attempts">
+          <h3>Transcripts and instructions</h3>
+          <table id="attempts" class="grid"></table>
+          <div id="viewer" class="viewer" hidden>
+            <h4 id="viewer-title"></h4>
+            <p id="viewer-cut" class="muted small"></p>
+            <div id="viewer-body"></div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

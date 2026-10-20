@@ -51,6 +51,13 @@ again. A turn cut off by a timeout never gets its ResultMessage: its tokens
 are summed from the assistant messages seen so far (pending_usage), and its
 dollar cost is lost.
 
+open() looks for the Claude Code program as the SDK does (its own copy, else
+one on PATH or in a known folder), so a machine without it makes the harness
+unavailable before a session starts. So does a program that you may not run.
+A program that runs, but breaks, shows only when a session starts. The lookup
+is the SDK's private _find_cli: with an SDK that lacks it, the first session
+finds out instead, and a test fails.
+
 A usage limit arrives as a RateLimitEvent with status "rejected"
 ("allowed_warning" only says it's getting close). That, a login error, or a
 Claude Code that won't start makes the turn `unavailable`, which sends the
@@ -65,6 +72,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ClaudeSDKError,
+    CLINotFoundError,
     RateLimitEvent,
     ResultMessage,
     SystemMessage,
@@ -94,7 +102,10 @@ class ClaudeCode:
     name = "claude-code"
 
     async def open(self, run_dir) -> None:
-        pass  # nothing shared: every session is its own process
+        find_program()  # nothing else is shared: every session is its own process
+
+    def check_model(self, model: str | None) -> None:
+        pass  # Claude Code lists no models: a session with a wrong one fails
 
     async def session(self, spec: SessionSpec) -> "ClaudeSession":
         session = ClaudeSession(spec)
@@ -103,6 +114,23 @@ class ClaudeCode:
 
     async def close(self) -> None:
         pass
+
+
+def find_program() -> None:
+    """Raise Unavailable if the SDK can't find the Claude Code program, or finds one that can't run."""
+    try:
+        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+        transport = SubprocessCLITransport(prompt="", options=ClaudeAgentOptions())
+        find = transport._find_cli
+    except (ImportError, AttributeError, TypeError):  # another SDK version: the first session finds out
+        return
+    try:
+        program = find()
+    except CLINotFoundError as error:
+        raise Unavailable(f"Claude Code isn't installed: {str(error).splitlines()[0]}") from error
+    if not os.access(program, os.X_OK):  # the SDK takes a file it finds in a known folder as it is
+        raise Unavailable(f"Claude Code can't run: {program} isn't a program that you may run")
 
 
 def options(spec: SessionSpec) -> ClaudeAgentOptions:

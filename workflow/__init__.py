@@ -9,6 +9,7 @@ Read the modules in this order. The first group knows nothing about LangGraph:
     schemas.py     field maps -> JSON Schema, and checking values against them
     templates.py   sandboxed Jinja, plus reading templates without running them
     scheduler.py   the graph, and the rules for which node runs next
+    shape.py       the graph without its loops: steps and loops, for progress.py and diagram.py
     validate.py    every check in the spec's Validation section
     diagram.py     `wf graph`: the workflow as a Mermaid flowchart
 
@@ -17,6 +18,7 @@ Then the runner, built on LangGraph:
                    the bookkeeping the schedule node does with it
     context.py     what nodes get that isn't saved (LangGraph's runtime context)
     limits.py      the run's limits: reaching one pauses it, `wf retry --limit` continues it
+    overrides.py   another model for a node or an item, for the rest of a run: `wf retry --model`
     settings.py    wf's own settings for the user, in ~/.wf/config.yaml
     capacity.py    the cap on live agent sessions across all runs that share a ~/.wf (WF_MAX_AGENTS)
     runs.py        the run folder on disk
@@ -42,5 +44,8 @@ Then the tools around runs, none of which LangGraph knows about:
                    played by harnesses/scripted.py
     report.py      `wf report`: what runs did, per node and route
     trace_view.py  `wf trace`: what one run read, decided and did, from its trace
+    progress.py    how far a run is on its way from start to end, as an estimate (`wf status`)
+    observe.py     the agent sessions that run now (`wf sessions`), and the event stream (`wf watch`)
+    ui.py          `wf ui`: a web page on this machine (ui/: the page) with the graph, progress and transcripts
     examples/      two complete workflows (`wf examples` copies them out)
 """

@@ -6,6 +6,8 @@
     wf graph <file>                  print the workflow as a Mermaid diagram
     wf run <file> [name=value ...]   validate, then run it (runner.py)
     wf retry <run-id>                continue a failed or paused run from its last checkpoint
+                                     (with --model NODE=MODEL, another model for a node or for one
+                                     item NODE[INDEX]: overrides.py)
 
 Tools that agent nodes can use (`tools: [slack, ...]`; workflow/tools/):
     wf tools list                    each tool, how it signs in, and whether it's set up
@@ -16,12 +18,17 @@ For an operator that isn't at a terminal (operate.py):
     wf run <file> --detach --json    start in the background
     wf wait <run-id>                 block until the run needs attention
     wf answer <run-id> <file>        answer what it's waiting on, and continue
-    wf status <run-id> / wf list     where runs stand (newest first)
+    wf status <run-id> / wf list     where runs stand (newest first), and in status, how far, as an estimate (progress.py)
     wf report <run-id>... | --workflow NAME   what runs did, per node (report.py)
     wf trace <run-id> [--node N] [--pass P] [--field F] [--var PATH]
                                      what one run read, decided and did, from its trace (trace_view.py)
     wf discard <run-id>...           delete runs: folders, worktrees, temp folders
     wf integrate firstmate <dir>     write the firstmate extension package (firstmate.py)
+
+To see runs as they happen (observe.py, ui.py):
+    wf sessions [run-id]             each agent session that runs now
+    wf watch <run-id>                the run's steps and tool calls, as they come
+    wf ui                            a web page on this machine: runs, graph, progress, metrics, transcripts
 
 Every command that makes or finds runs takes --runs-dir DIR (default: WF_RUNS_DIR) to keep run
 folders outside the repo, in a folder per repo under DIR, instead of in ./.wf/runs (runs.py).
@@ -40,12 +47,13 @@ import argparse
 import asyncio
 import getpass
 import json
+import os
 import re
 import sys
 import webbrowser
 from pathlib import Path
 
-from . import diagram, firstmate, operate, report, runner, runs, spec, trace_view, validate, workspaces
+from . import diagram, firstmate, observe, operate, progress, report, runner, runs, spec, trace_view, ui, validate, workspaces
 from .tools import keychain, signin
 from .tools.catalog import TOOLS
 
@@ -118,9 +126,17 @@ def main(argv: list[str] | None = None) -> int:
     retry.add_argument("--detach", action="store_true", help="continue in the background")
     retry.add_argument("--json", action="store_true", help="with --detach: print the run id as JSON")
     retry.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
+    retry.add_argument("--model", action="append", dest="models", metavar="NODE=MODEL",
+                       help="another model for an agent node, or for one item with NODE[INDEX]=MODEL, for the rest "
+                            "of the run (repeat for several)")
+    retry.add_argument("--harness", action="append", dest="harnesses", metavar="NODE=HARNESS",
+                       help="the harness for that node or item: needed when the node names a list or a template")
+    retry.add_argument("--effort", action="append", dest="efforts", metavar="NODE=EFFORT",
+                       help="the effort for that node or item (not for cursor, whose model id carries it)")
     retry.add_argument("--runs-dir", **runs_dir)
-    retry.set_defaults(handler=lambda a: runner.retry(a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits,
-                                                      a.runs_dir))
+    retry.set_defaults(handler=lambda a: runner.retry(
+        a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits, a.runs_dir,
+        {"model": a.models or [], "harness": a.harnesses or [], "effort": a.efforts or []}))
 
     answer = commands.add_parser("answer", help="answer the questions a run waits on, and continue it")
     answer.add_argument("run_id", metavar="run-id")
@@ -142,6 +158,25 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--json", action="store_true")
     status.add_argument("--runs-dir", **runs_dir)
     status.set_defaults(handler=_status)
+
+    sessions = commands.add_parser("sessions", help="each agent session that runs now, in this folder's runs or in one run")
+    sessions.add_argument("run_id", nargs="?", metavar="run-id")
+    sessions.add_argument("--json", action="store_true")
+    sessions.add_argument("--runs-dir", **runs_dir)
+    sessions.set_defaults(handler=_sessions)
+
+    watching = commands.add_parser("watch", help="print a run's steps and tool calls as they come, until it succeeds")
+    watching.add_argument("run_id", metavar="run-id")
+    watching.add_argument("--from-start", action="store_true", help=f"print every event so far first, not the last {observe.WATCH_BACK}")
+    watching.add_argument("--runs-dir", **runs_dir)
+    watching.set_defaults(handler=_watch)
+
+    page = commands.add_parser("ui", help="a web page on this machine that shows runs: graph, progress, metrics, transcripts")
+    page.add_argument("--port", type=_port, default=ui.PORT, help=f"the port on 127.0.0.1 (default {ui.PORT}, or 0 for any free one)")
+    page.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
+    page.add_argument("--open", action="store_true", help="open the page in the browser")
+    page.add_argument("--runs-dir", **runs_dir)
+    page.set_defaults(handler=_ui)
 
     examples = commands.add_parser("examples", help="copy wf's complete example workflows into a folder")
     examples.add_argument("dir", nargs="?", type=Path, default=Path("wf-examples"))
@@ -218,6 +253,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:  # anywhere the runner doesn't handle it itself
         print("\nStopped.", file=sys.stderr)
         return runner.STOPPED
+
+
+def _port(text: str) -> int:
+    """A port number for wf ui: 0 (any free port) to 65535."""
+    if not text.isdigit() or int(text) > 65535:
+        raise argparse.ArgumentTypeError(f"`{text}` isn't a port: use a number from 0 to 65535")
+    return int(text)
 
 
 def _folder(text: str) -> Path | None:
@@ -311,8 +353,50 @@ def _status(args) -> int:
     if run is None:
         return 1
     current = operate.state(run)
-    print(json.dumps(current, indent=2, ensure_ascii=False, default=str) if args.json else _describe(current))
+    current["progress"] = progress.of(run, current.get("status"))
+    if args.json:
+        print(json.dumps(current, indent=2, ensure_ascii=False, default=str))
+    else:
+        how_far = current["progress"] and current.get("status") != "succeeded"
+        print(_describe(current) + (f"\n  {progress.describe(current['progress'])}" if how_far else ""))
     return 0
+
+
+def _sessions(args) -> int:
+    if args.run_id:
+        run = _find(args.run_id, args.runs_dir)
+        if run is None:
+            return 1
+        chosen = [run]
+    else:
+        chosen = runs.all_runs(Path.cwd(), args.runs_dir)
+    found = [session for run in chosen for session in observe.sessions(run)]
+    print(json.dumps(found, indent=2, ensure_ascii=False, default=str) if args.json else observe.table(found))
+    return 0
+
+
+def _watch(args) -> int:
+    run = _find(args.run_id, args.runs_dir)
+    if run is None:
+        return 1
+    try:
+        current = observe.watch(run, back=None if args.from_start else observe.WATCH_BACK, tell=_describe)
+    except KeyboardInterrupt:  # the usual way to stop watching
+        return 0
+    print(_describe(current))
+    return 0
+
+
+def _ui(args) -> int:
+    if args.all_repos and not (args.runs_dir or os.environ.get(runs.RUNS_DIR, "").strip()):
+        print("wf ui: --all-repos needs a runs folder: --runs-dir DIR, or WF_RUNS_DIR", file=sys.stderr)
+        return 1
+    try:
+        return ui.serve(ui.Source(Path.cwd(), args.runs_dir, args.all_repos), args.port,
+                        opened=webbrowser.open if args.open else None)
+    except OSError as error:
+        print(f"wf ui: can't listen on {ui.HOST}:{args.port}: {error.strerror or error}", file=sys.stderr)
+        return 1
 
 
 def _list(args) -> int:

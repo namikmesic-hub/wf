@@ -151,9 +151,9 @@ class Progress:
             active["workspaces"][key] = finished["workspace"]
             if finished.get("session"):
                 active.setdefault("sessions", {})[key] = finished["session"]
-        else:
+        else:  # its workspace too: an override's check renders the job's settings with it (overrides.py)
             active["failed"][key] = {"error": finished["error"], "attempts": finished["attempts"],
-                                     "stopped": finished.get("stopped")}
+                                     "stopped": finished.get("stopped"), "workspace": finished["workspace"]}
         usage = finished.get("usage") or {}
         self.s["usage"]["cost_usd"] += usage.get("cost_usd", 0.0)
         self.s["usage"]["tokens"] += usage.get("tokens", 0)

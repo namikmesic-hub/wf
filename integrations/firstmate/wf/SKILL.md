@@ -46,6 +46,13 @@ must not write into. The commands wf prints for the run include `--runs-dir`.
    Keep the owner token `register-extension` prints.
 
 `wf status <run-id> --json` and `wf list --json` show where runs stand at any time.
+In `wf status`, `progress` says which step the run is at, how many times each loop went back, and a percentage.
+The percentage is an estimate: report it as "about".
+`wf sessions <run-id> --json` lists the agent sessions that run now, with each one's last tool call and how long it has been quiet.
+A session that has been quiet for a long time is worth a look at its transcript before you call the run stuck.
+To give the captain a live view, offer `wf watch <run-id>` for a terminal pane, or `wf ui` for a web page on their machine.
+`wf watch` follows the run through questions and retries until it succeeds.
+`wf ui` prints the page's address with a key in it: give the captain that whole address.
 A `running` run whose `agents_waiting` is not empty waits for a free agent slot.
 The cap on agent sessions across all runs that use the same `~/.wf` comes from
 `max_agents` in `~/.wf/config.yaml` or from `WF_MAX_AGENTS`.
@@ -77,7 +84,13 @@ acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`.
   Load `diagnostic-reasoning`.
   An environment problem (missing tool, dependency, credentials) is yours to
   fix, then `wf retry <run-id> --detach`; finished steps and items are not
-  redone. A workflow-file bug, or a task that keeps failing, goes to the captain.
+  redone. A model that keeps failing, for example at a usage limit or in an
+  outage, is yours to change for the rest of the run. Run
+  `wf retry <run-id> --model <node>=<model> --detach`, with
+  `--model '<node>[<item>]=<model>'` for one item. Add `--harness` when the model
+  needs another harness, or when wf asks for it. wf checks it first and changes
+  nothing when it is wrong. A workflow-file bug, or a task that keeps failing,
+  goes to the captain.
 
 `stopped`
 : No wf process is driving the run any more (a crash, a reboot). Run
