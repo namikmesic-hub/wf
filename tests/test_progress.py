@@ -1,5 +1,6 @@
 """Progress: the steps from start to end, the loops (shape.py), and the estimate that `wf status` shows (progress.py)."""
 
+import errno
 import json
 import subprocess
 import threading
@@ -309,6 +310,32 @@ def test_a_needs_edge_loop_counts_no_lap_before_its_first_step_ran(repo):
     assert found == sorted(found)
 
 
+def test_a_needs_edge_loop_counts_no_lap_when_a_route_made_its_first_step_pending_already(repo):
+    Path("both.yaml").write_text(dedent("""
+        version: 1
+        name: both
+        start: {input: {}}
+        nodes:
+          a:
+            needs: [start, b]
+            command: "true"
+            routes: [{to: b, max: 1}, {to: c}]
+          b: {needs: [start], command: "true"}
+          c:
+            command: "true"
+            routes: [{to: [a, b], max: 1}, {to: end}]
+        end: {output: {}}
+    """).lstrip())
+    assert cli.main(["run", "both.yaml"]) == 0
+    workflow, events = spec.load(Path("both.yaml")), report.events(Run.at(newest()))
+    needs_loop = next(n for n, loop in enumerate(Shape(workflow).loops) if loop.route is None)
+    ends = [n for n, e in enumerate(events) if e.get("event") == "node_finished"]
+    assert [events[n]["node"] for n in ends] == ["b", "a", "b", "a", "c", "b", "a", "c"]
+    laps = [progress.estimate(workflow, events[:n + 1], "running")["loops"][needs_loop]["taken"]
+            for n in ends if events[n]["node"] == "b"]
+    assert laps == [0, 1, 1]  # c's route made a pending, so b's last end doesn't send the run back to it
+
+
 @pytest.mark.parametrize("first, second", [("a", "b"), ("b", "a")])
 def test_open_steps_with_as_much_left_are_told_apart_by_the_least_done_not_by_chance(tmp_path, first, second):
     steps = {"a": '{needs: [start], for_each: "[1, 2, 3, 4]", command: "true"}',
@@ -434,6 +461,109 @@ def test_a_sub_workflow_in_progress_counts_its_own_steps_and_items(tmp_path):
     found = progress.estimate(spec.load(outer), events, "running", folder=run_dir)
     assert found["nodes"]["sub"]["inner"] == {"step": 2, "steps": 2, "at": ["each"], "percent": 75}
     assert progress.describe(found) == "step 1 of 2 (sub: step 2 of 2), about 38%"
+
+
+def nested(folder: Path) -> spec.Workflow:
+    """rules runs inner.yaml, and build runs it for each of two items."""
+    (folder / "inner.yaml").write_text(dedent("""
+        version: 1
+        name: inner
+        start: {input: {}}
+        nodes:
+          print: {needs: [start], command: "true"}
+          check: {needs: [print], command: "true"}
+        end: {output: {}}
+    """).lstrip())
+    (folder / "outer.yaml").write_text(dedent("""
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          rules: {needs: [start], workflow: inner.yaml}
+          build: {needs: [rules], for_each: "[1, 2]", workflow: inner.yaml, on_item_error: continue}
+          review:
+            needs: [build]
+            command: "true"
+            routes: [{when: "review.exit_code != 0", to: rules, max: 2}, {to: end}]
+        end: {output: {}}
+    """).lstrip())
+    return spec.load(folder / "outer.yaml")
+
+
+def states_of(workflow: spec.Workflow, events: list[dict], status: str = "running") -> dict:
+    tracker = progress.Tracker(workflow)
+    for one in events:
+        tracker.add(one)
+    return tracker.states(status)
+
+
+def test_each_step_of_a_sub_workflow_has_a_state_from_its_own_events(tmp_path):
+    workflow = nested(tmp_path)
+
+    def states(events: list[dict], status: str = "running") -> dict:
+        return states_of(workflow, events, status)
+
+    rules = [started("rules"), *lap("rules/print"), started("rules/check")]
+    assert states(rules) == {"rules": "running", "build": "waiting", "review": "waiting",
+                             "rules/print": "done", "rules/check": "running"}
+    assert states(rules, "waiting")["rules/check"] == "paused"
+
+    items = rules + lap("rules/check") + [event("node_finished", "rules", **{"pass": 1}), started("build", items=2)]
+    items += lap("build[0]/print", "build[0]/check") + [started("build[1]/print")]
+    found = states(items)
+    assert (found["rules/check"], found["build"], found["build[]/print"], found["build[]/check"]) == (
+        "done", "running", "running", "waiting")  # item 1 still prints, and checks after
+
+    cut = items + [event("attempt_failed", "build", index=1, attempt=1, error="timed out after 10m", **{"pass": 1})]
+    assert states(cut)["build[]/print"] == "failed"  # its item's attempt ended under it
+    again = cut + [event("attempt_started", "build", index=1, attempt=2, **{"pass": 1})]
+    assert states(again)["build[]/print"] == "waiting"  # the next attempt starts its sub-workflow over
+
+    back = items + [event("node_finished", "build[1]/print", **{"pass": 1})] + lap("build[1]/check")
+    back += [event("node_finished", "build", **{"pass": 1})] + lap("review") + [route("review", 0, "rules")]
+    found = states(back)
+    assert (found["rules"], found["rules/print"], found["build[]/check"]) == ("waiting", "waiting", "waiting")
+    done = back[:-1] + [route("review", 1, "end")]
+    assert set(states(done, "succeeded").values()) == {"done"}
+
+    failed = items + [event("node_failed", "build[1]/print", error="exited with code 1", **{"pass": 1}),
+                      event("attempt_failed", "build", index=1, attempt=1, error="sub-workflow inner failed", **{"pass": 1}),
+                      event("item_failed", "build", index=1, error="sub-workflow inner failed"),
+                      event("node_finished", "build", **{"pass": 1})] + lap("review") + [route("review", 1, "end")]
+    found = states(failed, "succeeded")
+    assert (found["build"], found["build[]/print"], found["build[]/check"]) == ("done", "failed", "done")  # item 1 skipped check
+
+
+def test_a_sub_workflow_attempt_that_goes_on_keeps_what_its_steps_did(tmp_path):
+    workflow = nested(tmp_path)
+    second = [started("rules"), event("attempt_failed", "rules", attempt=1, error="timed out after 10m", **{"pass": 1}),
+              event("attempt_started", "rules", attempt=2, **{"pass": 1}), *lap("rules/print"), started("rules/check")]
+    # A limit, a question or a crash paused attempt 2, and the run goes on with it: its sub-workflow too
+    goes_on = second + [event("attempt_started", "rules", attempt=2, **{"pass": 1})]
+    found = states_of(workflow, goes_on)
+    assert (found["rules/print"], found["rules/check"]) == ("done", "running")
+    third = goes_on + [event("attempt_failed", "rules", attempt=2, error="timed out after 10m", **{"pass": 1}),
+                       event("attempt_started", "rules", attempt=3, **{"pass": 1})]
+    assert states_of(workflow, third)["rules/print"] == "waiting"  # a new attempt starts it over
+
+
+def test_a_sub_workflow_that_can_t_be_read_for_now_gets_its_events_once_it_can(tmp_path, monkeypatch):
+    workflow = nested(tmp_path)
+    inner, real, reads = tmp_path / "inner.yaml", Path.read_text, []
+
+    def read_text(path, *args, **kwargs):
+        if path == inner:
+            reads.append(path)
+            if len(reads) == 1:
+                raise OSError(errno.EIO, "Input/output error", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    tracker = progress.Tracker(workflow)
+    for one in [started("rules"), *lap("rules/print")]:
+        tracker.add(one)
+    assert tracker.states("running")["rules/print"] == "done"  # read again, and its events played
+    assert tracker.states("running")["rules/check"] == "waiting" and len(reads) == 2  # then read no more
 
 
 def test_durations_read_as_people_say_them():

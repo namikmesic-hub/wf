@@ -129,9 +129,9 @@ async function refreshRun() {
   text("run-detail", detail(state));
   document.getElementById("run-detail").hidden = !detail(state);
   showProgress(found.progress, state.status);
-  showGraph(found.graph, found.progress);
+  showGraph(found.graph, found.progress, found.states);
   showSessions(found.sessions);
-  showMetrics(found.metrics, found.progress);
+  showMetrics(found.metrics, found.states);
   showAttempts(found.attempts);
   if (shownFile) await showFile(shownFile, false);
 }
@@ -183,7 +183,7 @@ function where(name, node) {
 
 // ---------- the graph ----------
 
-function showGraph(graph, progress) {
+function showGraph(graph, progress, states) {
   const legend = document.getElementById("legend");
   legend.replaceChildren(...STATES.map(([state, symbol, word]) => el("span", {}, dot(`node-${state}`), el("span", { text: `${symbol} ${word}` }))));
   const box = document.getElementById("graph");
@@ -206,7 +206,7 @@ function showGraph(graph, progress) {
   const loops = {};
   for (const loop of progress ? progress.loops : []) loops[`${loop.from}>${loop.to}`] = loop;
   for (const edge of graph.edges) drawing.append(drawEdge(edge, at, loops));
-  for (const node of graph.nodes) drawing.append(drawNode(node, at[node.id], nodes[node.id]));
+  for (const node of graph.nodes) drawing.append(drawNode(node, at[node.id], nodes[node.id], states[node.id]));
   box.replaceChildren(drawing);
 }
 
@@ -239,13 +239,12 @@ function drawEdge(edge, at, loops) {
   return group;
 }
 
-function drawNode(node, place, info) {
+function drawNode(node, place, info, state = "waiting") {
   const left = place.x - place.w / 2, top = place.y - place.h / 2;
   if (node.kind === "start" || node.kind === "end") {
     return svg("g", {}, svg("rect", { x: left, y: top, width: place.w, height: place.h, rx: place.h / 2, class: "terminal" }),
       svg("text", { x: place.x, y: place.y + 4, "text-anchor": "middle" }, node.id));
   }
-  const state = info ? info.state : "waiting";
   const facts = [`${SYMBOL[state]} ${state}`];
   if (info && info.passes > 1) facts.push(`pass ${info.passes}`);
   if (info && info.items_done !== undefined) facts.push(`${info.items_done}/${info.items} items`);
@@ -287,10 +286,10 @@ function showSessions(sessions) {
     ])), "No agent session runs now.");
 }
 
-function showMetrics(metrics, progress) {
-  const nodes = progress ? progress.nodes : {};
+// A step that runs counts what its pass has done so far: the server adds it to the numbers of the passes that ended
+function showMetrics(metrics, states) {
   const rows = Object.entries(metrics.nodes).map(([name, n]) => row([
-    name, nodes[name] ? `${SYMBOL[nodes[name].state]} ${nodes[name].state}` : "",
+    name, states[name] ? `${SYMBOL[states[name]]} ${states[name]}` : "",
     [n.passes, true], [n.attempts, true], [n.failed_attempts, true], [n.items || "", true],
     [n.tokens.toLocaleString(), true], [n.cost_usd.toFixed(2), true], [duration(n.duration_s), true],
   ]));

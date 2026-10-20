@@ -7,15 +7,18 @@ build step) and the JSON that the page reads, on 127.0.0.1 only. The page lists
 the runs of this repo, or with --all-repos the runs of each repo in the runs folder,
 newest first. For one run it draws the workflow graph (diagram.layout), with
 each node in the color of its state and each loop's count. It also shows the
-progress estimate (progress.py), and each node's numbers as `wf report` counts
-them. Then it shows the agent sessions that run now (observe.py), the event
-stream, and the transcript and instruction of each attempt. It asks for new
-data on its own: the run every 2 seconds, its events every second, and the
-list of runs every 5 seconds.
+progress estimate (progress.py). It shows the numbers of each step as `wf
+report` counts them, also of the steps in sub-workflows, each with its state. A
+step that runs adds what its pass has done so far. Then it shows the agent
+sessions that run now (observe.py), the event stream, and the transcript and
+instruction of each attempt. It asks for new data on its own: the run every 2
+seconds, its events every second, and the list of runs every 5 seconds. For
+each run, the server reads only the events that came since it last read them.
+It looks only at the files of attempts that can still change (_View).
 
     GET /                          the page
     GET /api/runs                  the runs, newest first, with their state and progress
-    GET /api/run?id=ID             one run: state, progress, graph, metrics, sessions, attempts
+    GET /api/run?id=ID             one run: state, progress, graph, states, metrics, sessions, attempts
     GET /api/events?id=ID&after=N  the events after byte N of events.jsonl (the last EVENTS_BACK without N)
     GET /api/file?id=ID&path=P     a transcript, instruction, output or session file of the run
 
@@ -32,10 +35,14 @@ page shows what runs wrote as text, never as HTML.
 import errno
 import hmac
 import json
+import os
 import re
 import secrets
+import stat
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -116,23 +123,30 @@ def run_list(source: Source) -> dict:
         state = operate.state(run)
         item = {"id": key, "run": run.id, "workflow": state.get("workflow"), "status": state.get("status"),
                 "dry_run": state.get("dry_run"), "updated": state.get("updated")}
-        if state.get("status") in MOVING and (estimate := progress.of(run, state["status"])):
-            item["progress"] = {k: estimate[k] for k in ("step", "steps", "percent", "left_s")}
+        if state.get("status") in MOVING:
+            try:
+                with _viewing(run) as view:
+                    estimate = view.progress(state["status"])
+            except Exception:  # a damaged run: the list goes on without its progress, and its own page says why
+                estimate = None
+            if estimate:
+                item["progress"] = {k: estimate[k] for k in ("step", "steps", "percent", "left_s")}
         found.append(item)
     return {"folder": str(source.folder), "every_repo": source.every_repo, "runs": found}
 
 
 def run_detail(run: Run) -> dict:
     state = operate.state(run)
-    try:
-        graph = diagram.layout(spec.load(run.workflow_file))
-    except (spec.SpecError, OSError, KeyError, ValueError):
-        graph = None
-    events = report.events(run)  # read once, for each part below
-    found = report.build([run])
-    return {"state": state, "progress": progress.of(run, state.get("status"), events), "graph": graph,
-            "metrics": {"run": found["runs"][0], "nodes": found["nodes"], "notes": found["notes"]},
-            "sessions": observe.sessions(run, events=events), "attempts": attempts(run, events)}
+    status = state.get("status")
+    with _viewing(run) as view:  # after the state: the events go at least as far as it does
+        return {"state": state, "progress": view.progress(status), "graph": view.graph, "states": view.states(status),
+                "metrics": view.metrics(status), "sessions": view.open.live(), "attempts": view.attempts.listed()}
+
+
+def attempts(run: Run) -> list[dict]:
+    """Each attempt's log in the run folder, as the page lists them (_Attempts)."""
+    with _viewing(run) as view:
+        return view.attempts.listed()
 
 
 def events_after(run: Run, after: int | None) -> dict:
@@ -143,118 +157,230 @@ def events_after(run: Run, after: int | None) -> dict:
     return {"next": offset, "events": lines if after is not None else lines[-EVENTS_BACK:]}
 
 
-@dataclass
-class _Tree:
-    """What attempts() found in a run folder, so that its next call reads only what can have changed."""
-    seen: int = 0  # the events read
-    last: dict | None = None  # the last of them: a new events.jsonl doesn't go on from it
-    sessions: dict[str, dict] = field(default_factory=dict)  # transcript -> its session_started event
-    waiting: dict[str, tuple[float, dict]] = field(default_factory=dict)  # transcript -> the attempt to show until it is there
-    passes: dict[str, dict[int, list[tuple[float, dict]]]] = field(default_factory=dict)  # node -> pass -> its attempts
-    open: set[str] = field(default_factory=set)  # the nodes that can still write a file with no event
-    listed: list[dict] = field(default_factory=list)
+class _View:
+    """What wf ui knows of a run, from the part of its events.jsonl that it has read. That is the
+    numbers (report.Tally), the progress and the state of each step (progress.Tracker), the open
+    agent sessions (observe.Open) and the attempts (_Attempts). Each refresh reads only the events
+    that came since the last one, and looks only at the files of attempts that can still change.
+    So it costs no more for a long run, or for each tab that shows the run."""
 
+    def __init__(self, run: Run):
+        self.run, self.lock = run, threading.Lock()
+        self.tally: report.Tally | None = None  # None until the first refresh
+        self.asked = time.monotonic()  # when a page last asked for the run
 
-_TREES: dict[Path, _Tree] = {}  # run folder -> its _Tree
-_TREES_MOST = 64
-_TREEING = threading.Lock()  # wf ui asks from several threads
-_ENDED = ("node_finished", "node_failed", "route")  # its node wrote its files before it
-
-
-def attempts(run: Run, events: list[dict] | None = None) -> list[dict]:
-    """Each attempt's log in the run folder, sub-workflows' too, oldest first, with the harness and
-    model of its agent session when its events name them. An agent session that has written no
-    transcript yet is there too, with no log.
-
-    A node writes its files before the event that ends it. So after the first call, a node's
-    folder is read again only when an event names the node or while the node runs, and then only
-    from its newest pass that was read before. The page asks every 2 seconds, and each time it
-    reads the folders of the nodes that run, not the whole run."""
-    events = report.events(run) if events is None else events
-    with _TREEING:
-        tree = _TREES.pop(run.dir, None)
-        if tree is None or len(events) < tree.seen or (tree.seen and events[tree.seen - 1] != tree.last):
-            tree, stale = _Tree(), {p.name for p in _folders(run.dir / "nodes")}
-        else:
-            stale = set(tree.open)
-        for event in events[tree.seen:]:
-            node = event.get("node")
-            if not isinstance(node, str) or not (top := re.match(r"[^\[/]*", node)[0]):
-                continue
-            stale.add(top)
-            if node == top and event.get("event") in _ENDED:
-                tree.open.discard(top)
-            else:
-                tree.open.add(top)
-            if event.get("event") == "session_started" and event.get("log"):
-                tree.sessions[event["log"]], tree.waiting[event["log"]] = event, _waiting(run, event)
+    def _start(self) -> None:
+        run = self.run
+        self.inode, self.offset, self.tail = None, 0, b""  # events.jsonl, read up to `offset`: the last line read is `tail`
+        self.last: str | None = None  # the time of the last event
+        self.again = False  # the workflow files couldn't be read, but a later read may: start over at the next refresh
         try:
-            for node in sorted(stale):
-                _read_node(run, tree, node)
-        except OSError:  # a run being discarded: start over next time
-            return _listed(tree)
-        if stale:
-            tree.listed = _listed(tree)
-        tree.seen, tree.last = len(events), events[-1] if events else None
-        _TREES[run.dir] = tree
-        while len(_TREES) > _TREES_MOST:
-            del _TREES[next(iter(_TREES))]
-        return list(tree.listed)
+            self.workflow = spec.load(run.workflow_file)
+            self.graph = diagram.layout(self.workflow)
+            self.tracker = progress.Tracker(self.workflow, run.dir)
+        except (spec.SpecError, OSError, KeyError, ValueError) as error:
+            self.workflow = self.graph = self.tracker = None
+            self.again = progress.read_may_pass(error)
+        self.tally = report.Tally(run)
+        self.open = observe.Open(run)
+        self.attempts = _Attempts(run)
+
+    def refresh(self) -> None:
+        new = self._read() if self.tally is not None and not self.again else None
+        if new is None:  # the first refresh, or events.jsonl doesn't go on from what was read: start over
+            self._start()
+            new = self._read() or []
+        for event in new:
+            self.last = event.get("time", self.last)
+            self.tally.add(event)
+            self.open.add(event)
+            self.attempts.add(event)
+            if self.tracker is not None:
+                self.tracker.add(event)
+        self.attempts.check()
+
+    def _read(self) -> list[dict] | None:
+        """The events after those read before. None when events.jsonl is another file now, or `wf retry`
+        cut it back and it grew again."""
+        try:
+            with (self.run.dir / "events.jsonl").open("rb") as file:
+                inode = os.fstat(file.fileno()).st_ino
+                file.seek(self.offset - len(self.tail))
+                data = file.read()
+        except FileNotFoundError:
+            return None if self.offset else []
+        except OSError:  # try again at the next refresh
+            return []
+        if self.offset and (inode != self.inode or not data.startswith(self.tail)):
+            return None
+        self.inode = inode
+        whole = data[len(self.tail):data.rfind(b"\n") + 1]  # a line still being written waits for the next refresh
+        if whole:
+            self.offset += len(whole)
+            self.tail = whole[whole.rfind(b"\n", 0, -1) + 1:]
+        return runs.parse_events(whole)
+
+    def progress(self, status: str | None) -> dict | None:
+        if self.tracker is None:
+            return None
+        try:
+            return self.tracker.estimate(status, progress.learned(self.run, self.workflow, status))
+        except (spec.SpecError, OSError, KeyError, ValueError):
+            return None
+
+    def states(self, status: str | None) -> dict[str, str]:
+        return self.tracker.states(status) if self.tracker is not None else {}
+
+    def metrics(self, status: str | None) -> dict:
+        """The numbers of `wf report`, with what each pass that runs has done so far. That is until now,
+        or until the last event while the run doesn't move."""
+        now = time.time() if status in ("running", None) or self.last is None else observe.timestamp(self.last)
+        found = self.tally.report(now)
+        return {"run": found["runs"][0], "nodes": found["nodes"], "notes": found["notes"]}
 
 
-def _read_node(run: Run, tree: _Tree, node: str) -> None:
-    """Read the node's passes from the newest that was read before: the older ones have ended."""
-    known = tree.passes.setdefault(node, {})
-    newest = max(known, default=0)
-    for number in sorted(int(p.name) for p in _folders(run.dir / "nodes" / node) if p.name.isdigit()):
-        if number >= newest:
-            known[number] = _read_pass(run, run.dir / "nodes" / node / str(number), node, number)
+_VIEWS: dict[Path, _View] = {}  # run folder -> its _View, the one asked for last at the end
+_VIEWS_MOST = 64  # more stay while a page asks for them: the list asks for each run that moves
+_VIEWS_KEEP_SECONDS = 60
+_VIEWING = threading.Lock()  # wf ui asks from several threads
 
 
-def _read_pass(run: Run, folder: Path, node: str, pass_no: int, index: int | None = None) -> list[tuple[float, dict]]:
-    """The attempts of a pass folder, its items' and its sub-workflows' too, each with the time
-    its log last changed."""
-    where = node + (f"[{index}]" if index is not None else "")
-    found = []
-    for child in sorted(folder.iterdir()):
-        if index is None and child.is_dir() and child.name.isdigit():
-            found += _read_pass(run, child, node, pass_no, int(child.name))
-        elif match := re.fullmatch(r"attempt-(\d+)\.log", child.name):
-            found.append((child.stat().st_mtime, {
-                "node": where, "pass": pass_no, "attempt": int(match[1]), "log": str(child.relative_to(run.dir)),
-                "instruction": _maybe(run, folder / "instruction.md"), "output": _maybe(run, folder / "output.json")}))
-        elif re.fullmatch(r"attempt-\d+", child.name) and (child / "nodes").is_dir():
-            for inner in sorted(_folders(child / "nodes")):
-                for pass_dir in sorted((p for p in _folders(inner) if p.name.isdigit()), key=lambda p: int(p.name)):
-                    found += _read_pass(run, pass_dir, f"{where}/{inner.name}", int(pass_dir.name))
-    return found
+@contextmanager
+def _viewing(run: Run) -> Iterator[_View]:
+    """The run's view, up to date, for this thread alone. A view that fails is made again at the next request."""
+    with _VIEWING:
+        view = _VIEWS.pop(run.dir, None) or _View(run)
+        view.asked = time.monotonic()
+        _VIEWS[run.dir] = view
+        while len(_VIEWS) > _VIEWS_MOST and view.asked - next(iter(_VIEWS.values())).asked > _VIEWS_KEEP_SECONDS:
+            del _VIEWS[next(iter(_VIEWS))]
+    with view.lock:
+        try:
+            view.refresh()
+            yield view
+        except BaseException:
+            with _VIEWING:
+                if _VIEWS.get(run.dir) is view:
+                    del _VIEWS[run.dir]
+            raise
 
 
-def _waiting(run: Run, event: dict) -> tuple[float, dict]:
-    """The attempt of an agent session whose transcript isn't there yet."""
-    instruction = (run.dir / event["log"]).with_name("instruction.md")
-    return observe.timestamp(event.get("time")), {
-        "node": observe.where(event), "pass": event.get("pass"), "attempt": event.get("attempt"), "log": None,
-        "instruction": _maybe(run, instruction), "output": None}
+@dataclass
+class _Attempt:
+    node: str  # review[1], or build[2]/implement inside a sub-workflow
+    pass_no: int
+    number: int
+    folder: str  # its pass folder, or its item's, in the run folder
+    session: dict = field(default_factory=dict)  # its session_started event
+    files: dict[str, str] = field(default_factory=dict)  # log, instruction, output -> the file, once it is there
+    ended: bool = False
+
+    def paths(self) -> dict[str, str]:
+        return {"log": self.session.get("log") or f"{self.folder}/attempt-{self.number}.log",
+                "instruction": f"{self.folder}/instruction.md", "output": f"{self.folder}/output.json"}
 
 
-def _listed(tree: _Tree) -> list[dict]:
-    """The attempts oldest first, each with its agent session's harness, model and start."""
-    found = [(at, attempt, attempt["log"]) for node in sorted(tree.passes) for pass_no in sorted(tree.passes[node])
-             for at, attempt in tree.passes[node][pass_no]]
-    logged = {log for _, _, log in found}
-    found += [(at, attempt, log) for log, (at, attempt) in tree.waiting.items() if log not in logged]
-    found.sort(key=lambda timed: timed[0])
-    listed = []
-    for _, attempt, log in found:
-        session = tree.sessions.get(log, {})
-        listed.append({**attempt, "harness": session.get("harness"), "model": session.get("model"),
-                       "started": session.get("time")})
-    return listed
+class _Attempts:
+    """The attempts of a run, sub-workflows' too, from its events in turn, with the files of each one.
+
+    A node writes its files before the event that ends its attempt, item or pass. So check() looks for
+    the files of an attempt at each refresh while it runs, and once more after the event that ends it.
+    A finished job, with its output.json, ends it too. A check that fails for another reason than a
+    file that isn't there goes again at the next refresh."""
+
+    def __init__(self, run: Run):
+        self.run = run
+        self.all: dict[tuple, _Attempt] = {}  # (folder, attempt) -> the attempt, in the order they started
+        self.open: dict[tuple, _Attempt] = {}  # the attempts whose files can still change
+        self.places: dict[str, tuple[int, dict]] = {}  # node (build[2]/implement) -> its pass, and the attempt of each item
+
+    def add(self, event: dict) -> None:
+        node, kind, number = event.get("node"), event.get("event"), event.get("attempt")
+        if not isinstance(node, str):
+            return
+        index = event.get("index") if isinstance(event.get("index"), int) else None
+        pass_no = event.get("pass") if isinstance(event.get("pass"), int) else self.places.get(node, (None,))[0]
+        if kind == "node_started" and isinstance(event.get("pass"), int):
+            self.places[node] = (pass_no, {})
+            for item in range(event["items"]) if isinstance(event.get("items"), int) else [None]:
+                self._started(node, pass_no, item, 1)
+        elif kind in ("attempt_started", "session_started") and isinstance(number, int):
+            if kind == "attempt_started" and node in self.places:
+                self.places[node][1][index] = number
+            attempt = self._started(node, pass_no, index, number)
+            if attempt is not None and kind == "session_started":
+                attempt.session = event
+        elif kind in ("attempt_failed", "harness_unavailable") and isinstance(number, int):
+            self._end(self._folder(node, pass_no, index), number)
+        elif kind in ("node_finished", "node_failed", "item_failed"):
+            self._end(self._folder(node, pass_no, index if kind == "item_failed" else None))
+
+    def _started(self, node: str, pass_no: int | None, index: int | None, number: int) -> _Attempt | None:
+        folder = self._folder(node, pass_no, index)
+        if folder is None:
+            return None
+        key = (folder, number)  # a sub-workflow attempt that starts over has its steps' passes and attempts again
+        if key not in self.all:
+            self.all[key] = _Attempt(node + (f"[{index}]" if index is not None else ""), pass_no, number, folder)
+        self.open[key] = attempt = self.all[key]
+        attempt.ended = False
+        return attempt
+
+    def _folder(self, node: str, pass_no: int | None, index: int | None) -> str | None:
+        """nodes/<node>/<pass>, and /<index> for an item, inside the folder of each workflow node's
+        attempt around it. None when the events don't say where that is."""
+        parts = node.split("/")
+        folder = "nodes"
+        for depth, part in enumerate(parts[:-1]):
+            name, _, item = part.partition("[")
+            item = int(item.rstrip("]")) if item else None
+            pass_around, attempts = self.places.get("/".join(parts[:depth] + [name]), (None, {}))
+            if pass_around is None:
+                return None
+            folder += f"/{name}/{pass_around}" + (f"/{item}" if item is not None else "") + f"/attempt-{attempts.get(item, 1)}/nodes"
+        if pass_no is None:
+            return None
+        return f"{folder}/{parts[-1]}/{pass_no}" + (f"/{index}" if index is not None else "")
+
+    def _end(self, folder: str | None, number: int | None = None) -> None:
+        """The attempt `number` in the folder has ended, and each attempt in its sub-workflow. Without a
+        number, each attempt in the folder, and in the folders under it."""
+        if folder is None:
+            return
+        inside = f"{folder}/attempt-{number}/" if number is not None else f"{folder}/"
+        for attempt in self.open.values():
+            if (attempt.folder == folder and number in (None, attempt.number)) or attempt.folder.startswith(inside):
+                attempt.ended = True
+
+    def check(self) -> None:
+        for key, attempt in list(self.open.items()):
+            sure = True
+            for name, path in attempt.paths().items():
+                if name not in attempt.files:
+                    there = _is_file(self.run.dir / path)
+                    if there:
+                        attempt.files[name] = path
+                    sure = sure and there is not None
+            if sure and (attempt.ended or "output" in attempt.files):
+                del self.open[key]
+
+    def listed(self) -> list[dict]:
+        """The attempts, oldest first, each with its agent session's harness, model and start. An attempt
+        is there once its transcript is, or its agent session started."""
+        return [{"node": a.node, "pass": a.pass_no, "attempt": a.number, "log": a.files.get("log"),
+                 "instruction": a.files.get("instruction"), "output": a.files.get("output"),
+                 "harness": a.session.get("harness"), "model": a.session.get("model"), "started": a.session.get("time")}
+                for a in self.all.values() if "log" in a.files or a.session]
 
 
-def _maybe(run: Run, path: Path) -> str | None:
-    return str(path.relative_to(run.dir)) if path.is_file() else None
+def _is_file(path: Path) -> bool | None:
+    """None when the check failed, for another reason than a file that isn't there."""
+    try:
+        return stat.S_ISREG(path.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
 
 
 def run_file(run: Run, relative: str) -> dict | None:

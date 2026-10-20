@@ -21,7 +21,7 @@ from textwrap import dedent
 
 import pytest
 
-from workflow import capacity, cli, harnesses, operate, runner, settings
+from workflow import capacity, cli, harnesses, operate, runner, settings, ui
 from workflow.harnesses.base import TurnEnd, Usage
 from workflow.runs import Run
 from fakes import Fake, ends, submit
@@ -122,6 +122,7 @@ def hold_slot(seconds: float, waiter: str | None = None, seen: dict | None = Non
                 until(lambda: early.is_set() or waiting(waiter))
                 if seen is not None and not early.is_set():
                     seen.update(operate.state(Run.at(run_of(waiter))))
+                    seen["steps"] = ui.run_detail(Run.at(run_of(waiter)))["metrics"]["nodes"]  # as wf ui shows them
             early.wait(seconds)
         finally:
             slot.release()
@@ -348,6 +349,7 @@ def test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slo
     assert [e["waited_s"] for e in events("work") if e["event"] == "slot_taken"][0] >= 1.4
     assert seen["status"] == "running"
     assert [(w["node"], w["attempt"]) for w in seen["agents_waiting"]] == [("work", 1)]
+    assert (seen["steps"]["work"]["passes"], seen["steps"]["work"]["attempts"]) == (1, 0)  # no attempt has started yet
     assert datetime.fromisoformat(seen["agents_waiting"][0]["since"]) <= datetime.now().astimezone()
     assert live["status"] == "running" and "agents_waiting" not in live
 

@@ -294,15 +294,20 @@ def read_events(path: Path, offset: int = 0) -> tuple[list[dict], int]:
     except OSError:  # not there yet, or the run is being discarded
         return [], offset
     whole = data[: data.rfind(b"\n") + 1]
+    return parse_events(whole), offset + len(whole)
+
+
+def parse_events(lines: bytes) -> list[dict]:
+    """The events of whole lines of an events.jsonl. A damaged line is left out."""
     found = []
-    for line in whole.splitlines():
+    for line in lines.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
         if isinstance(event, dict):
             found.append(event)
-    return found, offset + len(whole)
+    return found
 
 
 LOCK_FD = "WF_LOCK_FD"

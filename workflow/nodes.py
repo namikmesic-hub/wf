@@ -41,6 +41,12 @@ submit_result call. It starts fresh instead, with an event saying why, when
 the harness or model differs from the last pass, the fork fails, or the two
 passes before it both continued.
 
+An agent session tells events.jsonl what its attempt has used so far, in an
+`agent_usage` event, when that changed. It looks after each turn, and when the
+session ends. While a turn runs, it looks every USAGE_SECONDS, at what the
+harness has reported of that turn. wf ui shows these numbers for a step that
+runs.
+
 Each agent attempt records the harness, model and effort that it runs with in
 an `agent_model` event. An override from `wf retry --model` (overrides.py)
 runs the job on the override's harness only, with the model and effort that it
@@ -114,6 +120,7 @@ from .state import Finished, Job
 from .trace import HIDDEN, Attempt
 
 TAIL = 20_000  # characters of stdout and stderr kept in a command's output
+USAGE_SECONDS = 30  # how often a turn that runs says what its attempt has used so far
 
 
 class _Failed(Exception):
@@ -497,6 +504,22 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         spec.emit({"event": "session_started", "model": model, "effort": effort, "pid": os.getpid(),
                    "log": _in_run(ctx, spec.log)})
         spent_before, spent = usage.cost_usd, Usage()
+        told = Usage()
+
+        def tell_usage(turn_so_far: Usage | None = None) -> None:
+            nonlocal told
+            so_far = Usage(spent.tokens, spent.cost_usd)
+            so_far.add(turn_so_far or Usage())
+            if so_far != told:
+                told = so_far
+                spec.emit({"event": "agent_usage", "tokens": so_far.tokens, "cost_usd": round(so_far.cost_usd, 6)})
+
+        async def tell_usage_while_turns_run() -> None:
+            while True:
+                await asyncio.sleep(USAGE_SECONDS)
+                tell_usage(session.pending_usage())
+
+        telling = asyncio.create_task(tell_usage_while_turns_run())
         try:
             async with ctx.steering.live(spec, number, name, session, deadline) as live:
                 turn, sends, text, reminders = 1, "instruction", instruction, output_tool.REMINDERS
@@ -513,6 +536,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                     usage.add(end.usage)
                     spent.add(end.usage)
                     ctx.add_usage(end.usage)  # live, so limits apply before the next attempt
+                    tell_usage()
                     if spec.tool.result is not None:
                         extra["session"] = {"harness": name, "model": model, "id": session.id,
                                             "cost_usd": (source["cost_usd"] if source else 0.0) + usage.cost_usd - spent_before,
@@ -531,10 +555,12 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                     else:
                         raise _AttemptFailed("the agent never made a valid submit_result call")
         finally:
+            telling.cancel()
             cut_off = session.pending_usage()  # zero unless a timeout stopped a turn midway
             usage.add(cut_off)
             spent.add(cut_off)
             ctx.add_usage(cut_off)
+            tell_usage()
             session_facts["id"] = session.id
             record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
             try:

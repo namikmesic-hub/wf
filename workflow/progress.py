@@ -36,9 +36,14 @@ A step in progress counts in part: the share of its items that finished, or
 the share of its sub-workflow that is done. With earlier runs, a step with no
 items and no sub-workflow counts its time so far against its weight. While the
 run does not move, that time stops at its last event.
+
+A Tracker plays the events one at a time, so wf ui gives it only the new ones
+at each refresh. It also gives the state of each step in a sub-workflow, from
+the events of the current attempt of the workflow node around it.
 """
 
 import hashlib
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -62,8 +67,6 @@ _RETRIED = {"attempt_started", "attempt_failed", "agent_tool", "harness_unavaila
 class _Trace:
     pending: set[str]
     running: dict[str, str]  # node -> when its pass started (or `wf retry` reran it)
-    since: dict[str, int]  # node -> the index of the event that started its current attempt
-    attempt: dict[str, int]  # node -> the number of its current attempt
     failed: set[str]
     routing: set[str]  # finished, and its route not chosen yet
     done: set[str]  # finished in this lap
@@ -72,57 +75,6 @@ class _Trace:
     items: dict[str, int | None]
     taken: dict[tuple[str, int], int]  # (node, route index) -> times taken
     back: dict[tuple[str, str], int]  # (node, the node that needs it) -> times a needs edge went back
-
-
-def _trace(shape: Shape, events: list[dict]) -> _Trace:
-    """Play the run's events for this workflow's own nodes: what is open, and what is done."""
-    topo = shape.topo
-    needs_back = {(loop.last, loop.first) for loop in shape.loops if loop.route is None}
-    found = _Trace(set(triggered(topo, START, None)), {}, {}, {}, set(), set(), set(), set(), {}, {}, {}, {})
-    for number, event in enumerate(events):
-        kind, node = event.get("event"), event.get("node")
-        if not isinstance(node, str) or node not in topo.needs:  # run-level events, and nodes in sub-workflows (build[2]/x)
-            continue
-        if kind == "node_started":
-            found.pending.discard(node)
-            found.failed.discard(node)
-            found.done.discard(node)
-            found.running[node], found.since[node], found.attempt[node] = event.get("time", ""), number, 1
-            found.passes[node] = event.get("pass") or found.passes.get(node, 0) + 1
-            found.items[node] = event.get("items")
-        elif kind == "node_finished":
-            found.running.pop(node, None)
-            found.done.add(node)
-            found.ran.add(node)
-            if topo.routes.get(node):
-                found.routing.add(node)  # the route event follows
-            else:
-                found.pending.update(topo.dependents.get(node, ()))
-                # A lap only once the loop's first step has run: start can also lead into its last step
-                for target in (t for t in topo.dependents.get(node, ()) if (node, t) in needs_back and t in found.ran):
-                    found.back[(node, target)] = found.back.get((node, target), 0) + 1
-                    found.done -= shape.after(target)  # a loop: its steps are ahead again
-        elif kind == "node_failed":
-            found.running.pop(node, None)
-            found.failed.add(node)
-        elif kind == "route":
-            found.routing.discard(node)
-            index = _route_index(topo, node, event)
-            if index is not None:
-                found.taken[(node, index)] = event.get("taken") or found.taken.get((node, index), 0) + 1
-            for target in (t for t in event.get("to") or [] if t in topo.needs):
-                found.pending.add(target)
-                if target in found.ran:  # a loop: its steps are ahead again
-                    found.done -= shape.after(target)
-        elif kind in _RETRIED:
-            if node in found.failed:
-                found.failed.discard(node)
-                found.running[node] = event.get("time", "")
-            if kind in ("attempt_started", "attempt_failed"):  # a sub-workflow's next attempt starts it over
-                found.since[node] = number
-            if kind == "attempt_started" and isinstance(event.get("attempt"), int):
-                found.attempt[node] = event["attempt"]
-    return found
 
 
 def _route_index(topo: Topology, node: str, event: dict) -> int | None:
@@ -199,114 +151,283 @@ def learn(workflow: spec.Workflow, runs: list[Run]) -> Earlier:
 # ---------- the estimate ----------
 
 
-def of(run: Run, status: str | None = None, events: list[dict] | None = None) -> dict | None:
+class Tracker:
+    """A run of a workflow, as its events tell it. add() plays the next event, estimate() says how
+    far the run is, and states() what each step does. wf ui keeps a tracker for each run, so that a
+    refresh plays only the events that came since the last one.
+
+    `folder` is the run folder, where the items that finished are. A workflow node, and each of its
+    items, has a tracker of its own for its sub-workflow in its current attempt. The depth is how
+    deep in sub-workflows this one is."""
+
+    def __init__(self, workflow: spec.Workflow, folder: Path | None = None, depth: int = 0,
+                 shape: Shape | None = None, subs: dict | None = None):
+        self.workflow, self.folder, self.depth = workflow, folder, depth
+        self.shape = shape or Shape(workflow)
+        self.trace = _Trace(set(triggered(self.shape.topo, START, None)), {}, set(), set(), set(), set(), {}, {}, {}, {})
+        self.needs_back = {(loop.last, loop.first) for loop in self.shape.loops if loop.route is None}
+        self.last: str | None = None  # the time of the last event
+        self.inner: dict[str, Tracker] = {}  # rules, or build[2] for an item -> the sub-workflow of its current attempt
+        self.attempt: dict[str, int] = {}  # rules, or build[2] -> the number of its current attempt
+        self.ended: set[str] = set()  # rules, or build[2]: its attempt ended, so no step inside it runs any more
+        self.unread: dict[str, list[dict]] = {}  # rules, or build[2] -> the events of its sub-workflow, which can't be read now
+        self.subs = {} if subs is None else subs  # (workflow file, node) -> its sub-workflow and shape, read once
+
+    def add(self, event: dict) -> None:
+        """Play one event: of a node of this workflow, or of a step in one of its sub-workflows (build[2]/implement)."""
+        self.last = event.get("time", self.last)
+        node = event.get("node")
+        if not isinstance(node, str):  # run-level events
+            return
+        if node in self.shape.topo.needs:
+            self._play(node, event)
+        elif (inside := re.fullmatch(r"([^/\[]+)(?:\[(\d+)\])?/(.+)", node)) and inside[1] in self.shape.topo.needs:
+            outer, index = inside[1], int(inside[2]) if inside[2] else None
+            key, child = _key(outer, index), {**event, "node": inside[3]}
+            tracker = self.inner.get(key) or self._begin(outer, index)
+            if tracker is not None:
+                tracker.add(child)
+            elif key in self.unread:  # played once its sub-workflow can be read
+                self.unread[key].append(child)
+
+    def _play(self, node: str, event: dict) -> None:
+        found, topo, kind, index = self.trace, self.shape.topo, event.get("event"), event.get("index")
+        if kind == "node_started":
+            found.pending.discard(node)
+            found.failed.discard(node)
+            found.done.discard(node)
+            found.running[node] = event.get("time", "")
+            found.passes[node] = event.get("pass") or found.passes.get(node, 0) + 1
+            found.items[node] = event.get("items")
+            for keys in (self.inner, self.attempt, self.unread):  # a new pass: its attempts and items start over
+                for key in [k for k in keys if _outer(k) == node]:
+                    del keys[key]
+            self.ended = {k for k in self.ended if _outer(k) != node}
+            for item in range(event["items"]) if isinstance(event.get("items"), int) else [None]:
+                self._begin(node, item)
+        elif kind == "node_finished":
+            found.running.pop(node, None)
+            found.done.add(node)
+            found.ran.add(node)
+            if topo.routes.get(node):
+                found.routing.add(node)  # the route event follows
+            else:
+                targets = topo.dependents.get(node, ())
+                # A lap needs the loop's first step to have run, because start can also lead into its last
+                # step. And the first step isn't pending already: then the edge doesn't send the run back
+                back = [t for t in targets if (node, t) in self.needs_back and t in found.ran and t not in found.pending]
+                found.pending.update(targets)
+                for target in back:
+                    found.back[(node, target)] = found.back.get((node, target), 0) + 1
+                    found.done -= self.shape.after(target)  # a loop: its steps are ahead again
+        elif kind == "node_failed":
+            found.running.pop(node, None)
+            found.failed.add(node)
+        elif kind == "route":
+            found.routing.discard(node)
+            route = _route_index(topo, node, event)
+            if route is not None:
+                found.taken[(node, route)] = event.get("taken") or found.taken.get((node, route), 0) + 1
+            for target in (t for t in event.get("to") or [] if t in topo.needs):
+                found.pending.add(target)
+                if target in found.ran:  # a loop: its steps are ahead again
+                    found.done -= self.shape.after(target)
+        elif kind == "item_failed":
+            self.ended.add(_key(node, index))
+        elif kind in _RETRIED:
+            if node in found.failed:
+                found.failed.discard(node)
+                found.running[node] = event.get("time", "")
+            key = _key(node, index)
+            # A sub-workflow's next attempt starts it over. The same attempt again goes on: after a limit, a question or a crash
+            if kind == "attempt_started" and isinstance(event.get("attempt"), int):
+                self.ended.discard(key)
+                if event["attempt"] != self.attempt.get(key, 1):
+                    self.attempt[key] = event["attempt"]
+                    self.unread.pop(key, None)
+                    self._begin(node, index)
+            elif kind in ("attempt_failed", "harness_unavailable"):
+                self.ended.add(key)
+
+    def _begin(self, node: str, index: int | None) -> "Tracker | None":
+        """A new tracker for the sub-workflow of a workflow node's attempt, or of its item's, if it has one.
+        When its file can't be read now, it keeps the events of that attempt until a later call can."""
+        key = _key(node, index)
+        sub = self._sub(node)
+        if sub is None:
+            if (self.workflow.path, node) not in self.subs:  # a read error that can pass
+                self.unread.setdefault(key, [])
+            return None
+        folder = None
+        if self.folder is not None:
+            folder = self.folder / "nodes" / node / str(self.trace.passes.get(node, 1))
+            folder = (folder if index is None else folder / str(index)) / f"attempt-{self.attempt.get(key, 1)}"
+        self.inner[key] = tracker = Tracker(sub[0], folder, self.depth + 1, sub[1], self.subs)
+        for event in self.unread.pop(key, []):
+            tracker.add(event)
+        return tracker
+
+    def _sub(self, node: str) -> tuple[spec.Workflow, Shape] | None:
+        """The sub-workflow of a workflow node, read once. A read error that can pass isn't kept."""
+        where = (self.workflow.path, node)
+        if where not in self.subs:
+            found = None
+            if self.depth < 10 and self.workflow.nodes[node].kind == "workflow":
+                try:
+                    sub = spec.load(Path(self.workflow.path).parent / self.workflow.nodes[node].workflow)
+                    found = (sub, Shape(sub))
+                except (spec.SpecError, OSError, TypeError) as error:
+                    if read_may_pass(error):
+                        return None
+            self.subs[where] = found
+        return self.subs[where]
+
+    def _read_again(self) -> None:
+        """Read each sub-workflow that couldn't be read before, and play the events that it kept."""
+        for key in list(self.unread):
+            node, _, item = key.partition("[")
+            self._begin(node, int(item.rstrip("]")) if item else None)
+
+    def _open(self, status: str | None) -> set[str]:
+        """The nodes that run, wait to start, failed, or finished and wait for their route."""
+        trace = self.trace
+        return trace.pending | set(trace.running) | trace.failed | trace.routing if status != "succeeded" else set()
+
+    def states(self, status: str | None, cut: bool = False) -> dict[str, str]:
+        """The state of each step, also of each step in a sub-workflow, by the name that `wf report` gives it.
+        That is rules/print, or build[]/implement for the implement of each item together. With `cut`, the
+        attempt of the workflow node around this one ended. So a step that ran in it failed."""
+        self._read_again()
+        moving = status in ("running", None)
+        ahead = self.shape.topo.reachable(self._open(status))
+        own = {node: _state(node, self.trace, ahead, moving, cut) for node in self.shape.order}
+        inside: dict[str, list[str]] = {}
+        for key, tracker in self.inner.items():
+            node = _outer(key)
+            ended = cut or key in self.ended or node not in self.trace.running
+            name = f"{node}[]" if "[" in key else node
+            # A workflow node that is done: the steps that its sub-workflow didn't reach, it skipped
+            inner = "succeeded" if own[node] == "done" else "running" if moving else "paused"
+            for path, state in tracker.states(inner, ended).items():
+                inside.setdefault(f"{name}/{path}", []).append("waiting" if own[node] == "waiting" else state)
+        return own | {path: max(states, key=_RANK.index) for path, states in inside.items()}
+
+    def estimate(self, status: str | None, learnt: Earlier | None = None, now: float | None = None) -> dict:
+        """The progress of the run so far. It counts the items that finished in the folder. Without
+        `now`, the time is now, or the last event's while the run does not move."""
+        self._read_again()
+        moving = status in ("running", None)
+        if now is None:
+            now = _seconds(self.last) if not moving else time.time()
+        shape, trace, folder = self.shape, self.trace, self.folder
+        open_nodes = self._open(status)
+        ahead = shape.topo.reachable(open_nodes)
+        states = {node: _state(node, trace, ahead, moving) for node in shape.order}
+        known = [learnt.mean[n] for n in shape.order if learnt and n in learnt.mean]
+        timed = any(known)
+        typical = sum(known) / len(known) if timed else 1.0
+        # A step that a route left out weighs nothing, also on a path that comes back into the chosen branch
+        weight = {n: 0.0 if states[n] == "skipped" else learnt.mean.get(n, typical) if timed else 1.0 for n in shape.order}
+        unit = {n: 0.0 if states[n] == "skipped" else 1.0 for n in shape.order}
+        depths, tails = shape.depth(weight), shape.tail(weight)
+        step_of, steps_after = shape.depth(unit), shape.tail(unit)
+
+        nodes = {}
+        for node in shape.order:
+            info = {"state": states[node], "step": shape.step[node], "passes": trace.passes.get(node, 0)}
+            if trace.items.get(node) is not None:
+                info["items"] = trace.items[node]
+                if folder is not None and node in trace.running:
+                    info["items_done"] = _items_done(folder, node, trace.passes[node], trace.items[node])
+            if node in trace.running and info.get("items") is None and node in self.inner:
+                inner = self.inner[node].estimate("running" if moving else "paused")
+                info["inner"] = {key: inner[key] for key in ("step", "steps", "at", "percent")}
+            nodes[node] = info
+
+        def left_of(node: str) -> float:
+            """What is left of an open node: all of it, none once it finished, or the part not done yet."""
+            if node in trace.routing:
+                return 0.0
+            if node not in trace.running:
+                return weight[node]
+            info = nodes[node]
+            if info.get("items"):  # what it did beats how long it took
+                share = info.get("items_done", 0) / info["items"]
+            elif info.get("inner"):
+                share = info["inner"]["percent"] / 100
+            elif timed and weight[node]:  # its own mean time, or the mean of the steps for a step that no earlier run ran
+                share = (now - _seconds(trace.running[node])) / weight[node]
+            else:
+                share = 0.0
+            return weight[node] * (1 - min(max(share, 0.0), 1.0))
+
+        if open_nodes:  # of nodes with as much left, the one with the least done decides, then file order
+            deciding = max(sorted(open_nodes, key=shape.order.index),
+                           key=lambda n: (left_of(n) + tails[n], left_of(n) - depths[n]))
+            lap_done, lap_left = depths[deciding] - left_of(deciding), left_of(deciding) + tails[deciding]
+            steps = max(step_of[n] + steps_after[n] for n in open_nodes)
+        else:
+            lap_done, lap_left = max((depths[n] for n in trace.done), default=0.0), 0.0
+            steps = max(step_of.values(), default=0.0)
+        laps = still = 0.0
+        loops = []
+        for loop in shape.loops:
+            if loop.route is not None:
+                taken = trace.taken.get((loop.last, loop.route), 0)
+            else:  # a needs edge goes back
+                taken = trace.back.get((loop.last, loop.first), 0)
+            size = shape.span(loop, weight)
+            expected = learnt.taken.get((loop.last, loop.route)) if learnt and loop.route is not None else None
+            laps += taken * size
+            if loop.last in ahead:  # the run can still go back
+                more = expected - taken if timed and expected is not None else (loop.max or taken) - taken
+                still += max(more, 0) * size
+            loops.append({"from": loop.last, "to": loop.first, "route": loop.route, "taken": taken, "max": loop.max,
+                          **({"expected": round(expected, 2)} if expected is not None else {})})
+        done, left = laps + lap_done, lap_left + still
+
+        at = [n for n in shape.order if n in trace.running or n in trace.failed]
+        if status == "succeeded":
+            step, percent, left = steps, 100, 0.0
+        else:  # between steps: the step that starts next
+            step = max((step_of[n] for n in at or trace.pending or trace.done), default=0.0)
+            percent = min(round(100 * done / (done + left)), 99) if done + left else 0
+        at.sort(key=lambda n: (-step_of[n], shape.order.index(n)))
+        return {"step": round(step), "steps": round(max(steps, step)), "at": at, "percent": percent,
+                "estimate": "earlier runs" if timed else "steps", "earlier_runs": learnt.runs if learnt else 0,
+                "left_s": round(left) if timed else None, "loops": loops, "nodes": nodes}
+
+
+def of(run: Run, status: str | None = None) -> dict | None:
     """The run's progress, as the module's docstring says. None if the run's files can't be read,
     for example while it is discarded. The status comes from operate.state(), which knows a
-    stopped run. With `events`, it doesn't read events.jsonl again."""
+    stopped run."""
     try:
         workflow = spec.load(run.workflow_file)
         status = status or run.status().get("status")
-        history = earlier(run, workflow.name) if status != "succeeded" else []
-        learnt = learn(workflow, history) if history else None
-        return estimate(workflow, report.events(run) if events is None else events, status, learnt, run.dir)
+        return estimate(workflow, report.events(run), status, learned(run, workflow, status), run.dir)
     except (spec.SpecError, OSError, KeyError, ValueError):
         return None
 
 
+def learned(run: Run, workflow: spec.Workflow, status: str | None) -> Earlier | None:
+    """What the earlier runs of the workflow that succeeded say, for a run that hasn't succeeded yet."""
+    history = earlier(run, workflow.name) if status != "succeeded" else []
+    return learn(workflow, history) if history else None
+
+
 def estimate(workflow: spec.Workflow, events: list[dict], status: str | None, learnt: Earlier | None = None,
-             folder: Path | None = None, now: float | None = None, depth: int = 0) -> dict:
-    """The progress of a run of `workflow`, from its events. It counts the items that finished in
-    `folder`, the run folder. Without `now`, the time is now, or the last event's while the run
-    does not move. The depth is how deep in sub-workflows this one is."""
-    moving = status in ("running", None)
-    if now is None:
-        now = _seconds(events[-1].get("time")) if events and not moving else time.time()
-    shape = Shape(workflow)
-    trace = _trace(shape, events)
-    open_nodes = trace.pending | set(trace.running) | trace.failed | trace.routing if status != "succeeded" else set()
-    ahead = shape.topo.reachable(open_nodes)
-    states = {node: _state(node, trace, ahead, moving) for node in shape.order}
-    known = [learnt.mean[n] for n in shape.order if learnt and n in learnt.mean]
-    timed = any(known)
-    typical = sum(known) / len(known) if timed else 1.0
-    # A step that a route left out weighs nothing, also on a path that comes back into the chosen branch
-    weight = {n: 0.0 if states[n] == "skipped" else learnt.mean.get(n, typical) if timed else 1.0 for n in shape.order}
-    unit = {n: 0.0 if states[n] == "skipped" else 1.0 for n in shape.order}
-    depths, tails = shape.depth(weight), shape.tail(weight)
-    step_of, steps_after = shape.depth(unit), shape.tail(unit)
-
-    nodes = {}
-    for node in shape.order:
-        info = {"state": states[node], "step": shape.step[node], "passes": trace.passes.get(node, 0)}
-        if trace.items.get(node) is not None:
-            info["items"] = trace.items[node]
-            if folder is not None and node in trace.running:
-                info["items_done"] = _items_done(folder, node, trace.passes[node], trace.items[node])
-        if node in trace.running and workflow.nodes[node].kind == "workflow" and info.get("items") is None:
-            attempt_dir = (folder / "nodes" / node / str(trace.passes[node]) / f"attempt-{trace.attempt.get(node, 1)}"
-                           if folder is not None else None)
-            inner = _inner(workflow, node, events[trace.since[node] + 1:], attempt_dir, moving, depth)
-            if inner is not None:
-                info["inner"] = inner
-        nodes[node] = info
-
-    def left_of(node: str) -> float:
-        """What is left of an open node: all of it, none once it finished, or the part not done yet."""
-        if node in trace.routing:
-            return 0.0
-        if node not in trace.running:
-            return weight[node]
-        info = nodes[node]
-        if info.get("items"):  # what it did beats how long it took
-            share = info.get("items_done", 0) / info["items"]
-        elif info.get("inner"):
-            share = info["inner"]["percent"] / 100
-        elif timed and weight[node]:  # its own mean time, or the mean of the steps for a step that no earlier run ran
-            share = (now - _seconds(trace.running[node])) / weight[node]
-        else:
-            share = 0.0
-        return weight[node] * (1 - min(max(share, 0.0), 1.0))
-
-    if open_nodes:  # of nodes with as much left, the one with the least done decides, then file order
-        deciding = max(sorted(open_nodes, key=shape.order.index),
-                       key=lambda n: (left_of(n) + tails[n], left_of(n) - depths[n]))
-        lap_done, lap_left = depths[deciding] - left_of(deciding), left_of(deciding) + tails[deciding]
-        steps = max(step_of[n] + steps_after[n] for n in open_nodes)
-    else:
-        lap_done, lap_left = max((depths[n] for n in trace.done), default=0.0), 0.0
-        steps = max(step_of.values(), default=0.0)
-    laps = still = 0.0
-    loops = []
-    for loop in shape.loops:
-        if loop.route is not None:
-            taken = trace.taken.get((loop.last, loop.route), 0)
-        else:  # a needs edge goes back
-            taken = trace.back.get((loop.last, loop.first), 0)
-        size = shape.span(loop, weight)
-        expected = learnt.taken.get((loop.last, loop.route)) if learnt and loop.route is not None else None
-        laps += taken * size
-        if loop.last in ahead:  # the run can still go back
-            more = expected - taken if timed and expected is not None else (loop.max or taken) - taken
-            still += max(more, 0) * size
-        loops.append({"from": loop.last, "to": loop.first, "route": loop.route, "taken": taken, "max": loop.max,
-                      **({"expected": round(expected, 2)} if expected is not None else {})})
-    done, left = laps + lap_done, lap_left + still
-
-    at = [n for n in shape.order if n in trace.running or n in trace.failed]
-    if status == "succeeded":
-        step, percent, left = steps, 100, 0.0
-    else:  # between steps: the step that starts next
-        step = max((step_of[n] for n in at or trace.pending or trace.done), default=0.0)
-        percent = min(round(100 * done / (done + left)), 99) if done + left else 0
-    at.sort(key=lambda n: (-step_of[n], shape.order.index(n)))
-    return {"step": round(step), "steps": round(max(steps, step)), "at": at, "percent": percent,
-            "estimate": "earlier runs" if timed else "steps", "earlier_runs": learnt.runs if learnt else 0,
-            "left_s": round(left) if timed else None, "loops": loops, "nodes": nodes}
+             folder: Path | None = None, now: float | None = None) -> dict:
+    """The progress of a run of `workflow`, from its events, as Tracker.estimate() gives it."""
+    tracker = Tracker(workflow, folder)
+    for event in events:
+        tracker.add(event)
+    return tracker.estimate(status, learnt, now)
 
 
-def _state(node: str, trace: _Trace, ahead: set[str], moving: bool) -> str:
+def _state(node: str, trace: _Trace, ahead: set[str], moving: bool, cut: bool = False) -> str:
     if node in trace.running:
-        return "running" if moving else "paused"
+        return "failed" if cut else "running" if moving else "paused"
     if node in trace.failed:
         return "failed"
     if node in trace.done:  # in this lap: a loop can lead back to it, but it has done its part for now
@@ -316,25 +437,27 @@ def _state(node: str, trace: _Trace, ahead: set[str], moving: bool) -> str:
     return "done" if node in trace.ran else "skipped"
 
 
+_RANK = ["skipped", "done", "waiting", "failed", "paused", "running"]  # a step in several items has the state furthest on
+
+
+def read_may_pass(error: BaseException) -> bool:
+    """Is this an error in reading a file that a later read may not get? A file that is missing,
+    or damaged, stays so."""
+    cause = error.__cause__ if isinstance(error, spec.SpecError) else error
+    return isinstance(cause, OSError) and not isinstance(cause, (FileNotFoundError, NotADirectoryError))
+
+
+def _key(node: str, index: int | None) -> str:
+    return node if index is None else f"{node}[{index}]"
+
+
+def _outer(key: str) -> str:
+    return key.partition("[")[0]
+
+
 def _items_done(folder: Path, node: str, pass_no: int, items: int) -> int:
     pass_dir = folder / "nodes" / node / str(pass_no)
     return sum((pass_dir / str(index) / "output.json").exists() for index in range(items))
-
-
-def _inner(workflow: spec.Workflow, node: str, events: list[dict], folder: Path | None, moving: bool,
-           depth: int) -> dict | None:
-    """The progress of a workflow node's sub-workflow, from the events it passes up (node/inner).
-    Its items that finished are in `folder`, the attempt's own folder."""
-    if depth >= 10:
-        return None
-    try:
-        sub = spec.load(Path(workflow.path).parent / workflow.nodes[node].workflow)
-    except (spec.SpecError, OSError, TypeError):
-        return None
-    prefix = f"{node}/"
-    inner = [{**e, "node": e["node"].removeprefix(prefix)} for e in events if str(e.get("node", "")).startswith(prefix)]
-    found = estimate(sub, inner, "running" if moving else "paused", folder=folder, depth=depth + 1)
-    return {key: found[key] for key in ("step", "steps", "at", "percent")}
 
 
 def _seconds(when) -> float:

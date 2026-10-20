@@ -39,23 +39,34 @@ POLL_SECONDS = 0.5
 _ENDS = ("attempt_failed", "harness_unavailable", "node_finished", "node_failed", "item_failed")
 
 
-def sessions(run: Run, now: float | None = None, events: list[dict] | None = None) -> list[dict]:
-    """The agent sessions of a run that run now, oldest first. With `events`, it doesn't read
-    events.jsonl again."""
+def sessions(run: Run, now: float | None = None) -> list[dict]:
+    """The agent sessions of a run that run now, oldest first."""
     if not run.driven():
         return []
-    driver = _driver(run)
-    now = time.time() if now is None else now
-    found: dict[tuple, dict] = {}
-    for event in report.events(run) if events is None else events:
-        kind = event.get("event")
+    found = Open(run)
+    for event in report.events(run):
+        found.add(event)
+    return found.live(now)
+
+
+class Open:
+    """The agent sessions that a run's events leave open, from its events in turn: live() says which
+    of them run now. wf ui keeps one for each run, and adds to it only the events that came since its
+    last refresh."""
+
+    def __init__(self, run: Run):
+        self.run = run
+        self.found: dict[tuple, dict] = {}
+
+    def add(self, event: dict) -> None:
+        kind, found = event.get("event"), self.found
         key = (event.get("node"), event.get("pass"), event.get("index"), event.get("attempt"))
         if kind == "session_started":
             found[key] = {
-                "run": run.id, "node": where(event), "pass": event.get("pass"), "index": event.get("index"),
+                "run": self.run.id, "node": where(event), "pass": event.get("pass"), "index": event.get("index"),
                 "attempt": event.get("attempt"), "harness": event.get("harness"), "model": event.get("model"),
                 "started": event.get("time"), "last_tool": None, "_pid": event.get("pid"), "_seen": event.get("time"),
-                "transcript": str(run.dir / event["log"]) if event.get("log") else None,
+                "transcript": str(self.run.dir / event["log"]) if event.get("log") else None,
             }
         elif kind == "session_ended":
             found.pop(key, None)
@@ -65,22 +76,29 @@ def sessions(run: Run, now: float | None = None, events: list[dict] | None = Non
         elif kind in _ENDS:
             for ended in [k for k in found if _ends(event, k)]:
                 del found[ended]
-    live = []
-    for session in found.values():
-        if driver is not None and session["_pid"] is not None and session["_pid"] != driver:
-            continue  # left open by a process that no longer drives the run
-        seen = timestamp(session.pop("_seen"))
-        session.pop("_pid")
-        transcript = Path(session["transcript"]) if session["transcript"] else None
-        if transcript is not None:
-            try:
-                seen = max(seen, transcript.stat().st_mtime)
-            except OSError:
-                pass
-            session["instruction"] = str(transcript.parent / "instruction.md")
-        session["quiet_s"] = max(round(now - seen), 0)
-        live.append(session)
-    return live
+
+    def live(self, now: float | None = None) -> list[dict]:
+        """The open sessions that run now, oldest first: the process that started each one still drives the run."""
+        if not self.run.driven():
+            return []
+        driver = _driver(self.run)
+        now = time.time() if now is None else now
+        live = []
+        for session in map(dict, self.found.values()):
+            if driver is not None and session["_pid"] is not None and session["_pid"] != driver:
+                continue  # left open by a process that no longer drives the run
+            seen = timestamp(session.pop("_seen"))
+            session.pop("_pid")
+            transcript = Path(session["transcript"]) if session["transcript"] else None
+            if transcript is not None:
+                try:
+                    seen = max(seen, transcript.stat().st_mtime)
+                except OSError:
+                    pass
+                session["instruction"] = str(transcript.parent / "instruction.md")
+            session["quiet_s"] = max(round(now - seen), 0)
+            live.append(session)
+        return live
 
 
 def _ends(event: dict, key: tuple) -> bool:

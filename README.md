@@ -81,7 +81,8 @@ The `wf status` line above is for a run of `implement.yaml` with no earlier fini
 `wf ui` is a small web page that wf serves on your machine only.
 It lists the runs of the repo.
 For each run it draws the workflow graph, with the state of each step.
-It also shows the progress, the numbers of `wf report`, the live events, and each session's transcript and instruction.
+It also shows the progress, the numbers of `wf report` for each step with its state, the live events, and each session's transcript and instruction.
+A step that runs shows what it has done so far: its attempts, its time, and its tokens and cost.
 It gets new data on its own: the run every 2 seconds, its events every second, and the list of runs every 5 seconds.
 It needs no build step and no other service.
 The address that `wf ui` prints holds a key, so other programs and users on the machine can't read the runs through it.
