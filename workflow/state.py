@@ -207,8 +207,8 @@ class Progress:
     def follow_up(self, elapsed_s: float) -> None:
         """Take in the request that `wf continue` gave a run that succeeded: a new pass of the run, from the
         nodes that take the request (scheduler.follow_up_targets, which `to` keeps). Every node they can lead to
-        reads none until it runs again. Without `follow_up`, a node that a run starts in an earlier step than the
-        node that takes the request (scheduler.started_before) keeps its output. So the node that takes the request
+        reads none until it runs again. Without `follow_up`, a node that a run can reach before the node that
+        takes the request (scheduler.reached_before) keeps its output. So the node that takes the request
         finds the outputs of its `needs` and of the routes before it, as on its first pass. The others keep their
         outputs. Routes count from zero again, the limits count from `from`, and the next pass of a
         `session: continue` node continues its last session."""
@@ -220,7 +220,7 @@ class Progress:
         self.s["taken"] = {}
         again = self.topo.reachable(targets)
         if self.wf.follow_up is None:
-            again -= set().union(*(scheduler.started_before(self.topo, node) for node in targets))
+            again -= set().union(*(scheduler.reached_before(self.topo, node) for node in targets))
         for node in again:
             self.s["outputs"].pop(node, None)
             self.s["errors"].pop(node, None)

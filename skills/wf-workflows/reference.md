@@ -296,7 +296,8 @@ nodes:
 
 - With `follow_up`, each node that the follow-up can lead to reads `none` until it runs again.
   So its first-pass template works again.
-- Without `follow_up`, a node that starts in an earlier step than the node that takes the request keeps its output.
+- Without `follow_up`, a node that a run can reach before the node that takes the request keeps its output.
+  A path from `start` leads to such a node without passing through the node that takes the request.
   So the node that takes the request finds the outputs of its `needs`, and of the nodes that the routes before it chose.
   A loop that leads back to these nodes doesn't change this.
   Each other node that the follow-up can lead to reads `none` until it runs again.

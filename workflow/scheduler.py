@@ -20,7 +20,7 @@ The rules, in the order a run uses them:
 follow_up_targets() uses them to say where `wf continue` sends a follow-up
 request in a workflow without `follow_up`: to the agent node with `edit` or
 `full` access that a run starts first (first_starts). That follow-up keeps the
-outputs of the nodes that start before that node (started_before).
+outputs of the nodes that a run can reach before that node (reached_before).
 """
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -187,8 +187,7 @@ def first_starts(topo: Topology) -> dict[str, int]:
     return found
 
 
-def started_before(topo: Topology, node: str) -> set[str]:
-    """The nodes that the run of first_starts() starts in an earlier step than `node`. That run finishes each
-    of them before `node` starts, so on its first pass `node` finds their outputs."""
-    step = first_starts(topo)
-    return {other for other, at in step.items() if node in step and at < step[node]}
+def reached_before(topo: Topology, node: str) -> set[str]:
+    """The nodes that a run can reach before `node`: those that a path from start leads to without passing
+    through `node`. On its first pass, `node` can find only their outputs."""
+    return topo.reachable(topo.successors[START], avoiding=node)

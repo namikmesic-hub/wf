@@ -703,6 +703,41 @@ def test_a_follow_up_keeps_the_output_of_the_route_that_the_run_took_before_its_
     assert sorted(p.name for p in (run.dir / "nodes" / "plan_b").iterdir()) == ["1", "2", "3"]
 
 
+def test_a_follow_up_keeps_the_output_of_a_planner_that_a_route_chose_before_its_node(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 3)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("planned.yaml", """
+        version: 1
+        name: planned
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {size: {type: string}}}
+        nodes:
+          triage:
+            needs: [start]
+            command: "echo {{ start.size | quote }}"
+            routes: [{when: "triage.stdout | trim == 'big'", to: plan}, {to: implement}]
+          plan: {command: "echo step one", routes: [{to: implement}]}
+          implement:
+            access: edit
+            max_parallel: 1
+            for_each: "[plan.stdout] if plan else []"
+            instruction: "Build {{ item | trim }}"
+          review:
+            needs: [implement]
+            command: "echo done"
+            routes: [{when: "review.stdout | trim == 'again'", to: plan, max: 1}, {to: end}]
+        end: {output: {}}
+    """)
+    assert validate.check("planned.yaml").problems == []
+    assert cli.main(["run", "planned.yaml", "size=big"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    # implement ran after plan in the run, so its pass in the follow-up has plan's item and the request
+    (sent,) = fake.sent[1:]
+    assert sent.startswith(f"Build step one\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag\n\n")
+    assert sorted(p.name for p in (run.dir / "nodes" / "plan").iterdir()) == ["1"]
+
+
 def test_the_request_goes_to_the_first_pass_with_a_job_when_a_for_each_pass_has_no_items(repo, monkeypatch, capsys):
     fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 4)])
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
