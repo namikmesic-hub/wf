@@ -407,7 +407,7 @@ def test_a_read_only_agent_reads_and_searches_only_inside_its_workspace(repo, mo
     read, home, escape, listed, _ = [e["result"] for e in entries(log, "tool_result")]
     assert (read["isError"], read["content"][0]["text"]) == (False, "     1\tThe secret word is: quince")
     for refused in (home, escape):
-        assert refused["isError"] and "is outside the workspace and the folders your instruction names" in refused["content"][0]["text"]
+        assert refused["isError"] and "is outside the workspace and the files and folders your instruction names" in refused["content"][0]["text"]
     assert listed["content"][0]["text"] == "notes.txt"
 
 
@@ -444,6 +444,64 @@ def test_a_folder_of_wfs_that_the_instruction_names_is_readable_too(repo, monkey
     ask, other = sorted(fake.specs, key=lambda spec: spec.node)
     assert [path.resolve() for path in ask.read_roots] == [run_folder().resolve()]
     assert [path.resolve() for path in other.read_roots] == [Path.cwd().resolve()]  # the repo, ask's workspace
+
+
+def test_a_file_or_folder_that_the_instruction_names_is_readable_too(repo, monkeypatch):
+    from fakes import Fake, submit
+    from workflow import harnesses
+    refs = repo / "refs"
+    (refs / "clone" / "src").mkdir(parents=True)
+    (refs / "report.md").write_text("# Report\n")
+    (refs / "clone" / "src" / "a.ts").write_text("export {}\n")
+    (refs / "other.md").write_text("not named\n")
+    fake = Fake("cursor", submit({"summary": "done"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "cursor", fake.factory)
+    named = (f"Read {refs}/report.md, then the clone at `{refs}/clone`. Start at {refs}/clone/src/a.ts:12-30. "
+             f"Skip {refs}/missing.md, ~/, {Path.home()} and /.")
+    Path("flow.yaml").write_text(dedent(f"""
+        version: 1
+        name: cu
+        defaults: {{harness: cursor, harnesses: {{cursor: {{model: composer-2.5}}}}}}
+        start: {{input: {{}}}}
+        nodes:
+          ask: {{needs: [start], instruction: {json.dumps(named)}}}
+        end: {{output: {{}}}}
+        """))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    (spec,) = fake.specs
+    assert [path.resolve() for path in spec.read_roots] == [(refs / "report.md").resolve(), (refs / "clone").resolve()]
+
+
+def test_a_quoted_file_or_folder_whose_path_has_spaces_is_readable_too(repo, monkeypatch):
+    from fakes import Fake, submit
+    from workflow import harnesses
+    from workflow.harnesses import files_tool
+    refs = repo / "refs"
+    app, notes = refs / "Visual Studio Code.app", refs / "my notes"
+    (app / "Contents").mkdir(parents=True)
+    notes.mkdir()
+    (notes / "report one.md").write_text("# Report\n")
+    (refs / "plain.md").write_text("named without quotes\n")
+    fake = Fake("cursor", submit({"summary": "done"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "cursor", fake.factory)
+    named = f"List \"{app}\", read `{notes}/report one.md:1-3`, and see '{refs}/plain.md as well'."
+    Path("flow.yaml").write_text(dedent(f"""
+        version: 1
+        name: cu
+        defaults: {{harness: cursor, harnesses: {{cursor: {{model: composer-2.5}}}}}}
+        start: {{input: {{}}}}
+        nodes:
+          ask: {{needs: [start], instruction: {json.dumps(named)}}}
+        end: {{output: {{}}}}
+        """))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    (spec,) = fake.specs
+    assert [path.resolve() for path in spec.read_roots] == [
+        app.resolve(), (notes / "report one.md").resolve(), (refs / "plain.md").resolve()]
+    listed, is_error = files_tool.run("list_dir", spec.cwd, spec.read_roots, {"path": str(app)})
+    assert not is_error and "Contents/" in listed
+    read, is_error = files_tool.run("read_file", spec.cwd, spec.read_roots, {"path": str(notes / "report one.md")})
+    assert not is_error and "# Report" in read
 
 
 def test_a_continued_pass_may_read_what_its_own_instruction_names(repo, monkeypatch):
@@ -597,6 +655,36 @@ def test_a_message_that_cursor_declines_late_goes_back_to_the_runner_for_its_nex
     assert turn == "Use the v2 API"  # the runner sends it as a turn, before any reminder, or with none left
     lines = [json.loads(line) for line in (tmp_path / "attempt-1.log").read_text().splitlines()]
     assert [line["status"] for line in lines if line["kind"] == "steer"] == ["queued", "delivered"]
+
+
+def test_a_message_that_cursor_declines_late_goes_before_a_later_one_in_the_next_turn(tmp_path):
+    import asyncio
+    from workflow import schemas, steer
+    from workflow.harnesses import cursor, remote
+    from workflow.harnesses.base import SessionSpec, TurnEnd
+    from workflow.output_tool import ResultTool
+
+    async def main():
+        spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="m", effort=None,
+                           tool=ResultTool(schemas.object_schema({})), log=tmp_path / "attempt-1.log", emit=lambda e: None)
+        host = StubHost()
+        session = remote.RemoteSession(cursor.Cursor(), host, spec)
+        host.session, session.session, session.turn = session, "ses_a", "trn_0"
+        live = steer.Live(spec, 1, "cursor", session)
+        live.start()
+        first = await live.take(steer.Message("st_1", "Use API v1"))
+        session.events.put_nowait({"kind": "steer.status", "turn": "trn_0", "data": {"id": "st_1", "status": "declined"}})
+        session.turn = None
+        second = await live.take(steer.Message("st_2", "Correction: use API v2"))  # between turns: kept by the runner
+        turn = await live.next_turn()
+        live.sent(TurnEnd("done"))
+        await live.stop()
+        live.end()
+        return first, second, turn
+
+    first, second, turn = asyncio.run(main())
+    assert (first["status"], second["status"]) == ("queued", "queued")
+    assert turn == "Use API v1\n\nCorrection: use API v2"  # the user's correction stays last
 
 
 def test_a_message_that_cursor_never_answers_for_is_unconfirmed_when_the_session_closes(tmp_path):

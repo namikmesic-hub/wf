@@ -1,5 +1,5 @@
 """wf's file tools for read-only agents on Cursor's SDK (files_tool.py): they read and search only
-the workspace and the folders the step's instruction names."""
+the workspace and the files and folders the step's instruction names."""
 
 import asyncio
 import os
@@ -37,7 +37,7 @@ def test_read_file_numbers_lines_and_reads_part_of_a_file(workspace):
 @pytest.mark.parametrize("path", ["../private/secret.txt", "{tmp}/private/secret.txt", "~", "/", "/Users"])
 def test_a_path_outside_the_workspace_is_refused(workspace, path):
     text, is_error = call("read_file", workspace, path=path.format(tmp=workspace.parent))
-    assert is_error and "is outside the workspace and the folders your instruction names" in text
+    assert is_error and "is outside the workspace and the files and folders your instruction names" in text
 
 
 def test_a_search_of_the_home_folder_is_refused_before_it_walks_anything(workspace, monkeypatch):
@@ -65,6 +65,15 @@ def test_a_folder_the_instruction_names_can_be_read(workspace):
     text, is_error = call("search_files", workspace, roots=[other], pattern="secret", path=str(other))
     assert not is_error and text == f"{other / 'secret.txt'}:1:quince is the secret"
     assert call("read_file", workspace, roots=[other], path=str(other / "secret.txt"))[1] is False
+
+
+def test_a_file_the_instruction_names_can_be_read_and_the_files_beside_it_cannot(workspace):
+    named = workspace.parent / "private" / "secret.txt"
+    (named.parent / "other.txt").write_text("not named\n")
+    assert call("read_file", workspace, roots=[named], path=str(named)) == ("     1\tquince is the secret", False)
+    assert call("search_files", workspace, roots=[named], pattern="quince", path=str(named))[1] is False
+    assert call("read_file", workspace, roots=[named], path=str(named.parent / "other.txt"))[1] is True
+    assert call("list_dir", workspace, roots=[named], path=str(named.parent))[1] is True
 
 
 def test_search_files_finds_lines_and_paths(workspace):

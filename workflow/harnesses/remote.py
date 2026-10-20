@@ -23,7 +23,7 @@ How the operations map onto base.py's interfaces:
   submit_result, the runner's `git` at read-only, and the node's wf tools, each of kind `client`:
   wf keeps running them, and the peer only offers them to the agent and passes each call on.
   A harness with `file_tools` also gives a read-only session wf's file tools (files_tool.py),
-  which read only the workspace and the folders the instruction names, and its peer then offers
+  which read only the workspace and the files and folders the instruction names, and its peer then offers
   none of the runtime's own.
 - Session.send() is turn.start, which the peer answers at once with the turn's id. Events follow:
   turn.text, turn.tool and turn.usage, and then turn.ended, which ends send().

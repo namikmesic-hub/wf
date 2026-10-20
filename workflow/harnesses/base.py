@@ -108,7 +108,7 @@ class SessionSpec:
     tools: list["ToolServer"] = field(default_factory=list)  # wf tools the agent may call, besides submit_result
     only_wf_tools: bool = False  # the node lists `tools`: no other MCP servers or connectors, whatever the access
     project_instructions: bool = True  # False: the repo's CLAUDE.md, AGENTS.md and rules stay out of the session
-    read_roots: list[Path] = field(default_factory=list)  # wf's folders the instruction names, which the agent may read too
+    read_roots: list[Path] = field(default_factory=list)  # the files and folders the instruction names, which the agent may read too
     trace: Recorder = field(default_factory=Recorder)  # the agent's text and tool calls, for the run's trace
 
 

@@ -26,7 +26,7 @@ key makes Cursor unavailable, and the message says what to do (FIX).
 
 Access levels, as the host maps them (cursor_host/src/cursor.ts):
 - read-only: none of Cursor's tools that read files or run commands. wf's file tools
-  (files_tool.py) and its `git` tool read only the workspace and the folders of wf's that the
+  (files_tool.py) and its `git` tool read only the workspace and the files and folders that the
   instruction names, since Cursor's own search tools take any folder, the home folder too.
   Cursor's sandbox is on, and no MCP server but the session's own tools is offered.
 - edit: through cursor-agent's ACP (ON_ACP), whose answer to each request keeps writes in the

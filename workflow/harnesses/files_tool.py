@@ -12,8 +12,8 @@ Their names differ from Cursor's own tools (read, grep, glob, ls), so a call of 
 never taken for one of these.
 
 A path is relative to the workspace, or absolute. Either way it must lead into one of the
-`roots`: the workspace, and the folders of wf's that the step's instruction names
-(SessionSpec.read_roots). A path that leads elsewhere, also through a symlink, is refused, and a
+`roots`: the workspace, and the files and folders that the step's instruction names
+(SessionSpec.read_roots, nodes.py). A path that leads elsewhere, also through a symlink, is refused, and a
 search follows no symlink out of them. A search lists the files the way git does (tracked and
 untracked, without what .gitignore leaves out), or walks the folder when git lists none there,
 skipping .git. Every answer stops at LIMIT characters, and a search at MAX_FILES files.
@@ -49,23 +49,24 @@ MAX_BYTES = 2_000_000  # a bigger file isn't searched
 MAX_READ = 20_000_000  # nor read
 LINES = 2_000  # lines read_file returns when the call gives no limit
 SEARCH_SECONDS = 30
-WHERE = "a path relative to the workspace, or an absolute path inside it or inside a folder your instruction names"
+WHERE = ("A path is relative to the workspace, or absolute. "
+         "It must lead into the workspace, or to a file or into a folder that your instruction names.")
 
 TOOLS = {
     "read_file": ("Read a text file. Lines come numbered. Give `offset` (the first line, from 1) and `limit` "
-                  f"(how many lines, {LINES} by default) to read part of a long file. The path is {WHERE}.",
+                  f"(how many lines, {LINES} by default) to read part of a long file. {WHERE}",
                   {"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 1},
                    "limit": {"type": "integer", "minimum": 1}}, ["path"]),
-    "search_files": ("Search files for a regular expression (Python syntax). Gives path:line:text for each match, "
-             "or only the paths with `files_only`. `path` is a file or a folder to search under "
-             f"(the workspace by default), and `glob` keeps only the files whose path matches it. The path is {WHERE}.",
+    "search_files": ("Search files for a regular expression (Python syntax). It gives path:line:text for each match, "
+             "or only the paths with `files_only`. Give `path` to search one file, or the files under a folder "
+             f"(the workspace by default). Give `glob` to keep only the files whose path matches it. {WHERE}",
              {"pattern": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"},
               "case_insensitive": {"type": "boolean"}, "files_only": {"type": "boolean"}}, ["pattern"]),
     "find_files": ("List the files under a folder (the workspace by default) whose path relative to it matches "
-             f"a glob pattern, such as **/*.py or src/*.ts, where * stays within one folder and ** crosses "
-             f"folders. A pattern without / matches file names at any depth. The folder is {WHERE}.",
+             "a glob pattern, such as **/*.py or src/*.ts. In a pattern, * stays within one folder and ** crosses "
+             f"folders. A pattern without / matches file names at any depth. {WHERE}",
              {"pattern": {"type": "string"}, "path": {"type": "string"}}, ["pattern"]),
-    "list_dir": (f"List a folder's entries (the workspace by default). Folders end with /. The folder is {WHERE}.",
+    "list_dir": (f"List a folder's entries (the workspace by default). Folders end with /. {WHERE}",
                  {"path": {"type": "string"}}, []),
 }
 NAMES = tuple(TOOLS)
@@ -85,7 +86,7 @@ class _Refused(Exception):
 
 
 def run(name: str, cwd: Path, roots: list[Path], args: object) -> tuple[str, bool]:
-    """Returns (text for the agent, is_error). `roots` are the folders besides `cwd` it may read.
+    """Returns (text for the agent, is_error). `roots` are the files and folders besides `cwd` it may read.
     In an event loop, use run_async()."""
     if name == "search_files":
         return asyncio.run(run_async(name, cwd, roots, args))
@@ -126,7 +127,7 @@ def _target(cwd: Path, allowed: list[Path], given: object, default: str | None =
     path = Path(os.path.expanduser(given))
     resolved = (path if path.is_absolute() else cwd / path).resolve()
     if not any(resolved.is_relative_to(root) for root in allowed):
-        raise _Refused(f"`{given}` is outside the workspace and the folders your instruction names, "
+        raise _Refused(f"`{given}` is outside the workspace and the files and folders your instruction names, "
                        "so it can't be read here")
     if not resolved.exists():
         raise _Refused(f"`{given}` doesn't exist")
