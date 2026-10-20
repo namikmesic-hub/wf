@@ -34,6 +34,7 @@ wf validate wf-examples/implement.yaml   # check the wiring before anything runs
 wf graph wf-examples/implement.yaml      # see it as a Mermaid diagram
 wf run wf-examples/implement.yaml task="Add a --version flag"
 wf report --workflow implement           # what the runs did, per step
+wf trace <run-id> --var review.blocking_issues   # what one run's templates read, pass by pass
 ```
 
 `wf run <file> --dry-run <script.yaml>` walks a workflow with scripted agent

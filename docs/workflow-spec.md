@@ -134,6 +134,7 @@ end:
 | `wf graph <file>` | Prints the workflow as a Mermaid diagram. |
 | `wf run <file> [name=value ...]` | Validates, then runs the workflow. Inputs come from `name=value` pairs (a value that parses as JSON is used as JSON), from `--input file.json`, or from prompts for anything missing. Prints progress, then the end output. |
 | `wf retry <run-id> [--limit NAME=VALUE]` | Continues a failed or paused run from its last checkpoint, or one a limit stopped (with a bigger limit). Finished nodes and items aren't rerun. |
+| `wf trace <run-id> [--node N] [--pass P] [--field F] [--var PATH] [--json]` | Shows what one run read, decided and did, from its trace: how each template rendered, why each route was taken, each attempt, turn and tool call. See [The trace](#the-trace). |
 | `wf tools list` | Lists the tools agent nodes can use (see [docs/tools.md](tools.md)), how each signs in, and whether it's set up. |
 | `wf tools <name> setup [--write]` | Signs in to a tool once, in the browser or with a pasted token, and keeps the secret in the macOS Keychain. It asks Slack and Linear for read scopes only, unless `--write` is given. |
 | `wf tools <name> doctor`, `wf tools doctor` | Checks that a tool's sign-in is there and still good, and makes one harmless read call. Prints pass or fail with the next step. |
@@ -359,14 +360,14 @@ The tests of the other rows are in `tests/test_validate.py`, unless another file
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| A node sets `project_instructions`, or `defaults` does | The node's own value wins, then `defaults`, then `true`. Only `true` or `false` is accepted. | `workflow/spec.py:194`, `workflow/spec.py:296`, `workflow/nodes.py:411` | `tests/test_agents.py::test_project_instructions_reach_the_session_from_the_node_or_defaults`, `test_project_instructions_takes_a_boolean_on_a_node_or_in_defaults` |
+| A node sets `project_instructions`, or `defaults` does | The node's own value wins, then `defaults`, then `true`. Only `true` or `false` is accepted. | `workflow/spec.py:194`, `workflow/spec.py:298`, `workflow/nodes.py:459` | `tests/test_agents.py::test_project_instructions_reach_the_session_from_the_node_or_defaults`, `test_project_instructions_takes_a_boolean_on_a_node_or_in_defaults` |
 | `false` on Claude Code | No setting source loads: no `CLAUDE.md` or `AGENTS.md` at any level, no `.claude/rules`, no `.claude/settings.json`, and no skills in `.claude/skills`. Claude Code's own system prompt stays. | `workflow/harnesses/claude_code.py:137` | `test_without_project_instructions_no_setting_source_loads`, `test_a_real_node_without_project_instructions_does_not_get_the_repos_claude_md` (`-m harness`) |
-| `false` on Codex | The thread gets `project_doc_max_bytes: 0`, so no `AGENTS.md` and no fallback file such as `CLAUDE.md`. Each skill that `skills/list` finds in the repo is switched off in the thread's config. | `workflow/harnesses/codex.py:170`, `workflow/harnesses/codex.py:205` | `test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill` |
-| `false` on Codex, and `skills/list` doesn't answer | Codex is unavailable for the attempt, so the next harness in the node's list runs. | `workflow/harnesses/codex.py:211` | `test_a_codex_that_does_not_list_its_skills_is_unavailable_to_a_node_without_project_instructions` |
-| `false` on Cursor | cursor-agent starts in a new empty folder in the system's temp folder, because it reads rules, `AGENTS.md`, `CLAUDE.md` and skills from the folder it starts in, the folders above it, and the repo it is in. `session/new` still gives the workspace, where the agent reads, edits and runs commands. The folder goes with the session. | `workflow/harnesses/cursor.py:291`, `workflow/harnesses/cursor.py:424` | `test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace`, `test_by_default_cursor_agent_starts_in_the_workspace` |
-| `false` on Cursor, and the temp folder is in a git repo, or a folder above it holds `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `.cursorrules`, `.cursor/rules`, or a `skills` folder in `.cursor`, `.claude`, `.codex`, `.grok` or `.agents`, as when `TMPDIR` is in a repo | Cursor is unavailable for the attempt, and the message names what it found, so the next harness in the node's list runs. The skills folders in your home folder don't count, because they load wherever Cursor starts. | `workflow/harnesses/cursor.py:438` | `test_a_temp_folder_under_what_cursor_loads_makes_it_unavailable_without_project_instructions`, `test_your_home_folders_skills_above_the_temp_folder_do_not_count` |
-| `false` where a harness still loads a file | `wf validate` warns once for each harness, where the setting is. On Codex, your global `~/.codex/AGENTS.md` and the skills in your home folder stay. On Cursor, your account's User Rules and the skills in your home folder stay, and so do the repo's hooks in `.cursor/hooks.json` and `.claude/settings.json`. | `workflow/validate.py:622`, `workflow/harnesses/__init__.py:51` | `test_project_instructions_off_warns_once_per_harness_that_keeps_a_file` |
-| `false`, and a template picks the harness | `wf validate` can't tell which harness runs, so it warns about each harness that keeps a file. | `workflow/validate.py:628` | `test_project_instructions_off_warns_about_every_harness_a_template_could_pick` |
+| `false` on Codex | The thread gets `project_doc_max_bytes: 0`, so no `AGENTS.md` and no fallback file such as `CLAUDE.md`. Each skill that `skills/list` finds in the repo is switched off in the thread's config. | `workflow/harnesses/codex.py:171`, `workflow/harnesses/codex.py:206` | `test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill` |
+| `false` on Codex, and `skills/list` doesn't answer | Codex is unavailable for the attempt, so the next harness in the node's list runs. | `workflow/harnesses/codex.py:212` | `test_a_codex_that_does_not_list_its_skills_is_unavailable_to_a_node_without_project_instructions` |
+| `false` on Cursor | cursor-agent starts in a new empty folder in the system's temp folder, because it reads rules, `AGENTS.md`, `CLAUDE.md` and skills from the folder it starts in, the folders above it, and the repo it is in. `session/new` still gives the workspace, where the agent reads, edits and runs commands. The folder goes with the session. | `workflow/harnesses/cursor.py:291`, `workflow/harnesses/cursor.py:440` | `test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace`, `test_by_default_cursor_agent_starts_in_the_workspace` |
+| `false` on Cursor, and the temp folder is in a git repo, or a folder above it holds `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `.cursorrules`, `.cursor/rules`, or a `skills` folder in `.cursor`, `.claude`, `.codex`, `.grok` or `.agents`, as when `TMPDIR` is in a repo | Cursor is unavailable for the attempt, and the message names what it found, so the next harness in the node's list runs. The skills folders in your home folder don't count, because they load wherever Cursor starts. | `workflow/harnesses/cursor.py:454` | `test_a_temp_folder_under_what_cursor_loads_makes_it_unavailable_without_project_instructions`, `test_your_home_folders_skills_above_the_temp_folder_do_not_count` |
+| `false` where a harness still loads a file | `wf validate` warns once for each harness, where the setting is. On Codex, your global `~/.codex/AGENTS.md` and the skills in your home folder stay. On Cursor, your account's User Rules and the skills in your home folder stay, and so do the repo's hooks in `.cursor/hooks.json` and `.claude/settings.json`. | `workflow/validate.py:635`, `workflow/harnesses/__init__.py:51` | `test_project_instructions_off_warns_once_per_harness_that_keeps_a_file` |
+| `false`, and a template picks the harness | `wf validate` can't tell which harness runs, so it warns about each harness that keeps a file. | `workflow/validate.py:641` | `test_project_instructions_off_warns_about_every_harness_a_template_could_pick` |
 
 On Cursor, `false` has a cost: Cursor's semantic code search and lint diagnostics don't cover the workspace.
 Claude Code loads no skill from your home folder.
@@ -383,11 +384,11 @@ The tests named below are in `tests/test_tools.py`, unless another file is named
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| A node with `tools` can run on Claude Code or Cursor at `edit` or `full`, or on Codex at `full`, and doesn't set `tools_with_shell: true` | `wf validate` errors, naming each such harness and the access level, so the run doesn't start. | `workflow/validate.py:618`, `workflow/harnesses/__init__.py:49` | `test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in`, `test_a_harness_list_names_each_harness_whose_shell_reaches_the_keychain` |
-| A template picks such a harness at run time, which `wf validate` can't see, and the node doesn't set `tools_with_shell: true` | The run refuses that harness, and the node fails without a session. | `workflow/nodes.py:379` | `tests/test_tool_sessions.py::test_a_run_refuses_a_harness_whose_shell_reaches_the_keychain_without_the_opt_in` |
-| The node sets `tools_with_shell: true` | `wf validate` warns, naming the node and its tools: its agent could read every stored sign-in. The run attaches the tools. | `workflow/validate.py:615` | `test_a_node_that_opts_in_gets_a_warning_naming_it_and_its_tools`, `tests/test_tool_sessions.py::test_a_run_lets_a_node_that_opted_in_have_tools_and_a_shell` |
+| A node with `tools` can run on Claude Code or Cursor at `edit` or `full`, or on Codex at `full`, and doesn't set `tools_with_shell: true` | `wf validate` errors, naming each such harness and the access level, so the run doesn't start. | `workflow/validate.py:631`, `workflow/harnesses/__init__.py:49` | `test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in`, `test_a_harness_list_names_each_harness_whose_shell_reaches_the_keychain` |
+| A template picks such a harness at run time, which `wf validate` can't see, and the node doesn't set `tools_with_shell: true` | The run refuses that harness, and the node fails without a session. | `workflow/nodes.py:426` | `tests/test_tool_sessions.py::test_a_run_refuses_a_harness_whose_shell_reaches_the_keychain_without_the_opt_in` |
+| The node sets `tools_with_shell: true` | `wf validate` warns, naming the node and its tools: its agent could read every stored sign-in. The run attaches the tools. | `workflow/validate.py:628` | `test_a_node_that_opts_in_gets_a_warning_naming_it_and_its_tools`, `tests/test_tool_sessions.py::test_a_run_lets_a_node_that_opted_in_have_tools_and_a_shell` |
 | A node with `tools` is read-only on any harness, or on Codex at `edit` | It needs no opt-in: its commands can't reach the Keychain. | `workflow/harnesses/__init__.py:49` | `test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in` |
-| A node has no tools, `tools: []` included | `wf validate` says nothing about its shell. | `workflow/validate.py:611` | `test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools` |
+| A node has no tools, `tools: []` included | `wf validate` says nothing about its shell. | `workflow/validate.py:624` | `test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools` |
 | `tools_with_shell` isn't `true` or `false`, or is in `defaults` | `wf validate` errors: the field takes only a boolean, and only on the node, so that each such node says so itself. | `workflow/spec.py:193` | `test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools`, `test_tools_with_shell_goes_on_the_node_not_in_defaults` |
 
 #### Command nodes
@@ -396,6 +397,7 @@ The tests named below are in `tests/test_tools.py`, unless another file is named
 |---|---|---|
 | `command` | required | A template, run with `bash -c` in the workspace. |
 | `env` | none | Extra environment variables. Values are templates. |
+| `secret_env` | none | Names in `env` whose values are secret. The run's trace never shows them, nor the values they come from. See [The trace](#the-trace). |
 | `check` | `true` | A non-zero exit fails the node. Set `false` to route on `exit_code` instead. |
 
 The output is fixed: `exit_code` (integer), `stdout` and `stderr` (the last 20,000
@@ -515,7 +517,7 @@ different limit.
 Text is evaluated with sandboxed Jinja, in two ways:
 
 - **Templates** use `{{ }}` and `{% %}`. Fields: `instruction`, `human`, `command`, `env`,
-  `with`, `base`, `harness`, `model`, `effort`, and end `value`s.
+  `with`, `base`, `branch`, `harness`, `model`, `effort`, and end `value`s.
 - **Expressions** are written without braces. Fields: `when` and `for_each`.
   Example: `review.approved and tests.exit_code == 0`.
 
@@ -674,22 +676,22 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | Runs of the user that use the same `~/.wf` | They share one set of slots, in `~/.wf/agent-slots/`. Runs with another `WF_HOME` have slots of their own. | `workflow/capacity.py:54` | `test_two_runs_in_separate_processes_share_the_cap`, `test_each_wf_home_has_its_own_slots`, `test_a_slot_file_names_its_holder` |
-| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:493` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
+| Neither `WF_MAX_AGENTS` nor `max_agents` is set | There is no cap. No attempt waits, and no slot file is made. | `workflow/nodes.py:548` | `test_without_a_cap_nothing_waits_and_no_slot_is_made` |
 | `WF_MAX_AGENTS` is set | It sets the same cap, and wins over `max_agents` in the file, which is still checked. | `workflow/capacity.py:64`, `workflow/capacity.py:66` | `test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home`, `test_a_bad_cap_stops_wf_run_before_the_run_exists` |
-| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf retry` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:69`, `workflow/runner.py:145` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_retry` |
+| The cap isn't a whole number of 1 or more, including `max_agents` with no value | `wf run` and `wf retry` say why and exit 1 before anything runs. | `workflow/capacity.py:78`, `workflow/runner.py:73`, `workflow/runner.py:150` | `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_retry` |
 | `config.yaml` names a setting wf doesn't know, or doesn't hold settings by name | The same. So a misspelt `max_agents` can't quietly mean no cap. | `workflow/settings.py:50` | `test_a_wrong_file_fails_every_read` in `tests/test_settings.py`, `test_a_bad_cap_stops_wf_run_before_the_run_exists`, `test_a_bad_cap_stops_wf_retry` |
-| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:498`, `workflow/nodes.py:516` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
+| An agent attempt starts, and a slot is free | It takes the slot before its session opens, and gives it back when the attempt ends. | `workflow/nodes.py:553`, `workflow/nodes.py:571` | `test_two_runs_in_separate_processes_share_the_cap`, `test_a_slot_file_names_its_holder` |
 | An attempt holds a slot | The slot is the file `~/.wf/agent-slots/<n>`, which the attempt's process locks with `flock`. The file names its holder: pid, run, node and attempt. | `workflow/capacity.py:96`, `workflow/capacity.py:98`, `workflow/capacity.py:107` | `test_a_slot_has_one_holder_at_a_time`, `test_a_slot_file_names_its_holder` |
-| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:277` | `test_a_retry_and_a_fallback_take_a_slot_again` |
-| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:252`, `workflow/nodes.py:493` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
+| A retry, or a fallback to the next harness | It takes a slot again. | `workflow/nodes.py:288` | `test_a_retry_and_a_fallback_take_a_slot_again` |
+| A command node, a human node, a workflow node itself, or a dry run | It takes no slot. The agent nodes inside a workflow node do. | `workflow/nodes.py:262`, `workflow/nodes.py:548` | `test_command_and_human_nodes_take_no_slot`, `test_a_dry_run_takes_no_slot`, `test_an_agent_in_a_sub_workflow_waits_for_a_slot` |
 | Several attempts wait for one slot | Each tries again every `POLL_SECONDS` (0.2 seconds), and the first try after the slot comes free gets it. So they get it one at a time, in an order that is not defined. | `workflow/capacity.py:46`, `workflow/capacity.py:117`, `workflow/capacity.py:120` | `test_a_wait_tries_again_every_0_2_seconds`, `test_attempts_that_wait_for_one_slot_take_it_one_at_a_time` |
-| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:506`, `workflow/nodes.py:279`, `workflow/nodes.py:280` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
-| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:502`, `workflow/nodes.py:512`, `workflow/context.py:153`, `workflow/cli.py:326` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
-| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:510` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_after_wf_retry` |
+| Every slot is taken | The attempt waits. The wait isn't a failure and uses no retry. The `attempt_started` event and the node's `timeout` come once the attempt has its slot. | `workflow/nodes.py:561`, `workflow/nodes.py:290`, `workflow/nodes.py:292` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_retry_and_a_fallback_take_a_slot_again` |
+| An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:557`, `workflow/nodes.py:567`, `workflow/context.py:174`, `workflow/cli.py:338` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
+| A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:117`, `workflow/nodes.py:565` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_after_wf_retry` |
 | A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:98` | `test_a_killed_process_frees_its_slot` |
 | A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:58` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
 | Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. | `workflow/capacity.py:95` | `test_a_smaller_cap_uses_only_the_first_slots` |
-| A `wf run` or `wf retry` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:69`, `workflow/runner.py:145` | `test_wf_run_and_wf_retry_read_the_cap_once_when_they_start` |
+| A `wf run` or `wf retry` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:73`, `workflow/runner.py:150` | `test_wf_run_and_wf_retry_read_the_cap_once_when_they_start` |
 
 ## The output tool
 
@@ -787,19 +789,19 @@ The tests named below are in `tests/test_workspaces.py`.
 |---|---|---|---|
 | The runner commits in a worktree it made | The commit skips every git hook, so its message is only `wf: <node> (<run-id>)`, with no trailers. | `workflow/workspaces.py:188` | `test_the_runners_commit_message_has_no_trailer_even_when_a_hook_would_add_one` |
 | Your git config signs commits (`commit.gpgsign`) | The runner's commit is signed too, with your signing key (`user.signingkey`). | `workflow/workspaces.py:189` | `test_the_runner_signs_its_commits_when_your_git_config_does` |
-| A run may commit: an `edit` or `full` agent works in a worktree the runner made, directly, through a node's workspace or in a sub-workflow | `wf run` and `wf retry` sign a test commit before any agent works. The test commit goes to a temporary object folder, so the repository keeps nothing. | `workflow/runner.py:90`, `workflow/runner.py:189`, `workflow/runner.py:286`, `workflow/workspaces.py:257` | `test_checking_the_key_leaves_nothing_in_the_repository`, `test_an_agent_that_edits_another_nodes_worktree_needs_a_key_that_signs`, `test_an_edit_agent_in_a_sub_workflow_needs_a_key_that_signs_when_it_works_in_a_worktree`, `test_a_run_from_an_unborn_branch_with_a_base_of_its_own_checks_the_key`, `test_a_retried_run_checks_the_key_again_before_any_agent_works`, `test_a_retried_run_checks_the_key_for_an_edit_agent_in_a_sub_workflow`, `test_a_retried_run_without_its_run_json_checks_the_key_where_it_ran` |
-| No agent of the run commits: each `edit` agent works in your checkout, and the others only read | There is no test commit, so a key that can't sign doesn't stop the run. | `workflow/runner.py:277` | `test_a_run_the_runner_makes_no_commits_in_doesnt_check_the_key` |
+| A run may commit: an `edit` or `full` agent works in a worktree the runner made, directly, through a node's workspace or in a sub-workflow | `wf run` and `wf retry` sign a test commit before any agent works. The test commit goes to a temporary object folder, so the repository keeps nothing. | `workflow/runner.py:94`, `workflow/runner.py:194`, `workflow/runner.py:293`, `workflow/workspaces.py:257` | `test_checking_the_key_leaves_nothing_in_the_repository`, `test_an_agent_that_edits_another_nodes_worktree_needs_a_key_that_signs`, `test_an_edit_agent_in_a_sub_workflow_needs_a_key_that_signs_when_it_works_in_a_worktree`, `test_a_run_from_an_unborn_branch_with_a_base_of_its_own_checks_the_key`, `test_a_retried_run_checks_the_key_again_before_any_agent_works`, `test_a_retried_run_checks_the_key_for_an_edit_agent_in_a_sub_workflow`, `test_a_retried_run_without_its_run_json_checks_the_key_where_it_ran` |
+| No agent of the run commits: each `edit` agent works in your checkout, and the others only read | There is no test commit, so a key that can't sign doesn't stop the run. | `workflow/runner.py:284` | `test_a_run_the_runner_makes_no_commits_in_doesnt_check_the_key` |
 | The test commit fails, or isn't signed within 30 seconds (`SIGNING_TIMEOUT`) | The command exits 1 before any agent works. The error says the key needs a touch, a PIN or a passphrase, or doesn't work. It names the fix: a key file (ssh) or a key id (OpenPGP) that needs none, as the repository's `user.signingkey`. | `workflow/workspaces.py:225`, `workflow/workspaces.py:60` | `test_a_run_whose_key_cant_sign_fails_at_its_start_and_says_how_to_fix_it`, `test_a_key_waiting_for_a_touch_fails_the_run_at_its_start_within_the_timeout`, `test_the_fix_for_an_openpgp_key_names_a_key_id` |
 | The repository signs with ssh, and `user.signingkey` is a relative path | The command exits 1 before any agent works, and asks for the key's absolute path. The runner commits in worktrees outside your checkout, where the relative path finds no key. | `workflow/workspaces.py:211` | `test_a_relative_signing_key_fails_the_run_at_its_start` |
 | The signing program asks for a passphrase or a PIN at a terminal | It finds none, because git runs in a session of its own, so signing fails at once. | `workflow/workspaces.py:423` | `test_the_signing_program_has_no_terminal_to_ask_on` |
-| `wf retry` of a run that has ended | There is no test commit. It says how the run ended. | `workflow/runner.py:189` | `test_retrying_a_run_that_succeeded_says_so_without_checking_the_key` |
-| The background process of a detached run fails the test | `status.json` says `failed`, with the error, so `wf wait` reports the cause and not a crash. | `workflow/runner.py:192` | `test_a_detached_run_whose_background_check_fails_records_why` |
+| `wf retry` of a run that has ended | There is no test commit. It says how the run ended. | `workflow/runner.py:194` | `test_retrying_a_run_that_succeeded_says_so_without_checking_the_key` |
+| The background process of a detached run fails the test | `status.json` says `failed`, with the error, so `wf wait` reports the cause and not a crash. | `workflow/runner.py:197` | `test_a_detached_run_whose_background_check_fails_records_why` |
 | The runner's commit fails | The error says that signing failed only after a timeout, or when a signed test commit fails and an unsigned one works. Otherwise it is git's own error, as `git commit failed: ...`. | `workflow/workspaces.py:197`, `workflow/workspaces.py:263` | `test_a_commit_that_cant_be_signed_says_so`, `test_a_commit_that_fails_for_another_reason_doesnt_blame_signing`, `test_a_commit_whose_signing_test_cant_write_either_doesnt_blame_signing` |
-| An agent succeeds, and then the runner's commit fails | The node fails with the attempt that ran, so `wf retry` starts at the next attempt number. | `workflow/nodes.py:464` | `test_a_failed_commit_keeps_the_attempt_number_so_wf_retry_starts_at_the_next_one` |
+| An agent succeeds, and then the runner's commit fails | The node fails with the attempt that ran, so `wf retry` starts at the next attempt number. | `workflow/nodes.py:519` | `test_a_failed_commit_keeps_the_attempt_number_so_wf_retry_starts_at_the_next_one` |
 | wf stops git: after `SIGNING_TIMEOUT`, for a cancelled job, on Ctrl-C, SIGHUP or SIGTERM | Its process group, with the signing program, gets SIGTERM, so git removes its temporary files. Whatever still runs 5 seconds later (`GRACE`) gets SIGKILL. | `workflow/workspaces.py:457`, `workflow/workspaces.py:462` | `test_a_signing_timeout_lets_git_remove_its_temporary_file`, `test_a_signing_program_that_ignores_sigterm_is_killed` |
-| A job is cancelled, for example by a node's `timeout` or Ctrl-C during a run | Its git command stops, and none of its later git commands starts. Its error says it was stopped, not that signing failed. | `workflow/nodes.py:239`, `workflow/workspaces.py:418` | `test_cancelling_a_job_stops_its_git_command_and_the_signing_program`, `test_a_job_cancelled_while_it_waits_for_git_starts_none`, `test_a_stopped_commit_isnt_called_a_signing_failure` |
+| A job is cancelled, for example by a node's `timeout` or Ctrl-C during a run | Its git command stops, and none of its later git commands starts. Its error says it was stopped, not that signing failed. | `workflow/nodes.py:249`, `workflow/workspaces.py:418` | `test_cancelling_a_job_stops_its_git_command_and_the_signing_program`, `test_a_job_cancelled_while_it_waits_for_git_starts_none`, `test_a_stopped_commit_isnt_called_a_signing_failure` |
 | Ctrl-C while git runs in wf's main thread, as in the test before a run | git stops, and wf stops as for any Ctrl-C. | `workflow/workspaces.py:449` | `test_ctrl_c_stops_git_and_the_signing_program` |
-| wf gets SIGHUP (its terminal closed) or SIGTERM | It stops every git command, also one that is just starting, and starts no new one. Then it exits by that signal, as before. SIGKILL can't be handled, so it still leaves git running. | `workflow/cli.py:204`, `workflow/workspaces.py:374`, `workflow/workspaces.py:383` | `test_wf_stops_git_and_the_signing_program_when_its_terminal_closes_or_it_is_killed`, `test_wf_stops_the_runners_commit_and_starts_no_more_git_when_it_is_killed`, `test_a_signal_while_git_starts_still_stops_that_git` |
+| wf gets SIGHUP (its terminal closed) or SIGTERM | It stops every git command, also one that is just starting, and starts no new one. Then it exits by that signal, as before. SIGKILL can't be handled, so it still leaves git running. | `workflow/cli.py:216`, `workflow/workspaces.py:374`, `workflow/workspaces.py:383` | `test_wf_stops_git_and_the_signing_program_when_its_terminal_closes_or_it_is_killed`, `test_wf_stops_the_runners_commit_and_starts_no_more_git_when_it_is_killed`, `test_a_signal_while_git_starts_still_stops_that_git` |
 | SIGHUP is ignored when wf starts, as under `nohup` | It stays ignored. | `workflow/workspaces.py:364` | `test_a_hangup_that_wf_ignores_stays_ignored` |
 
 ## Run folder
@@ -812,12 +814,16 @@ The tests named below are in `tests/test_workspaces.py`.
   output.json                   the end output, once the run succeeds
   status.json                   running | waiting | succeeded | failed | limit
   events.jsonl                  one line per event: node started, finished, route taken, ...
+  trace.jsonl                   one record per line of what the run read, decided and did (see The trace)
+  blobs/                        values too long for a line of the trace, by their sha256
   checkpoints.sqlite            LangGraph checkpoints, used by wf retry
   nodes/<node>/<pass>/          one folder per pass ...
     [<index>/]                  ... and per item
       instruction.md            the rendered instruction (or command, or message)
       output.json
       attempt-<n>.log           harness transcript or command output
+      attempt-<n>.stdout        a command's stdout, whole
+      attempt-<n>.stderr        a command's stderr, whole
 ```
 
 - `.wf/` is added to the repo's `.git/info/exclude`, so it never shows up in `git status`.
@@ -836,6 +842,111 @@ The tests named below are in `tests/test_workspaces.py`.
   `WF_RUNS_DIR=`, which turns the setting off for that command.
 - `wf retry` uses the copies in `workflow/`, so editing the YAML doesn't change a run
   that's already in progress.
+
+### The trace
+
+`trace.jsonl` records each step of a run, so you can debug the run or review it later from the trace alone.
+`events.jsonl` stays as it is, for progress lines and `wf report`.
+Each line is one JSON object.
+wf only adds lines, and never changes one.
+A sub-workflow writes to the trace of its top-level run.
+
+| `kind` | Written when | Holds |
+|---|---|---|
+| `run` | A `wf run` or `wf retry` process starts to drive the run. | `started` or `retried`, the workflow and the input. |
+| `pass` | A node starts a pass. | The node and pass, and for a `for_each` node the number of items. |
+| `job` | A pass of a node, or an item, starts in this process. | The item, and the number of its first attempt. |
+| `render` | wf renders a template or evaluates an expression. | The field, the template, each variable path that it read with its value, and the result or the error. |
+| `routes` | A node chooses its route. | Each route in order: its `when`, the values that it read, its result, and if its `max` was used up. Then the route that the node took. |
+| `attempt` | An attempt starts, before wf opens its session. | The harness, model, effort, access, `web`, workspace and tools, and how the session is to start: `fresh`, `fork` or `load`, with the session that it continues. |
+| `turn` | wf sends the instruction or a reminder. | The text that wf sent. |
+| `message` | The agent writes text. | The text. |
+| `tool_call` | The agent calls a tool: when the harness says that the call starts, and again when it gives more of the arguments. | The tool and all of its arguments. The last record of an id holds all that the harness gave. A call that a timeout stops has one too. |
+| `tool_result` | The tool answers. | All of the answer, and if it is an error. |
+| `submit_result` | The agent calls `submit_result`. | The arguments, and the problems that wf found, or that wf accepted the result. |
+| `turn_end` | The turn of the agent ends. | How the turn ended, and what it used. |
+| `attempt_end` | An attempt ends. | All that `attempt` holds, how the session started and its id, the start and end, how the attempt ended and its usage. For a command, the command, its `env` values, its exit code, and the files with its stdout and stderr. |
+| `job_end` | A job ends. | Its output or its error, or that it waits for a person. |
+| `run_stopped` | The process stops to drive the run. | The status of the run, and its output when it succeeded. |
+
+These fields render: `instruction`, `human`, `command`, `env.<name>`, `base`, `branch`, `harness`, `with.<name>`, `for_each`, `routes[<i>].when` and `end.output.<name>`.
+`model` and `effort` render too, with the harness and the key that sets them.
+
+Each record has an `id`, and the `parent` id that contains it:
+
+```
+run                          the run
+review#2                     pass 2 of review: its pass, job, render, routes and job_end records
+build#1[3]                   item 3 of pass 1 of build
+review#2.a1                  attempt 1 of that pass
+review#2.a1.t2               turn 2 of that attempt: the first reminder
+review#2.a1.t2.c4            tool call 4 of that turn (s1 is a submit_result call, m1 a message)
+end                          the end outputs
+build#1[3].a1/implement#2    pass 2 of implement, in the sub-workflow that attempt 1 of build[3] runs
+```
+
+A record about a node also has `node`, `pass`, `index` for an item, `attempt` and `turn`.
+Inside a sub-workflow it also has `where`, such as `build[3]/`.
+
+A render lists each variable path that the template read while it ran, such as `plan.tasks[0].title`, with the value that the path had.
+A branch of the template that doesn't run reads nothing.
+When a template reads a field inside a list or a map, the render lists the field, and not all of the list or map.
+
+A value of more than 1,000 characters goes to `blobs/<sha256>.txt`, or to `.json` when it isn't text.
+wf writes each such file once, however often the value occurs.
+The record holds `{"$blob": "blobs/<sha256>.txt", "size": ..., "start": ...}` in place of the value.
+
+Secrets don't go into the trace:
+
+- `secret_env` on a command node names the `env` values that are secret.
+  The trace shows `[secret]` in place of such a value.
+  It does the same for the values that the secret comes from: start inputs, fields of node outputs, `for_each` items, and `with` values.
+  The output of a sub-workflow that feeds a secret of its parent is hidden inside the sub-workflow too.
+  An `item` is secret only in the node whose `for_each` gives it.
+- From the time that the run has a secret value, the trace removes its text from each later record, wherever it occurs.
+  It does so for short text too.
+  A secret that only an agent gives is hidden from its `submit_result` call, but not from the tool calls before that call.
+- A `tool_result` of a wf tool holds only the size of the answer, as the transcript of the attempt does.
+  The token of a wf tool never goes into the trace.
+
+When wf can't write the trace, it says so once, and the run continues.
+
+`wf trace <run-id>` reads the trace:
+
+| Command | Shows |
+|---|---|
+| `wf trace <run-id>` | All the records, as an outline: passes, renders, routes, attempts, turns, tool calls and outputs. |
+| `--node <node> --pass <n>` | Only that node and pass. A node is its id, which matches it in each item and sub-workflow, or its path, such as `build[1]/implement`. |
+| `--field <field>` | Each render of the field, with what it read and gave. `routes` shows each route decision. `env` shows each `env.<name>`. |
+| `--var <path>` | The value of a variable path in each render that read it, pass after pass, also when the render read all of the path or a field inside it. |
+| `--json` | The same, as JSON, with each value from `blobs/` read back in full. |
+
+The tests named below are in `tests/test_trace.py`, unless another file is named.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| A run starts, renders, routes, makes attempts, and ends | The trace has a record of each kind, and each `parent` is the id of a record that contains it. | `workflow/trace.py:356` | `test_a_runs_trace_holds_each_kind_of_record_and_its_ids_nest` |
+| A sub-workflow runs | Its records go into the trace of the top-level run, under the id of the attempt that runs it. | `workflow/context.py:92` | `test_a_sub_workflows_records_nest_under_the_attempt_that_runs_it` |
+| A template or expression runs | The render lists each variable path that ran, with its value. A branch that doesn't run reads nothing. A list or map that the template also used itself, such as with `\| length`, is listed with its fields. | `workflow/templates.py:111`, `workflow/templates.py:301` | `test_a_render_reads_each_path_it_used_with_its_value` |
+| A value has more than 1,000 characters, or looks like a reference to a blob | It goes to `blobs/` once, and each record refers to it by its sha256. | `workflow/trace.py:154` | `test_a_large_value_is_stored_once_and_referenced`, `test_wf_trace_reads_only_blobs_of_the_run` |
+| A command node names an `env` value in `secret_env` | The trace shows `[secret]` for it, for the input that it comes from, and for its text in each later record, also after `wf retry`. | `workflow/trace.py:372`, `workflow/runner.py:372` | `test_a_secret_never_enters_the_trace` |
+| The secret value comes from `item` | The trace hides the item in that node only. It also hides the element of the `for_each` list, or all that the `for_each` reads when it isn't a plain path. An index such as `[-1]` counts as any element. | `workflow/trace.py:292` | `test_a_secret_item_is_hidden_whatever_its_for_each_and_only_in_its_node` |
+| The secret value comes from the output of a workflow node, or from its `history` | The sub-workflow hides the end output that gives it, and what that end output reads. All of a node's `history`, or all of `history`, hides each end output. | `workflow/trace.py:264`, `workflow/graph.py:122` | `test_a_secret_that_a_sub_workflow_returns_is_hidden_inside_it_too` |
+| A secret value is short | Its text is removed all the same. | `workflow/trace.py:118` | `test_a_short_secret_is_removed_wherever_it_shows` |
+| A harness reports a `submit_result` call before `submit_result` runs | The `tool_call` hides the secret fields of the result, as the `submit_result` record does. | `workflow/trace.py:535` | `test_a_secret_in_an_agents_result_is_hidden_from_its_harness_record_of_the_call` |
+| `secret_env` names a variable that `env` doesn't set | `wf validate` errors. | `workflow/validate.py:352` | `tests/test_validate.py::test_secret_env_names_only_what_env_sets` |
+| An agent uses a wf tool | The `tool_call` holds the arguments. The `tool_result` holds only the size of the answer, on each harness. | `workflow/harnesses/claude_code.py:235`, `workflow/harnesses/codex.py:313`, `workflow/harnesses/cursor.py:394` | `tests/test_tool_sessions.py::test_claude_code_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned`, `tests/test_tool_sessions.py::test_codex_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned`, `tests/test_tool_sessions.py::test_cursor_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned` |
+| A timeout stops a tool call on Codex or Cursor | The trace has its `tool_call`, written when the call started. | `workflow/harnesses/codex.py:246`, `workflow/harnesses/cursor.py:383`, `workflow/harnesses/cursor.py:419` | `tests/test_tool_sessions.py::test_codex_reports_a_tool_call_that_a_timeout_stops_for_the_trace`, `tests/test_tool_sessions.py::test_cursor_reports_a_tool_call_that_a_timeout_stops_for_the_trace` |
+| The harness gives more of a call's arguments after the call started | The `tool_call` record repeats with the same id and all the arguments. | `workflow/harnesses/cursor.py:384`, `workflow/trace.py:535` | `tests/test_tool_sessions.py::test_cursor_reports_a_tool_call_again_when_its_input_comes_late` |
+| An agent attempt fails before its session opens | Its `attempt` record has the harness, model, effort, access and workspace all the same. | `workflow/nodes.py:417` | `test_an_attempt_that_fails_before_its_session_has_its_settings` |
+| A wf tool gets its token | The token goes into no file in the run folder or in `~/.wf`, the trace included. | `workflow/tools/relay.py:199` | `tests/test_tool_sessions.py::test_no_secret_reaches_an_agent_or_the_run_folder` |
+| A value holds text that UTF-8 can't hold, such as a lone surrogate | The trace writes it escaped, and the attempt goes on. `wf trace` prints it escaped too. | `workflow/trace.py:127`, `workflow/trace_view.py:158` | `test_writing_the_trace_survives_text_that_utf8_cannot_hold`, `test_wf_trace_prints_text_that_utf8_cannot_hold_escaped` |
+| A command's log or stream file can't be opened | The command doesn't start. | `workflow/nodes.py:664` | `test_a_command_whose_stream_file_cant_be_opened_never_starts` |
+| `wf retry` stops without driving the run: it still waits for a person, or the run has ended | It writes no `run` record. Each `run` record has a `run_stopped` record. | `workflow/runner.py:242` | `test_each_run_record_has_a_run_stopped_record_whatever_wf_retry_does` |
+| `wf trace <run-id> --var <path>` | It shows the value of the path in each render that read it, pass after pass. | `workflow/trace_view.py:119` | `test_wf_trace_var_shows_a_value_across_the_passes_of_a_loop` |
+| `wf trace <run-id> --field routes` | It shows each route with its `when`, the values that it read, its result and its `max`, and the route that the node took. | `workflow/trace_view.py:259` | `test_wf_trace_says_why_a_route_was_taken` |
+| `wf trace --json` | Each value from `blobs/` comes back in full. | `workflow/trace_view.py:62` | `test_wf_trace_reads_blobs_back_in_json_and_shows_a_missing_one_as_its_reference` |
+| A reference names a file outside `blobs/`, or a blob that is gone | `wf trace` shows the reference, and reads no other file. | `workflow/trace_view.py:47`, `workflow/trace_view.py:188` | `test_wf_trace_reads_only_blobs_of_the_run`, `test_wf_trace_reads_blobs_back_in_json_and_shows_a_missing_one_as_its_reference` |
 
 ## Validation
 
@@ -875,6 +986,8 @@ Errors:
 13. Each `tools` entry names a known tool, and no tool is listed twice, in a node and in `defaults`.
     `write` is `true` or `false`.
 14. A node with `tools` can't run where its agent's commands reach the Keychain, unless it sets `tools_with_shell: true`.
+15. Each name in a node's `secret_env` is set in its `env`.
+    Each name in `defaults.secret_env` is set in the `env` of a command node.
 
 Warnings:
 - A template reads a node that might not have run at that point, outside an `{% if %}`
@@ -922,6 +1035,8 @@ workflow/
   scheduler.py      the rules in "When a node runs": pending, settled, routes, end
   graph.py          LangGraph wiring
   runs.py           run folder, events, finding a run by id
+  trace.py          the run's trace: trace.jsonl, blobs/, and keeping secrets out
+  trace_view.py     wf trace
   cli.py            init, validate, graph, run, retry, tools
 ```
 

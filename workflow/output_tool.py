@@ -18,9 +18,11 @@ The rules, from "The output tool" in the spec:
 
 ResultTool.submit() is plain Python. Each harness adapter wraps it in its own
 tool type (an SDK MCP tool for Claude Code, a dynamic tool for Codex, a tool on
-an MCP server over HTTP for Cursor), so this logic exists once.
+an MCP server over HTTP for Cursor), so this logic exists once. So is the
+record of each call that the run's trace keeps (`record`, from trace.Attempt).
 """
 
+from collections.abc import Callable
 from typing import Any
 
 from . import schemas
@@ -41,20 +43,27 @@ REMINDERS = 2
 
 
 class ResultTool:
-    """submit_result for one attempt."""
+    """submit_result for one attempt. `record(arguments, problems, reply)` hears of every call."""
 
-    def __init__(self, schema: dict):
+    def __init__(self, schema: dict, record: Callable[[Any, list[str], str], None] | None = None):
         self.schema = schema
         self.result: dict | None = None
+        self.record = record or (lambda arguments, problems, reply: None)
 
     def submit(self, args: Any) -> tuple[str, bool]:
         """Returns (text for the agent, is_error)."""
         if self.result is not None:
-            return "A result was already recorded, so this call was ignored. You're done.", True
+            reply = "A result was already recorded, so this call was ignored. You're done."
+            self.record(args, ["a result was already recorded"], reply)
+            return reply, True
         problems = schemas.check(args, self.schema)
         if problems:
             listed = "\n".join(f"- {p}" for p in problems)
-            return ("Error: the result doesn't match the schema, so it wasn't recorded. "
-                    f"Fix these and call submit_result again:\n{listed}"), True
+            reply = ("Error: the result doesn't match the schema, so it wasn't recorded. "
+                     f"Fix these and call submit_result again:\n{listed}")
+            self.record(args, problems, reply)
+            return reply, True
         self.result = args
-        return "Result recorded. You're done.", False
+        reply = "Result recorded. You're done."
+        self.record(args, [], reply)
+        return reply, False

@@ -72,7 +72,9 @@ acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`.
 `failed`
 : `node` and `error` say what failed. The evidence is in the run folder:
   `nodes/<node>/<pass>/[<item>/]attempt-<n>.log` (agent transcript or command
-  output), `instruction.md`, and `events.jsonl`. Load `diagnostic-reasoning`.
+  output), `instruction.md`, and `events.jsonl`.
+  `wf trace <run-id> --node <node>` shows what each template read, and each attempt, tool call and `submit_result` call.
+  Load `diagnostic-reasoning`.
   An environment problem (missing tool, dependency, credentials) is yours to
   fix, then `wf retry <run-id> --detach`; finished steps and items are not
   redone. A workflow-file bug, or a task that keeps failing, goes to the captain.

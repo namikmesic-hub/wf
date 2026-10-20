@@ -12,6 +12,7 @@ takes the next list of actions:
                                                              turn ends once its reply is in
     {"approval": "item/commandExecution/requestApproval"}  ask for approval, wait for the reply
     {"item": {"type": "commandExecution", "command": "ls"}} item/started + item/completed
+    {"started": {"type": "commandExecution", "command": "ls"}}  item/started only: the item never completes
     {"tokens": 1200}                                         a response of 1200 tokens: thread/tokenUsage/updated
                                                              (total: the thread's running total, last: 1200)
     {"error": {"codexErrorInfo": "usageLimitExceeded", "message": "...", "willRetry": false}}
@@ -76,10 +77,11 @@ async def main() -> None:
                 await tool_call(thread, turn, action["tool"])
             elif "approval" in action:
                 log("reply", await call(action["approval"], {"threadId": thread, "turnId": turn, "itemId": "i1"}))
-            elif "item" in action:
-                item = {"id": f"item-{next(ids)}", **action["item"]}
+            elif "item" in action or "started" in action:
+                item = {"id": f"item-{next(ids)}", **(action.get("item") or action["started"])}
                 write({"method": "item/started", "params": {"threadId": thread, "turnId": turn, "item": item}})
-                write({"method": "item/completed", "params": {"threadId": thread, "turnId": turn, "item": item}})
+                if "item" in action:
+                    write({"method": "item/completed", "params": {"threadId": thread, "turnId": turn, "item": item}})
             elif "tokens" in action:
                 totals[thread] += action["tokens"]
                 def usage(tokens: int) -> dict:

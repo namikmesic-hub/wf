@@ -20,6 +20,17 @@ The environment (ENV) is set up so mistakes fail loudly:
 - Filters: `quote` (shell quoting, new) and `tojson` (plain JSON, without the
   HTML escaping Jinja's own version does, since nothing here is HTML).
 
+watched() runs one of those three. It also returns each variable path that the
+template used, with its value, for the run's trace (trace.py). The environment
+notes every field and index a template reads (getattr and getitem). Jinja looks
+up each name when a template starts, also a name that only an unused branch
+reads. So the code generator wraps each use of a name, and only the uses that
+run are noted. Elements of a list or map that was read are known by their path
+too, so `t.title` in `{% for t in plan.tasks %}` reads plan.tasks[0].title. A
+list or map that the template only reached into, or looped over, isn't listed
+when the reads inside it are. One that it also used itself, in a test, a filter
+or the output, is.
+
 The second half of this module reads templates without running them.
 references() walks Jinja's syntax tree and lists every outside name a
 template uses, with its field path (`plan.tasks[0].title` reads plan ->
@@ -29,13 +40,16 @@ into the spec's checks: unknown names, missing fields, nodes that might not
 have run, unquoted agent output in shell commands.
 """
 
+import contextvars
 import json
 import shlex
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from jinja2 import StrictUndefined, TemplateSyntaxError, Undefined, nodes
+from jinja2.compiler import CodeGenerator
+from jinja2.idtracking import VAR_LOAD_RESOLVE
 from jinja2.parser import Parser
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
@@ -43,18 +57,90 @@ from .schemas import EACH
 
 
 class TemplateError(Exception):
-    """A template or expression that can't be parsed or evaluated."""
+    """A template or expression that can't be parsed or evaluated. Raised by watched(), it
+    also holds `reads`: what the template read before it failed."""
+
+    reads: list = []
+
+
+class _CodeGenerator(CodeGenerator):
+    """Jinja's code generator, with two changes for watched(). Each use of a name that the
+    template gets from its variables goes through environment.used(name, whole, value), as
+    it runs. A field or an index that the template uses itself goes through
+    environment.whole(value). A use isn't whole when it only reaches inside the value (x in
+    x.y), or loops over it. Then the reads inside it say what the template used."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._through: set[int] = set()  # the nodes whose value is only a way into it
+
+    def visit_For(self, node: nodes.For, frame) -> None:
+        self._through.add(id(node.iter))
+        super().visit_For(node, frame)
+
+    def visit_Getattr(self, node: nodes.Getattr, frame) -> None:
+        self._through.add(id(node.node))
+        self._whole(node, frame, super().visit_Getattr)
+
+    def visit_Getitem(self, node: nodes.Getitem, frame) -> None:
+        self._through.add(id(node.node))
+        self._whole(node, frame, super().visit_Getitem)
+
+    def _whole(self, node, frame, visit) -> None:
+        if id(node) in self._through:
+            visit(node, frame)
+            return
+        self.write("environment.whole(")
+        visit(node, frame)
+        self.write(")")
+
+    def visit_Name(self, node: nodes.Name, frame) -> None:
+        if node.ctx == "load":
+            load = frame.symbols.find_load(frame.symbols.ref(node.name))
+            if load is not None and load[0] == VAR_LOAD_RESOLVE:
+                self.write(f"environment.used({node.name!r}, {id(node) not in self._through}, ")
+                super().visit_Name(node, frame)
+                self.write(")")
+                return
+        super().visit_Name(node, frame)
 
 
 class _Environment(ImmutableSandboxedEnvironment):
+    code_generator_class = _CodeGenerator
+
+    def used(self, name: str, whole: bool, value: Any) -> Any:
+        if (watch := _WATCH.get()) is not None and not isinstance(value, Undefined):
+            watch.used(name, whole, value)
+        return value
+
+    def whole(self, value: Any) -> Any:
+        if (watch := _WATCH.get()) is not None:
+            watch.whole(value)
+        return value
+
     def getattr(self, obj: Any, attribute: str) -> Any:
         # `x.items` should read the output field `items`, not the dict method
         if isinstance(obj, Mapping):
             try:
-                return obj[attribute]
+                value = obj[attribute]
             except (KeyError, TypeError):
                 pass
+            else:
+                if (watch := _WATCH.get()) is not None:
+                    watch.accessed(obj, attribute, value)
+                return value
         return super().getattr(obj, attribute)
+
+    def getitem(self, obj: Any, argument: Any) -> Any:
+        value = super().getitem(obj, argument)
+        watch = _WATCH.get()
+        if watch is None or isinstance(value, Undefined):
+            return value
+        if isinstance(obj, Mapping) and isinstance(argument, str) and argument in obj:
+            watch.accessed(obj, argument, value)
+        elif isinstance(obj, (list, tuple)) and isinstance(argument, int) and not isinstance(argument, bool):
+            watch.accessed(obj, argument % len(obj), value)  # x[-1] is read as x[n-1]
+        return value
 
 
 def _quote(value: Any) -> str:
@@ -145,6 +231,99 @@ def _message(error: Exception) -> str:
     if isinstance(error, TemplateSyntaxError):
         return f"line {error.lineno}: {message}"
     return message if type(error).__module__.startswith("jinja2") else f"{type(error).__name__}: {message}"
+
+
+# ---------- watching what a template reads ----------
+
+
+@dataclass(frozen=True)
+class Read:
+    """A variable path a template read while it ran, like ("plan", "tasks", 0, "title"), and its value."""
+
+    path: tuple
+    value: Any
+
+
+_CONTAINERS = (Mapping, list, tuple)
+
+
+class _Watch:
+    def __init__(self, names: frozenset[str]):
+        self.names = names  # the variables the template was given, not Jinja's own globals
+        self.paths: dict[int, tuple] = {}  # id of a list or map in the variables -> its path
+        self.kept: list = []  # holds those lists and maps, so no other object takes their id meanwhile
+        self.found: dict[tuple, Any] = {}  # path -> value, in the order first read
+        self.used_whole: set[tuple] = set()  # paths whose value the template used itself
+
+    def used(self, name: str, whole: bool, value: Any) -> None:
+        if name in self.names:
+            self._read((name,), value)
+            if whole:
+                self.used_whole.add((name,))
+
+    def whole(self, value: Any) -> None:
+        if isinstance(value, _CONTAINERS) and (path := self.paths.get(id(value))) is not None:
+            self.used_whole.add(path)  # the field or index just read, which registered its id
+
+    def accessed(self, parent: Any, key: Any, value: Any) -> None:
+        path = self.paths.get(id(parent))
+        if path is not None:  # else a value the template made itself, such as a filter's result
+            self._read((*path, key), value)
+
+    def _read(self, path: tuple, value: Any) -> None:
+        """Note the read, and the path of a list or map read, and of the lists and maps right
+        inside it, which a {% for %} reaches without a getattr."""
+        self.found.setdefault(path, value)
+        if not isinstance(value, _CONTAINERS):
+            return
+        self.paths[id(value)] = path
+        self.kept.append(value)
+        for key, child in (value.items() if isinstance(value, Mapping) else enumerate(value)):
+            if isinstance(child, _CONTAINERS):
+                self.paths[id(child)] = (*path, key)
+                self.kept.append(child)
+
+    def reads(self) -> list[Read]:
+        """What was read. A list or map that was only a way to a field inside it is left out,
+        unless the template also used it itself, such as with `| length`."""
+        paths = list(self.found)
+
+        def passed_through(path: tuple) -> bool:
+            return path not in self.used_whole and any(len(other) > len(path) and other[:len(path)] == path for other in paths)
+
+        return [Read(path, value) for path, value in self.found.items()
+                if not (isinstance(value, _CONTAINERS) and passed_through(path))]
+
+
+_WATCH: contextvars.ContextVar[_Watch | None] = contextvars.ContextVar("wf_template_watch", default=None)
+
+
+def watched(call: Callable[[str, Mapping[str, Any]], Any], source: str, variables: Mapping[str, Any]) -> tuple[Any, list[Read]]:
+    """call(source, variables), where call is render, evaluate or render_value, and the variable
+    paths it read with their values. A TemplateError it raises holds the reads so far."""
+    watch = _Watch(frozenset(variables))
+    token = _WATCH.set(watch)
+    try:
+        value = call(source, variables)
+    except TemplateError as error:
+        error.reads = watch.reads()
+        raise
+    finally:
+        _WATCH.reset(token)
+    return value, watch.reads()
+
+
+def path_text(path: tuple) -> str:
+    """("plan", "tasks", 0, "title") -> plan.tasks[0].title"""
+    text = str(path[0])
+    for step in path[1:]:
+        if isinstance(step, int):
+            text += f"[{step}]"
+        elif isinstance(step, str) and step.isidentifier():
+            text += f".{step}"
+        else:
+            text += f"[{json.dumps(step, ensure_ascii=False, default=str)}]"
+    return text
 
 
 # ---------- reading templates without running them ----------

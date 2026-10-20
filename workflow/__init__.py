@@ -20,6 +20,8 @@ Then the runner, built on LangGraph:
     settings.py    wf's own settings for the user, in ~/.wf/config.yaml
     capacity.py    the cap on live agent sessions across all runs that share a ~/.wf (WF_MAX_AGENTS)
     runs.py        the run folder on disk
+    trace.py       the run's trace: each render with what it read, each route
+                   decision, attempt, turn and tool call, and no secrets
     workspaces.py  git worktrees for `workspace: new`, and the runner's commits
     output_tool.py submit_result: how an agent hands back its typed result
     tools/         wf tools (Slack, Linear, ...): sign-in, the Keychain, and the
@@ -39,5 +41,6 @@ Then the tools around runs, none of which LangGraph knows about:
     dryrun.py      dry runs: scripts of agent results, answers and command results,
                    played by harnesses/scripted.py
     report.py      `wf report`: what runs did, per node and route
+    trace_view.py  `wf trace`: what one run read, decided and did, from its trace
     examples/      two complete workflows (`wf examples` copies them out)
 """

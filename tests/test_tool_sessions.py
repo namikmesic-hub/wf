@@ -25,7 +25,7 @@ from mcp import Client
 from fake_vendor import FakeVendor, free_port, png_base64, sign_in
 from fakes import Fake, submit
 from workflow import cli, harnesses, runner, schemas
-from workflow.harnesses.base import SessionSpec, TurnEnd, Usage
+from workflow.harnesses.base import Recorder, SessionSpec, TurnEnd, Usage
 from workflow.harnesses.claude_code import ClaudeSession, options
 from workflow.harnesses.codex import Codex
 from workflow.harnesses.cursor import Cursor, allows
@@ -444,6 +444,42 @@ def test_claude_code_transcripts_leave_out_what_a_wf_tool_returned(tmp_path):
     assert any(line == {"kind": "tool", "name": "mcp__linear__whoami", "input": {"q": "me"}} for line in lines)
 
 
+class _Recorder(Recorder):
+    """Keeps what an adapter reports for the trace."""
+
+    def __init__(self):
+        self.seen = []
+
+    def text(self, text):
+        self.seen.append(("text", text))
+
+    def tool_call(self, call, tool, arguments):
+        self.seen.append(("call", call, tool, arguments))
+
+    def tool_result(self, call, result, is_error=False, kept=True):
+        self.seen.append(("result", call, result if kept else "(not kept)", is_error))
+
+
+def test_claude_code_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned(tmp_path):
+    recorder = _Recorder()
+    session = ClaudeSession(replace(spec(tmp_path, [_Server()]), trace=recorder))
+    session._client = _Client([
+        AssistantMessage(content=[ToolUseBlock(id="t1", name="mcp__linear__whoami", input={"q": "me"}),
+                                  ToolUseBlock(id="t2", name="Read", input={"file_path": "a.txt"})], model="opus"),
+        UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="private: the CEO's notes"),
+                             ToolResultBlock(tool_use_id="t2", content="the file's text", is_error=True)]),
+        AssistantMessage(content=[TextBlock(text="done")], model="opus"),
+        ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1, session_id="s"),
+    ])
+    asyncio.run(session.send("go"))
+    assert recorder.seen == [("call", "t1", "linear.whoami", {"q": "me"}), ("call", "t2", "Read", {"file_path": "a.txt"}),
+                             ("result", "t1", "(not kept)", False), ("result", "t2", "the file's text", True), ("text", "done")]
+
+
+def trace_records() -> list[dict]:
+    return [json.loads(line) for line in (run_dir() / "trace.jsonl").read_text().splitlines()]
+
+
 def test_progress_names_a_wf_tools_operation_the_same_on_every_harness():
     from workflow.harnesses import claude_code, cursor as cursor_harness
 
@@ -486,6 +522,54 @@ def test_codex_gets_a_namespace_per_tool_and_its_calls_are_relayed(vendor, repo,
     assert image == {"success": True, "contentItems": [{"type": "inputImage", "imageUrl": f"data:image/png;base64,{png_base64()}"}]}
     assert result["success"] is True
     assert vendor.calls == [("list_issues", {"query": "open"}), ("screenshot", {"query": ""})]
+
+
+def test_codex_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned(vendor, repo, monkeypatch):
+    sign_in(vendor)
+    answered = [{"type": "inputText", "text": "list_issues answered 'open'"}]
+    codex(monkeypatch, repo, [
+        {"item": {"type": "agentMessage", "text": "Looking at the issues."}},
+        {"item": {"type": "commandExecution", "command": "ls", "cwd": "/w", "aggregatedOutput": "a.txt\n", "exitCode": 0,
+                  "status": "completed"}},
+        {"item": {"type": "dynamicToolCall", "namespace": "linear", "tool": "list_issues", "arguments": {"query": "open"},
+                  "status": "completed", "success": True, "contentItems": answered}},
+        {"tool": {"arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[linear]", harness="codex")]) == 0
+    found = [{k: r[k] for k in ("kind", "tool", "arguments", "result", "kept", "characters", "text") if k in r}
+             for r in trace_records() if r["kind"] in ("message", "tool_call", "tool_result")]
+    assert found == [
+        {"kind": "message", "text": "Looking at the issues."},
+        {"kind": "tool_call", "tool": "command", "arguments": {"command": "ls", "cwd": "/w"}},
+        {"kind": "tool_result", "result": {"aggregatedOutput": "a.txt\n", "exitCode": 0, "status": "completed"}},
+        {"kind": "tool_call", "tool": "linear.list_issues", "arguments": {"namespace": "linear", "tool": "list_issues",
+                                                                          "arguments": {"query": "open"}}},
+        {"kind": "tool_result", "kept": False, "characters": len(json.dumps({"status": "completed", "success": True,
+                                                                             "contentItems": answered}))},
+    ]
+    assert [r["accepted"] for r in trace_records() if r["kind"] == "submit_result"] == [True]
+    assert "list_issues answered" not in (run_dir() / "trace.jsonl").read_text()
+
+
+def timed_out(harness: str) -> str:
+    """A workflow whose one agent step has 2 seconds and no retry."""
+    Path("flow.yaml").write_text(dedent(f"""
+        version: 1
+        name: slow
+        defaults: {{harness: {harness}, harnesses: {{cursor: {{model: composer-2.5}}}}}}
+        start: {{input: {{}}}}
+        nodes:
+          work: {{needs: [start], instruction: Look around, timeout: 2s, retry: 0}}
+        end: {{output: {{}}}}
+        """))
+    return "flow.yaml"
+
+
+def test_codex_reports_a_tool_call_that_a_timeout_stops_for_the_trace(repo, monkeypatch):
+    codex(monkeypatch, repo, [{"started": {"type": "commandExecution", "command": "sleep 600", "cwd": "/w"}}, {"hang": True}])
+    assert cli.main(["run", timed_out("codex")]) == 1
+    (call,) = [r for r in trace_records() if r["kind"] == "tool_call"]
+    assert (call["tool"], call["arguments"]) == ("command", {"command": "sleep 600", "cwd": "/w"})
+    assert [r["outcome"] for r in trace_records() if r["kind"] == "attempt_end"] == ["timed_out"]
 
 
 def test_codex_answers_other_requests_while_a_slow_tool_call_runs(repo, monkeypatch):
@@ -590,6 +674,39 @@ def test_cursor_gets_an_mcp_server_per_tool_and_its_calls_are_relayed(vendor, re
     assert image == {"content": [{"type": "image", "data": png_base64(), "mimeType": "image/png"}], "isError": False}
     assert result["isError"] is False
     assert "list_issues answered" not in attempt_logs()  # the transcript leaves out what the tool returned
+
+
+def test_cursor_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf_tool_returned(vendor, repo, monkeypatch):
+    sign_in(vendor)
+    cursor(monkeypatch, repo, [{"text": "Looking."}, {"tool": {"server": "linear", "name": "list_issues", "arguments": {"query": "open"}}},
+                               {"tool": {"arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[linear]", harness="cursor")]) == 0
+    found = [r for r in trace_records() if r["kind"] in ("message", "tool_call", "tool_result")]
+    assert [(r["kind"], r.get("tool"), r.get("text"), r.get("kept", True)) for r in found] == [
+        ("message", None, "Looking.", True), ("tool_call", "linear.list_issues", None, True), ("tool_result", None, None, False),
+        ("tool_call", "submit_result", None, True), ("tool_result", None, None, True)]
+    assert found[1]["arguments"]["input"] == {"providerIdentifier": "linear", "toolName": "list_issues", "args": {"query": "open"}}
+    assert "list_issues answered" not in (run_dir() / "trace.jsonl").read_text()
+
+
+def test_cursor_reports_a_tool_call_that_a_timeout_stops_for_the_trace(repo, monkeypatch):
+    cursor(monkeypatch, repo, [{"permission": {"kind": "execute", "title": "`sleep 600`", "rawInput": {"command": "sleep 600"}}},
+                               {"hang": True}])
+    assert cli.main(["run", timed_out("cursor")]) == 1
+    (call,) = [r for r in trace_records() if r["kind"] == "tool_call"]
+    assert call["arguments"] == {"title": "`sleep 600`", "kind": "execute", "input": {"command": "sleep 600"}}
+    assert [r["outcome"] for r in trace_records() if r["kind"] == "attempt_end"] == ["timed_out"]
+
+
+def test_cursor_reports_a_tool_call_again_when_its_input_comes_late(repo, monkeypatch):
+    cursor(monkeypatch, repo, [{"call": {"kind": "read", "title": "Read a.txt", "rawInput": {"path": "a.txt"}}},
+                               {"tool": {"arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[]", harness="cursor")]) == 0
+    first, then = [r for r in trace_records() if r["kind"] == "tool_call"][:2]
+    assert first["id"] == then["id"]  # the same call, reported again with what came later
+    assert (first["arguments"]["input"], then["arguments"]["input"]) == (None, {"path": "a.txt"})
+    (result,) = [r for r in trace_records() if r["kind"] == "tool_result" and r["id"] == first["id"]]
+    assert result["result"] == {"output": "hello"}
 
 
 def test_cursor_refuses_an_mcp_server_wf_did_not_give_the_session(tmp_path):

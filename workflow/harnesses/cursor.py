@@ -380,6 +380,9 @@ class CursorSession:
         if status == "in_progress" and not call.get("shown"):
             call["shown"] = True
             self.spec.emit({"event": "agent_tool", "tool": _label(call), "detail": _detail(call, self.spec.cwd)})
+            self._trace_call(update.get("toolCallId"), call)  # now: a timeout may stop it before it completes
+        elif "traced" in call and status not in ("completed", "failed"):
+            self._trace_call(update.get("toolCallId"), call)  # an update can add the input after it started
         elif status in ("completed", "failed"):
             self.calls.pop(update.get("toolCallId"), None)
             output = call.get("rawOutput") or call.get("content") or ""
@@ -387,10 +390,21 @@ class CursorSession:
             kept = {"kept": False, "characters": len(json.dumps(output))} if relayed else {"output": short(output, 2000)}
             transcript(self.spec.log, "tool", title=call.get("title"), tool_kind=call.get("kind"), status=status,
                        input=call.get("rawInput"), **kept)
+            self._trace_call(update.get("toolCallId"), call)
+            self.spec.trace.tool_result(update.get("toolCallId"), output, status == "failed", kept=not relayed)
+
+    def _trace_call(self, call_id, call: dict) -> None:
+        """A tool call for the trace, as its updates have described it so far: again each time
+        that they change what it is."""
+        arguments = {"title": call.get("title"), "kind": call.get("kind"), "input": call.get("rawInput")}
+        if call.get("traced") != arguments:
+            call["traced"] = arguments
+            self.spec.trace.tool_call(call_id, _label(call), arguments)
 
     def _flush(self) -> None:
         if self.text.strip():
             transcript(self.spec.log, "text", text=self.text)
+            self.spec.trace.text(self.text)
         self.text = ""
 
     async def _submit(self, args: dict) -> tuple[str, bool]:
@@ -402,6 +416,8 @@ class CursorSession:
         return await asyncio.to_thread(git_tool.run, self.spec.cwd, args.get("args") or [])
 
     async def close(self) -> None:
+        for call_id, call in self.calls.items():  # calls still open, as after a timeout: the trace gets them too
+            self._trace_call(call_id, call)
         try:
             if self.rpc is not None:
                 try:

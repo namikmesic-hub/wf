@@ -14,6 +14,8 @@ through a counter file next to requests.jsonl: each session/prompt takes the nex
     {"tool": {"server": "linear", "name": "list_issues", "arguments": {...}}}  the same, on another
                                                        MCP server that session/new named
     {"permission": {"kind": "execute", "title": "`ls`", ...}}  ask for permission, record the answer
+    {"call": {"kind": "execute", "title": "...", "rawInput": {...}}}  a call that runs without asking,
+                                                       whose input comes after it is in progress
     {"error": "Upgrade your plan to continue"}         how Cursor reports a failed request: "\n\n" + text
     {"error": ["Error: [resource", "_exhausted] ..."]}  the same, sent in several chunks
     {"stop": "cancelled"}                              the turn's stopReason (default end_turn)
@@ -141,6 +143,15 @@ async def main() -> None:
             elif "tool" in action:
                 await use_tool(session, action["tool"].get("name", "submit_result"), action["tool"]["arguments"],
                                action["tool"].get("server", "wf"))
+            elif "call" in action:
+                asked = dict(action["call"])
+                given = asked.pop("rawInput", None)
+                call = f"call-{next(calls)}"
+                update(session, {"sessionUpdate": "tool_call", "toolCallId": call, "status": "pending", **asked})
+                update(session, {"sessionUpdate": "tool_call_update", "toolCallId": call, "status": "in_progress"})
+                update(session, {"sessionUpdate": "tool_call_update", "toolCallId": call, "rawInput": given})
+                update(session, {"sessionUpdate": "tool_call_update", "toolCallId": call, "status": "completed",
+                                 "rawOutput": {"output": "hello"}})
             elif "permission" in action:
                 asked = dict(action["permission"])
                 options = asked.pop("options", None) or [

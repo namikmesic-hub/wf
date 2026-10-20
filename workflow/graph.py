@@ -57,12 +57,14 @@ from .state import Job, Progress, RunState
 
 async def schedule(state: RunState, runtime: Runtime[RunContext]) -> Command:
     ctx = runtime.context
-    progress = Progress(state, ctx.workflow, ctx.topo, runtime.stream_writer, ctx.root.usage if ctx.nested else None)
+    progress = Progress(state, ctx.workflow, ctx.topo, runtime.stream_writer, ctx.root.usage if ctx.nested else None,
+                        trace=ctx.trace)
     if "run" not in state:
         progress.begin(state["input"], ctx.run_info)
     paused = state.get("status") == "limit"
     for finished in state.get("inbox", []):
         progress.record(finished)
+    ctx.trace.know(progress.vars)  # the secret values the run holds now, also after `wf retry`
 
     elapsed = ctx.elapsed()
     progress.s["elapsed_s"] = elapsed
@@ -117,11 +119,14 @@ async def finish(state: RunState, runtime: Runtime[RunContext]) -> dict:
     output, problems = {}, []
     for name, value in workflow.end.output.items():
         try:
+            secret = name in ctx.trace.outputs  # it feeds a secret of the parent workflow
             if isinstance(value, str):
-                output[name] = templates.render_value(value, variables)
+                output[name] = ctx.trace.render(None, f"end.output.{name}", value, variables, templates.render_value,
+                                                secret=secret)
                 continue
             raw = value.get("value")
-            given = templates.render_value(raw, variables) if isinstance(raw, str) else raw
+            given = (ctx.trace.render(None, f"end.output.{name}", raw, variables, templates.render_value, secret=secret)
+                     if isinstance(raw, str) else raw)
             field = {k: v for k, v in value.items() if k != "value"}
             schema = schemas.object_schema({name: field}, workflow.types)["properties"][name]
             given = schemas.without_none(given, schema)
@@ -135,6 +140,13 @@ async def finish(state: RunState, runtime: Runtime[RunContext]) -> dict:
         return {"status": "failed", "failure": {"node": "end", "error": error}}
     runtime.stream_writer({"event": "run_finished", "status": "succeeded"})
     return {"status": "succeeded", "output": output}
+
+
+def variables(state: dict | None, ctx: RunContext) -> dict:
+    """The template variables a saved state holds ({} before the run's first step)."""
+    if not state or "run" not in state:
+        return {}
+    return Progress(state, ctx.workflow, ctx.topo, lambda event: None).vars()
 
 
 def build(checkpointer=None):

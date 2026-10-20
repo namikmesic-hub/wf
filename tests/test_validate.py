@@ -792,3 +792,16 @@ def test_a_file_that_is_not_utf8_is_reported(tmp_path):
     path.write_bytes(flow("a: {needs: [start], command: x}").replace("x}", "caf\xe9}").encode("latin-1"))
     report = validate.check(path)
     assert [p.message for p in report.errors][0].startswith("the file isn't valid UTF-8")
+
+
+def test_secret_env_names_only_what_env_sets(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], command: x, env: {TOKEN: "{{ start.task }}"}, secret_env: [TOKEN, TOKN]}
+        b: {needs: [start], command: y, secret_env: [TOKEN]}
+    """, top="defaults:\n  secret_env: [API_KEY]\n").replace(
+        "defaults:\n  harness: claude-code\n", "", 1).replace("defaults:\n  secret_env:", "defaults:\n  harness: claude-code\n  secret_env:"))
+    assert_problems(report, [
+        ("error", "defaults.secret_env", "`API_KEY` isn't set in any command node's `env`"),
+        ("error", "nodes.a.secret_env", "`TOKN` isn't set in `env` (did you mean `TOKEN`?)"),
+        ("error", "nodes.b.secret_env", "`TOKEN` isn't set in `env`"),
+    ])

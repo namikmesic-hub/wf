@@ -13,11 +13,13 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
                                     attempts waiting for an agent slot: capacity.py)
       lock                          held by the one process driving the run (its pid inside)
       events.jsonl                  one line per progress event
+      trace.jsonl, blobs/           what the run read, decided and did (trace.py)
       checkpoints.sqlite            LangGraph checkpoints, used by wf retry
       nodes/<node>/<pass>/[<index>/]
         instruction.md              the rendered instruction (or command, or message)
         output.json
         attempt-<n>.log             harness transcript or command output
+        attempt-<n>.stdout, .stderr a command's streams, each whole
 
 `wf retry` loads the copies in workflow/, so editing the YAML doesn't change a
 run already in progress. `.wf/` goes into the repo's .git/info/exclude, so run
@@ -246,6 +248,13 @@ class Run:
 
     def set_output(self, output: dict) -> None:
         write_json(self.dir / "output.json", output)
+
+    def output(self) -> Any:
+        """output.json: the end output, once the run succeeded (else None)."""
+        try:
+            return json.loads((self.dir / "output.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
 
 
 LOCK_FD = "WF_LOCK_FD"

@@ -9,6 +9,11 @@ a node, or one item of a for_each node. Every kind goes through the same steps:
 4. Leave a record in the pass folder: instruction.md (what was asked),
    attempt-<n>.log (what happened) and output.json (the result).
 
+Each step also goes into the run's trace (trace.py, through ctx.trace). It
+records the job, and each template the job renders, with what it read. It
+records each attempt: its settings, turns, tool calls and submit_result calls,
+and how it ended.
+
 run_job() never raises. A failure comes back as a Finished record with
 ok=False, so one failing job doesn't cancel the others running in the same
 step. The exception is interrupt() in human nodes, which LangGraph handles
@@ -97,6 +102,7 @@ from .runs import Run, now, write_json
 from .harnesses import SessionSpec, Unavailable, Usage, reaches_keychain
 from .spec import seconds
 from .state import Finished, Job
+from .trace import HIDDEN, Attempt
 
 TAIL = 20_000  # characters of stdout and stderr kept in a command's output
 
@@ -116,11 +122,14 @@ async def run_job(job: Job, ctx: RunContext, emit: Callable[[dict], None]) -> Fi
     extra: dict = {}  # more for the Finished record (an agent's session)
 
     def finished(ok: bool, output: Any = None, error: str | None = None, attempts: int = job["attempt"], **more) -> Finished:
-        return Finished(node=node_id, pass_no=job["pass_no"], index=index, ok=ok, output=output, error=error,
-                        attempts=attempts, workspace=workspace,
-                        usage={"cost_usd": usage.cost_usd, "tokens": usage.tokens}, **more)
+        result = Finished(node=node_id, pass_no=job["pass_no"], index=index, ok=ok, output=output, error=error,
+                          attempts=attempts, workspace=workspace,
+                          usage={"cost_usd": usage.cost_usd, "tokens": usage.tokens}, **more)
+        ctx.trace.job_end(job, result)
+        return result
 
     try:
+        ctx.trace.job(job)
         folder = ctx.run.pass_dir(node_id, job["pass_no"], index)  # inside: a full disk fails the job, not the run
         variables = {**job["vars"], **({"item": job["item"], "index": index} if index is not None else {})}
         workspace = await _workspace(job, ctx, variables)
@@ -134,6 +143,7 @@ async def run_job(job: Job, ctx: RunContext, emit: Callable[[dict], None]) -> Fi
         else:
             output, attempts = await _workflow(job, ctx, folder, variables, workspace, emit, usage)
     except GraphBubbleUp:
+        ctx.trace.job_end(job, None)
         raise  # interrupt(): LangGraph pauses the run here
     except _Failed as error:
         return finished(False, error=str(error), attempts=error.attempts, **({"stopped": error.stopped} if error.stopped else {}))
@@ -166,7 +176,7 @@ async def _workspace(job: Job, ctx: RunContext, variables: dict) -> dict:
         return {"path": str(folder), "branch": None, "base": None}
     if kind == "new":
         base = ctx.workflow.setting(node_id, "base")
-        base = templates.render(base, variables).strip() if base else ctx.home["base"]
+        base = ctx.trace.render(job, "base", base, variables).strip() if base else ctx.home["base"]
         if not base:
             raise _Failed("`workspace: new` needs a git repo with at least one commit", job["attempt"])
         parts = [*ctx.prefix, node_id] + ([str(job["index"])] if job["index"] is not None else [])  # e.g. build/2/implement
@@ -177,7 +187,7 @@ async def _workspace(job: Job, ctx: RunContext, variables: dict) -> dict:
         # another item may be at its index now (node ids start with a letter, indexes are digits)
         named = ctx.root.run.branches().get("/".join(parts))
         if named is None or any(part.isdigit() for part in parts):
-            named = templates.render(template, variables).strip()
+            named = ctx.trace.render(job, "branch", template, variables).strip()
         return await _git(ctx, _named_worktree, ctx.root.run, ctx.home["path"], parts, base, named)
     shared = job["vars"]["workspace"].get(kind)
     if shared is None:
@@ -253,12 +263,13 @@ def _no_slot(number: int, harness: str | None) -> AbstractAsyncContextManager[No
     return nullcontext()
 
 
-async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str | None], Awaitable[Any]],
+async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str | None, Attempt], Awaitable[Any]],
                     harnesses: list[str | None] = [None],
                     slot: Callable[[int, str | None], AbstractAsyncContextManager[None]] = _no_slot) -> tuple[Any, int]:
     """Up to 1 + retry attempts on each harness in turn, each within the node's timeout.
-    attempt(number, harness) makes one, inside slot(number, harness): for an agent, its
-    agent slot (_agent_slot). Returns (output, attempt number)."""
+    The call attempt(number, harness, record) makes one, inside slot(number, harness): for
+    an agent, its agent slot (_agent_slot). The attempt's part of the trace, `record`, ends
+    here with how the attempt went. Returns (output, attempt number)."""
     node_id = job["node"]
     retry = ctx.workflow.setting(node_id, "retry")
     timeout = ctx.workflow.setting(node_id, "timeout")
@@ -277,15 +288,20 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
                 async with slot(number, harness):  # an attempt starts once it has its slot
                     if number > 1:
                         emit({"event": "attempt_started", **label, **on, **fallback, "attempt": number})
+                    record = ctx.trace.attempt(job, number, harness, **fallback)
                     deadline = asyncio.timeout(seconds(timeout) if timeout else None)
-                    async with deadline:
-                        result = await attempt(number, harness)
+                    try:
+                        async with deadline:
+                            result = await attempt(number, harness, record)
+                    except BaseException as failure:
+                        record.end(*_ending(failure, deadline, timeout))
+                        raise
+                    record.end("succeeded")
                 return result, number
             except _LimitWhileWaiting as reached:
                 raise _limit_stop(error, number, str(reached)) from None
             except TimeoutError:  # the node's timeout, or a timeout inside the harness
-                ours = deadline is not None and deadline.expired()
-                error = f"timed out after {timeout}" if ours else "a call inside the harness timed out"
+                error = _timed_out(deadline, timeout)
             except _Unavailable as failure:  # don't retry this harness: go to the next one
                 error = f"{harness} is unavailable: {failure}"
                 following = harnesses[position + 1] if position + 1 < len(harnesses) else None
@@ -303,6 +319,28 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
             if wait and tries < retry:  # only before a retry on this harness, not before a fallback
                 await _pause(ctx, wait)
     raise _Failed(error, number - 1)
+
+
+def _timed_out(deadline, timeout: str | None) -> str:
+    ours = deadline is not None and deadline.expired()
+    return f"timed out after {timeout}" if ours else "a call inside the harness timed out"
+
+
+def _ending(error: BaseException, deadline, timeout: str | None) -> tuple[str, str | None]:
+    """How an attempt that raised `error` ended, for the trace: (outcome, error)."""
+    if isinstance(error, TimeoutError):
+        return ("timed_out" if deadline.expired() else "failed"), _timed_out(deadline, timeout)
+    if isinstance(error, GraphBubbleUp):
+        return "waiting", None  # a sub-workflow asks a person
+    if not isinstance(error, Exception):
+        return "cancelled", None
+    if isinstance(error, _Unavailable):
+        return "unavailable", str(error)
+    if isinstance(error, _Failed) and error.stopped == "limit":
+        return "limit", str(error)
+    if isinstance(error, (_AttemptFailed, _Failed, dryrun.ScriptExhausted)):
+        return "failed", str(error)
+    return "failed", f"{type(error).__name__}: {error}"
 
 
 def _limit_stop(error: str, number: int, reason: str) -> _Failed:
@@ -355,20 +393,29 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     previous = job.get("session")  # the last pass's session, for session: continue
 
     def render(continued: bool) -> str:
-        text = templates.render(wf.nodes[node_id].instruction, {**variables, "session": {"continued": continued}})
+        text = ctx.trace.render(job, "instruction", wf.nodes[node_id].instruction,
+                                {**variables, "session": {"continued": continued}}, continued=continued)
         return "\n\n".join([text.rstrip(), *note, *([output_tool.NEW_RESULT] if continued else []), output_tool.FINISH])
 
     fresh = render(False)
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
     harness = wf.setting(node_id, "harness")
-    names = list(harness) if isinstance(harness, list) else [templates.render(harness, variables).strip()]
+    names = list(harness) if isinstance(harness, list) else [ctx.trace.render(job, "harness", harness, variables).strip()]
     chosen = {name: tuple(_rendered_setting(job, ctx, name, key, variables) for key in ("model", "effort")) for name in names}
     schema = schemas.node_output_schema(wf, node_id)
     listed = None if ctx.root.script else wf.setting(node_id, "tools")  # None: the node doesn't list tools
     uses = listed or ()
 
-    async def attempt(number: int, name: str) -> dict:
+    async def attempt(number: int, name: str, record: Attempt) -> dict:
+        model, effort = chosen[name]
+        source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
+        if source:  # Cursor can't fork: it loads the session itself
+            session_facts = {"start": "load" if name == "cursor" else "fork", "from": source["id"]}
+        else:
+            session_facts = {"start": "fresh", **({"fresh_because": why_not} if why_not else {})}
+        record.begin(model=model, effort=effort, access=wf.setting(node_id, "access"), web=wf.setting(node_id, "web"),
+                     workspace=workspace, session=session_facts, **({"tools": [u.name for u in uses]} if uses else {}))
         # Every attempt but the job's very first starts from the commit the job started from:
         # retries, and attempts after a crash or `wf retry` (which may find half-done edits)
         if start and (number > job["attempt"] or entered_before):
@@ -382,12 +429,13 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         except Unavailable as error:
             raise _Unavailable(str(error)) from error
         async with _attached(uses, number) as tools:
-            return await converse(number, name, agent, tools)
+            return await converse(number, name, agent, tools, record, source, why_not, session_facts)
 
-    async def converse(number: int, name: str, agent, tools: list) -> dict:
-        """One session: the instruction, then reminders, until submit_result has a result."""
+    async def converse(number: int, name: str, agent, tools: list, record: Attempt, source: dict | None,
+                       why_not: str | None, session_facts: dict) -> dict:
+        """One session: the instruction, then reminders, until submit_result has a result.
+        `source` is the session to continue, and `session_facts` the trace's record of it."""
         model, effort = chosen[name]
-        source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
         if why_not:
             emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": why_not})
         spec = SessionSpec(
@@ -398,7 +446,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             effort=effort,
             max_turns=wf.harness_setting(node_id, name, "max_turns"),
             budget_usd=wf.harness_setting(node_id, name, "budget_usd"),
-            tool=output_tool.ResultTool(schema),
+            tool=output_tool.ResultTool(schema, record.submitted),
             log=folder / f"attempt-{number}.log",
             emit=lambda event: emit({**event, **_label(job), "attempt": number, "harness": name}),
             node=node_id,
@@ -409,6 +457,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             tools=tools,
             only_wf_tools=listed is not None,
             project_instructions=wf.setting(node_id, "project_instructions"),
+            trace=record,
         )
         try:
             session = await agent.session(spec)
@@ -416,6 +465,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             if source is None:
                 raise _Unavailable(str(error)) from error
             emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": str(error)})
+            session_facts.clear()
+            session_facts.update(start="fresh", fresh_because=str(error))
             source, spec = None, replace(spec, fork_from=None, prior_cost_usd=0.0)  # the fork failed: start fresh
             try:
                 session = await agent.session(spec)
@@ -425,11 +476,11 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         if source:
             emit({"event": "session_continued", **_label(job), "attempt": number})
             (folder / "instruction.md").write_text(instruction, encoding="utf-8")
-        spent_before = usage.cost_usd
+        spent_before, spent = usage.cost_usd, Usage()
         try:
-            for text in [instruction] + [output_tool.REMINDER] * output_tool.REMINDERS:
+            for turn, text in enumerate([instruction] + [output_tool.REMINDER] * output_tool.REMINDERS, 1):
                 try:
-                    end = await session.send(text)
+                    end = await record.turn(turn, text, session.send(text))
                 except Unavailable as error:
                     raise _Unavailable(str(error)) from error
                 except dryrun.ScriptExhausted:
@@ -437,6 +488,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                 except Exception as error:  # the SDK or the agent process broke
                     raise _AttemptFailed(f"{name}: {type(error).__name__}: {error}") from error
                 usage.add(end.usage)
+                spent.add(end.usage)
                 ctx.add_usage(end.usage)  # live, so limits apply before the next attempt
                 if spec.tool.result is not None:
                     extra["session"] = {"harness": name, "model": model, "id": session.id,
@@ -452,7 +504,10 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         finally:
             cut_off = session.pending_usage()  # zero unless a timeout stopped a turn midway
             usage.add(cut_off)
+            spent.add(cut_off)
             ctx.add_usage(cut_off)
+            session_facts["id"] = session.id
+            record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
             await session.close()
 
     result, number = await _attempts(job, ctx, emit, attempt, names,
@@ -470,11 +525,11 @@ DONT_COMMIT = "Don't commit: the runner commits your changes when you're done."
 
 def _rendered_setting(job: Job, ctx: RunContext, harness: str, name: str, variables: dict) -> str | None:
     """`model` or `effort` for one harness, rendered: a template like "{{ item.model }}" gives each item its own."""
-    source = ctx.workflow.harness_setting(job["node"], harness, name)
+    where, source = ctx.workflow.harness_setting_at(job["node"], harness, name)
     if source is None:
         return None
     try:
-        value = templates.render_value(source, variables)
+        value = ctx.trace.render(job, name, source, variables, templates.render_value, harness=harness, set_in=where)
     except templates.TemplateError as error:
         raise templates.TemplateError(f"{name}: {error}") from error
     if not isinstance(value, str) or not value.strip():
@@ -566,20 +621,29 @@ def _continue_from(previous: dict | None, harness: str, model: str | None) -> tu
 async def _command(job, ctx: RunContext, folder: Path, variables: dict, workspace: dict, emit) -> tuple[dict, int]:
     node_id = job["node"]
     node = ctx.workflow.nodes[node_id]
-    command = templates.render(node.command, variables)
-    env = {**os.environ, **{k: templates.render(v, variables) for k, v in ctx.workflow.setting(node_id, "env").items()}}
+    secret = set(ctx.workflow.setting(node_id, "secret_env"))
+    command = ctx.trace.render(job, "command", node.command, variables)
+    given = {k: ctx.trace.render(job, f"env.{k}", v, variables, secret=k in secret)
+             for k, v in ctx.workflow.setting(node_id, "env").items()}
+    env = {**os.environ, **given}
     check = ctx.workflow.setting(node_id, "check")
     (folder / "instruction.md").write_text(command, encoding="utf-8")
 
-    async def attempt(number: int, harness: None) -> dict:
+    async def attempt(number: int, harness: None, record: Attempt) -> dict:
+        log = folder / f"attempt-{number}.log"
+        record.begin(command=command, cwd=workspace["path"], env={k: HIDDEN if k in secret else v for k, v in given.items()},
+                     stdout=str(log.with_suffix(".stdout")), stderr=str(log.with_suffix(".stderr")), log=str(log))
         scripted = ctx.root.script.take("commands", _path(ctx, job), node_id) if ctx.root.script else None
         if scripted is not None:  # a dry run's scripted result: the command doesn't run
-            log = folder / f"attempt-{number}.log"
             log.write_text(f"dry run: not run; scripted result {json.dumps(scripted)}\n", encoding="utf-8")
+            for stream in ("stdout", "stderr"):
+                log.with_suffix(f".{stream}").write_text(scripted.get(stream, ""), encoding="utf-8")
             result = {"exit_code": scripted["exit_code"], "stdout": scripted.get("stdout", ""),
                       "stderr": scripted.get("stderr", ""), "log": str(log)}
+            record.facts["scripted"] = True
         else:
-            result = await run_shell(command, Path(workspace["path"]), env, folder / f"attempt-{number}.log")
+            result = await run_shell(command, Path(workspace["path"]), env, log)
+        record.facts["exit_code"] = result["exit_code"]
         if check and result["exit_code"] != 0:
             raise _AttemptFailed(f"exited with code {result['exit_code']}")
         return result
@@ -589,22 +653,28 @@ async def _command(job, ctx: RunContext, folder: Path, variables: dict, workspac
 
 async def run_shell(command: str, cwd: Path, env: dict, log: Path) -> dict:
     """Run `bash -c command`. Returns the command node output: exit code, the last
-    TAIL characters of stdout and stderr, and the log file holding everything."""
-    process = await asyncio.create_subprocess_exec(
-        "bash", "-c", command, cwd=cwd, env=env,
-        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,  # its own process group, so a timeout can stop everything it started
-    )
+    TAIL characters of stdout and stderr, and the log file holding everything. Each
+    stream is also kept whole in a file of its own beside the log: attempt-<n>.stdout
+    and attempt-<n>.stderr, which the trace names."""
     tails = {"stdout": "", "stderr": ""}
-    with log.open("w", encoding="utf-8") as file:
+    # The files first: a file that can't be opened fails the attempt before the command starts
+    with (log.open("w", encoding="utf-8") as file, log.with_suffix(".stdout").open("w", encoding="utf-8") as out,
+          log.with_suffix(".stderr").open("w", encoding="utf-8") as err):
+        own = {"stdout": out, "stderr": err}
+        process = await asyncio.create_subprocess_exec(
+            "bash", "-c", command, cwd=cwd, env=env,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,  # its own process group, so a timeout can stop everything it started
+        )
 
         async def pump(stream: asyncio.StreamReader, name: str) -> None:
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while chunk := await stream.read(65536):
                 text = decoder.decode(chunk)
                 tails[name] = (tails[name] + text)[-TAIL:]
-                file.write(text)
-                file.flush()
+                for target in (file, own[name]):
+                    target.write(text)
+                    target.flush()
 
         try:
             # A TaskGroup, unlike gather(), cancels the other reader if one fails
@@ -631,7 +701,7 @@ async def run_shell(command: str, cwd: Path, env: dict, log: Path) -> dict:
 def _human(job: Job, ctx: RunContext, folder: Path, variables: dict) -> dict:
     """Ask a person. interrupt() pauses the run; when it continues, it returns the answers."""
     node_id = job["node"]
-    message = templates.render(ctx.workflow.nodes[node_id].human, variables)
+    message = ctx.trace.render(job, "human", ctx.workflow.nodes[node_id].human, variables)
     (folder / "instruction.md").write_text(message, encoding="utf-8")
     schema = schemas.node_output_schema(ctx.workflow, node_id)
     answers = interrupt({"kind": "human", "node": node_id, "pass": job["pass_no"], "index": job["index"],
@@ -651,7 +721,9 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
     node_id, wf = job["node"], ctx.workflow
     node = wf.nodes[node_id]
     sub = ctx.load((Path(wf.path).parent / node.workflow).resolve())
-    given = {k: templates.render_value(v, variables) if isinstance(v, str) else v for k, v in node.with_.items()}
+    secret, outputs = ctx.trace.sub_secrets(node_id, sub)  # its inputs and outputs that carry a secret
+    given = {k: ctx.trace.render(job, f"with.{k}", v, variables, templates.render_value, secret=k in secret)
+             if isinstance(v, str) else v for k, v in node.with_.items()}
     inputs = _sub_inputs(sub, given, job["attempt"])
     (folder / "instruction.md").write_text(json.dumps({"workflow": node.workflow, "with": inputs}, indent=2) + "\n",
                                            encoding="utf-8")
@@ -668,10 +740,12 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
             return  # the run's own, not the sub-workflow's: the top-level graph reports those
         emit({**event, "node": f"{label}/{event['node']}"} if "node" in event else event)
 
-    async def attempt(number: int, _harness) -> dict:
-        child = ctx.child(sub, folder / f"attempt-{number}", home, path, label)
+    async def attempt(number: int, _harness, record: Attempt) -> dict:
+        child = ctx.child(sub, folder / f"attempt-{number}", home, path, label, record.id, outputs)
         # The folder nests a level per pass and attempt at every depth, so it names the thread uniquely
         thread = f"{ctx.run.id}/{child.run.dir.relative_to(ctx.root.run.dir)}"
+        record.begin(workflow=node.workflow, inputs={k: HIDDEN if k in secret else v for k, v in inputs.items()},
+                     workspace=home, thread=thread)
         # What the parent has already been told this thread spent: only a limit pause tells it
         # early (a question or a crash reruns the job before it reports anything)
         credited_file = child.run.dir / "credited.json"
