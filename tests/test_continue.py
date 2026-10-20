@@ -763,6 +763,52 @@ def test_an_entry_that_only_a_route_leads_from_isnt_certain_before_another_entry
                for p in found), found
 
 
+def test_an_entry_that_the_scheduler_starts_first_to_break_a_wait_reads_no_later_entry(repo):
+    text = """
+        version: 1
+        name: cycle
+        start: {input: {}}
+        follow_up: {to: [a, b]}
+        nodes:
+          c: {needs: [start], command: "true"}
+          d: {needs: [start], command: "true"}
+          a: {needs: [c], command: "echo {% if follow_up %}{{ b.stdout | quote }}{% endif %}", routes: [{to: d, max: 1}, {to: end}]}
+          b: {needs: [d], command: "echo {{ a.stdout | quote }}", routes: [{to: c, max: 1}, {to: end}]}
+        end: {output: {}}
+    """
+    found = problems(text)
+    # a and b each wait for a need that the other leads to, so the scheduler starts a, the first in the file
+    assert [p.split(":", 2)[1].strip() for p in found if "might not have run yet in a follow-up" in p] == ["nodes.a.command"]
+    workflow = spec.load("check.yaml")
+    saved = {"run": {"id": "x", "dir": "x", "base": None, "branch": None, "repo": "."}, "status": "succeeded", "failure": None,
+             "outputs": {n: {"stdout": ""} for n in ("start", "a", "b", "c", "d")},
+             "errors": {}, "taken": {}, "history": {}, "pending": [], "active": {}, "output": {}, "sessions": {}, "passes": {},
+             "usage": {"cost_usd": 0.0, "tokens": 0}, "follow_up": {"request": "more", "number": 1, "limits": {}, "pending": True}}
+    progress = state.Progress(saved, workflow, scheduler.Topology.of(workflow), lambda event: None)
+    progress.follow_up(0.0)
+    assert [job["node"] for job in progress.starts_now(0.0)] == ["a"]
+
+
+def test_a_node_after_an_entry_counts_as_run_before_a_join_that_waits_for_it(repo, capsys):
+    write("join.yaml", """
+        version: 1
+        name: join
+        start: {input: {}}
+        follow_up: {to: [a, b]}
+        nodes:
+          a: {needs: [start], command: "echo A{% if follow_up %}{{ follow_up.number }}{% endif %}"}
+          b: {needs: [start], command: "echo B"}
+          x: {needs: [a], env: {A: "{{ a.stdout | trim }}"}, command: 'echo "x$A"'}
+          join: {needs: [x, b], env: {X: "{{ x.stdout | trim }}"}, command: 'echo "$X"'}
+        end: {output: {said: {type: string, value: "{{ join.stdout | trim }}"}}}
+    """)
+    assert [str(p) for p in validate.check("join.yaml").problems] == []
+    assert cli.main(["run", "join.yaml"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "more"]) == 0
+    assert run.output() == {"said": "xA1"}
+
+
 def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
     workflow = spec.parse(dedent("""
         version: 1

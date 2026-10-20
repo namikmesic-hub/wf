@@ -1109,13 +1109,14 @@ def _reads_follow_up(workflow: Workflow, node_id: str) -> bool:
 class _FollowUpOrder(_Order):
     """_Order for a follow-up, which starts at the nodes in `entry` instead of at start. The nodes they can
     lead to (`ahead`) run again from none. Of the others, only `kept`, the nodes certain to have run by the
-    end of the run, count as finished. The entry nodes all start pending, so each one runs. One finishes
-    before a node starts only when a need of that node waits for it (scheduler.settled)."""
+    end of the run, count as finished. The entry nodes all start pending, so each one runs. See waited()
+    for when one finishes before a node starts."""
 
     def __init__(self, topo: Topology, entry: tuple[str, ...], kept: frozenset[str]):
         super().__init__(topo)
         self.entry, self.ahead = set(entry), topo.reachable(entry)
         self.kept = kept - self.ahead
+        self.position = {n: i for i, n in enumerate(topo.order)}
         triggers = {n: (set(topo.needs[n]) | set(self.route_sources[n])) & self.ahead for n in topo.order}
         for node in self.entry:
             triggers[node].add(START)
@@ -1125,12 +1126,17 @@ class _FollowUpOrder(_Order):
 
     def before(self, node: str) -> set[str]:
         if node not in self._before:
-            known = self.dominators[node] - {node, START}  # a follow-up's start ended long ago
-            waited = {entry for entry in self.entry - {node} if any(
-                need != START and need in self.topo.reachable([entry], avoiding=node) for need in self.topo.needs[node])}
-            certain = self._certain(known, excluding=node)
-            self._before[node] = known | waited | (self._ancestors(node) & certain) | self.kept
+            known = (self.dominators[node] - {node, START}) | self.waited(node)  # a follow-up's start ended long ago
+            self._before[node] = known | (self._ancestors(node) & self._certain(known, excluding=node)) | self.kept
         return self._before[node]
+
+    def waited(self, node: str) -> set[str]:
+        """The entry nodes that finish before `node` starts. A need of the node must wait for the entry
+        (scheduler.settled). When all pending nodes wait, the first one starts (scheduler.starts). So the
+        entry must also be pending before the node: the entries are pending first, in file order."""
+        earlier = {e for e in self.entry - {node} if node not in self.entry or self.position[e] < self.position[node]}
+        return {e for e in earlier if any(
+            need != START and need in self.topo.reachable([e], avoiding=node) for need in self.topo.needs[node])}
 
     def at_end(self) -> set[str]:
         return self._certain((self.dominators[END] - {END, START}) | self.entry, excluding=None) | self.kept

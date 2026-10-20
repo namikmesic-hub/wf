@@ -463,6 +463,7 @@ build:
 - The node's `workspace` becomes the sub-workflow's `repo`.
 - The node's next pass gives its sub-workflow the sessions that the last pass ended with.
   So a node of the sub-workflow with `session: continue` continues its session, also in a follow-up.
+  A `for_each` item starts its sub-workflow without sessions, as an agent node's item does (see [Sessions](#sessions)).
 
 ### defaults
 
@@ -737,6 +738,8 @@ gets depends on `session`:
   - The pass starts fresh instead, and an event says why, when: the harness or model differs
     from the previous pass, the session can't be found, it's a Cursor retry after a failed
     continued attempt, or the two passes before it both continued.
+  - The items of a `for_each` node always start fresh, also in a workflow node.
+    Each pass renders the list again, so the item at an index can be a different task.
 
 ### Agent slots
 
@@ -902,6 +905,7 @@ What a follow-up keeps, and what starts again:
   It does so also when the two passes before it both continued, and the count of continued passes in a row starts again there.
   When the harness can't find the session, the pass starts fresh, and a `session_fresh` event says why.
   A node in a sub-workflow continues its session too, because a workflow node gives its next pass the sessions of its sub-workflow.
+  The items of a `for_each` node start fresh, as in each pass.
 - **Models.** The overrides that `wf retry --model` gave still apply.
 - **Status and checkpoints.** `wf continue` first sets the status to `running`, with the number of the follow-up.
   Then one write of the checkpoints holds the request and its limits, as an input of the graph.
@@ -947,7 +951,7 @@ The tests named below are in `tests/test_continue.py`.
 | `to` names several nodes | Each of them starts, and a node that needs them all runs after them. | `workflow/state.py:222`, `workflow/validate.py:1109` | `test_a_follow_up_can_start_at_several_nodes` |
 | A template reads `follow_up` | It gets `{request, number}` of the latest request, or `none` before the first follow-up. The state keeps no list of earlier requests. | `workflow/state.py:83`, `workflow/state.py:131`, `workflow/state.py:385` | `test_the_trace_shows_each_follow_up_as_a_new_pass_of_the_run`, `test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest` |
 | A `session: continue` node runs its first pass in a follow-up | It continues its last session, also after two continued passes in a row. | `workflow/state.py:220`, `workflow/state.py:390`, `workflow/nodes.py:663` | `test_a_session_continue_node_continues_its_last_session_in_a_follow_up` |
-| A workflow node runs a later pass, in a follow-up or in a loop | Its new sub-workflow thread starts with the sessions that the last one ended with, so a `session: continue` node in it continues its session. | `workflow/state.py:309`, `workflow/nodes.py:804`, `workflow/nodes.py:813` | `test_a_session_continue_node_in_a_sub_workflow_continues_its_session_in_a_follow_up`, `test_a_workflow_node_passes_its_sub_workflows_sessions_to_its_next_pass` in `tests/test_sessions.py` |
+| A workflow node runs a later pass, in a follow-up or in a loop | Its new sub-workflow thread starts with the sessions that the last one ended with, so a `session: continue` node in it continues its session. A `for_each` item's thread starts without sessions. | `workflow/state.py:309`, `workflow/nodes.py:804`, `workflow/nodes.py:813` | `test_a_session_continue_node_in_a_sub_workflow_continues_its_session_in_a_follow_up`, `test_a_workflow_node_passes_its_sub_workflows_sessions_to_its_next_pass` in `tests/test_sessions.py` |
 | The follow-up spends tokens or dollars, or runs for some time | Its limits are those of the file, with its own `--limit` values on top. They count only what it spends after it starts. | `workflow/state.py:214`, `workflow/graph.py:80`, `workflow/limits.py:69`, `workflow/context.py:142`, `workflow/runner.py:752` | `test_a_follow_up_has_a_budget_of_its_own_from_the_command_line`, `test_a_follow_up_counts_cost_and_time_from_its_start` |
 | `wf retry` continues a follow-up, also with `--limit` | Its limits are the follow-up's, with the ones that `wf retry` kept in this follow-up on top. The `--limit` values of earlier passes don't apply. | `workflow/runner.py:189`, `workflow/runner.py:191`, `workflow/runner.py:301`, `workflow/runner.py:835`, `workflow/runs.py:121`, `workflow/runs.py:129` | `test_a_follow_up_has_a_budget_of_its_own_from_the_command_line`, `test_limits_that_earlier_passes_got_dont_apply_to_a_follow_up` |
 | A job runs again before the first step of a stream | It sees the clock, the usage and the start of the follow-up as the saved state has them. | `workflow/runner.py:455`, `workflow/context.py:220` | `test_a_job_that_runs_again_before_the_first_step_counts_only_the_follow_ups_time` |
@@ -973,7 +977,7 @@ The tests named below are in `tests/test_continue.py`.
 | `follow_up.to` names `start`, `end` or a node that doesn't exist, or `follow_up` has another key, or a node is named `follow_up` | `wf validate` errors. | `workflow/validate.py:1068`, `workflow/spec.py:306`, `workflow/spec.py:47` | `test_follow_up_names_nodes_of_the_workflow` |
 | A template reads `follow_up` | `wf validate` errors in a workflow without `follow_up`. It warns when a field is read outside `{% if follow_up %}`, and when a command puts it into the shell unquoted. | `workflow/validate.py:276`, `workflow/validate.py:407`, `workflow/validate.py:1049`, `workflow/validate.py:481` | `test_a_template_reads_follow_up_only_in_a_workflow_that_has_it_and_checks_it_first` |
 | No node that a follow-up runs again reads `follow_up` | `wf validate` warns, also when a node before the entry reads it. | `workflow/validate.py:1075` | `test_a_template_reads_follow_up_only_in_a_workflow_that_has_it_and_checks_it_first` |
-| A template reads a node whose output a follow-up clears, and that node might not run again before it | `wf validate` warns, and says that this is because of a follow-up. An entry node counts as run before a node only when a need of that node waits for it. | `workflow/validate.py:418`, `workflow/validate.py:1079`, `workflow/validate.py:1109` | `test_a_template_that_reads_a_node_a_follow_up_clears_gets_a_warning`, `test_a_workflow_with_follow_up_validates`, `test_a_follow_up_can_start_at_several_nodes`, `test_an_entry_that_only_a_route_leads_from_isnt_certain_before_another_entry` |
+| A template reads a node whose output a follow-up clears, and that node might not run again before it | `wf validate` warns, and says that this is because of a follow-up. An entry node counts as run before a node only when a need of that node waits for it, and the entry is pending first. The scheduler starts the first pending node when all of them wait, so an entry later in the file doesn't count before another entry. The nodes that a counted entry is certain to lead to, and that lead to the node, count too. | `workflow/validate.py:418`, `workflow/validate.py:1079`, `workflow/validate.py:1127`, `workflow/validate.py:1133` | `test_a_template_that_reads_a_node_a_follow_up_clears_gets_a_warning`, `test_a_workflow_with_follow_up_validates`, `test_a_follow_up_can_start_at_several_nodes`, `test_an_entry_that_only_a_route_leads_from_isnt_certain_before_another_entry`, `test_an_entry_that_the_scheduler_starts_first_to_break_a_wait_reads_no_later_entry`, `test_a_node_after_an_entry_counts_as_run_before_a_join_that_waits_for_it` |
 
 ## The output tool
 

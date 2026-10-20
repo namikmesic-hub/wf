@@ -120,7 +120,11 @@ end: {output: {}}
     assert [s.continuable for s in fake.specs] == [False, False]
 
 
-def test_a_workflow_node_passes_its_sub_workflows_sessions_to_its_next_pass(repo, monkeypatch):
+@pytest.mark.parametrize("items, forks", [
+    ("", [None, "session-1"]),
+    ("for_each: '[1]', ", [None, None]),  # an item starts its sub-workflow without sessions, as an agent's item does
+])
+def test_a_workflow_node_passes_its_sub_workflows_sessions_to_its_next_pass(repo, monkeypatch, items, forks):
     fake = Fake("claude-code", submit({"summary": "one"}), submit({"summary": "two"}))
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
     Path("child.yaml").write_text("""
@@ -137,14 +141,14 @@ version: 1
 name: outer
 start: {input: {}}
 nodes:
-  build: {needs: [start], workflow: child.yaml}
+  build: {needs: [start], ITEMSworkflow: child.yaml}
   check:
     needs: [build]
     command: "echo try >> tries; test $(wc -l < tries) -ge 2"
     check: false
     routes: [{when: "check.exit_code != 0", to: build, max: 1}, {to: end}]
 end: {output: {}}
-""")
+""".replace("ITEMS", items))
     assert cli.main(["run", "flow.yaml"]) == 0
-    assert [s.fork_from for s in fake.specs] == [None, "session-1"]
-    assert fake.sent[1] == f"Again\n\n{NEW_RESULT}\n\n{FINISH}"
+    assert [s.fork_from for s in fake.specs] == forks
+    assert fake.sent[1].splitlines()[0] == ("Again" if forks[1] else "The task")
