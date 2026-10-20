@@ -15,7 +15,8 @@ KEPT_INSTRUCTIONS names what a harness still gives its agent when a node sets
 `project_instructions: false`, which `wf validate` warns about.
 
 reports_tokens() says whether a harness counts a session's tokens: Cursor does on its SDK,
-but not through cursor-agent's ACP, which runs its `edit` sessions (cursor_on_acp()).
+but not through cursor-agent's ACP, which runs its `edit` sessions, and every session when no
+Cursor API key is set (cursor_on_acp()).
 KEPT_INSTRUCTIONS["cursor"] is what cursor-agent keeps. On the SDK a session with
 `project_instructions: false` loads none of Cursor's settings layers.
 
@@ -71,14 +72,15 @@ def reaches_keychain(harness: str, access: str) -> bool:
 
 def cursor_on_acp(access: str) -> bool:
     """Does a Cursor session at this access level run through cursor-agent's ACP? A cursor_runtime
-    setting that can't be read counts as the default, since a run would stop at it anyway."""
-    from .cursor import ON_ACP, runtime
+    setting or an API key that can't be read counts as the default, since a run would stop at it anyway."""
+    from .cursor import ON_ACP, api_key, runtime
 
+    if access in ON_ACP:
+        return True
     try:
-        on_acp = runtime() == "acp"
+        return runtime() == "acp" or api_key() is None
     except Unavailable:
-        on_acp = False
-    return on_acp or access in ON_ACP
+        return False
 
 
 def reports_tokens(harness: str, access: str) -> bool:

@@ -11,6 +11,7 @@ from textwrap import dedent, indent
 import pytest
 
 from workflow import harnesses, validate
+from workflow.harnesses import cursor
 
 DOCS = Path(__file__).parent.parent / "docs"
 EXAMPLES = Path(__file__).parent.parent / "workflow" / "examples"
@@ -649,7 +650,8 @@ def test_cost_limits_with_harnesses_that_do_not_report_cost_warn(tmp_path):
     assert_problems(report, [("warning", "limits.cost_usd", "codex doesn't report cost in dollars")])
 
 
-def test_cursor_reports_tokens_but_no_cost_and_takes_no_effort(tmp_path):
+def test_cursor_reports_tokens_but_no_cost_and_takes_no_effort(tmp_path, fake_keyring):
+    fake_keyring.set_password(*cursor.KEYCHAIN, "key_test")
     report = check(tmp_path, flow(
         "a: {needs: [start], instruction: x, harness: cursor, model: gpt-5.6-sol-max-fast, effort: high}",
         top="limits: {cost_usd: 5, tokens: 100000}\n",
@@ -659,6 +661,13 @@ def test_cursor_reports_tokens_but_no_cost_and_takes_no_effort(tmp_path):
         ("warning", "nodes.a", "cursor doesn't use `effort`: a Cursor model id carries its own"),
         ("warning", "limits.cost_usd", "cursor doesn't report cost in dollars"),
     ])
+
+
+def test_a_token_limit_warns_when_cursor_has_no_api_key_and_runs_through_acp(tmp_path, fake_keyring):
+    text = flow("a: {needs: [start], instruction: x, harness: cursor, model: composer-2.5}", top="limits: {tokens: 100000}\n")
+    assert_problems(check(tmp_path, text), [("warning", "limits.tokens", "or with no Cursor API key set")])
+    fake_keyring.set_password(*cursor.KEYCHAIN, "key_test")
+    assert check(tmp_path, text).problems == []  # with a key, read-only runs on the SDK, which counts tokens
 
 
 def test_a_template_reading_run_tokens_warns_when_cursor_runs_an_edit_node_through_acp(tmp_path):
@@ -710,7 +719,8 @@ def test_project_instructions_off_warns_about_every_harness_a_template_could_pic
     assert "your Cursor account's User Rules, the skills in your home folder" in report.problems[1].message
 
 
-def test_project_instructions_off_on_cursors_sdk_keeps_nothing_out_and_gets_no_warning(tmp_path, monkeypatch):
+def test_project_instructions_off_on_cursors_sdk_keeps_nothing_out_and_gets_no_warning(tmp_path, monkeypatch, fake_keyring):
+    fake_keyring.set_password(*cursor.KEYCHAIN, "key_test")
     text = flow("a: {needs: [start], instruction: x, harness: cursor, model: composer-2.5, project_instructions: false}")
     assert check(tmp_path, text).problems == []  # read-only runs on the SDK, which loads no settings layer
     monkeypatch.setenv("WF_CURSOR_RUNTIME", "acp")

@@ -167,6 +167,7 @@ Each harness needs its own login, and only the harnesses a workflow uses need to
   wf runs Cursor through Cursor's SDK (`@cursor/sdk`), in the Cursor host, a program in TypeScript that ships with wf.
   Create the key in the Cursor dashboard, then run `wf runtimes cursor signin`, which keeps it in the macOS Keychain.
   Or name a file that holds the key with `cursor_api_key_file` in `~/.wf/config.yaml`.
+  Until a key is set, read-only and full nodes run through `cursor-agent` too, as before, and the run warns once and says how to add a key.
   wf never reads the key from the environment, and removes `CURSOR_API_KEY` from the environment that Cursor and its agents see.
   An agent that runs commands at `edit` or `full` access could still read the key from the Keychain.
   It could read every other sign-in there too ([docs/tools.md](tools.md)).
@@ -384,7 +385,7 @@ The tests of the other rows are in `tests/test_validate.py`, unless another file
 | `false` on Cursor's SDK | The session loads no layer of Cursor's settings: the host leaves out `settingSources`. With `true`, it loads the `project` layer. | `workflow/harnesses/cursor_host/src/cursor.ts:163` | `test_without_project_instructions_no_cursor_settings_layer_loads`, `test_a_real_cursor_node_without_project_instructions_gets_no_repo_rules` (`-m harness`, with a Cursor API key) |
 | `false` on Cursor through `cursor-agent` | cursor-agent starts in a new empty folder in the system's temp folder, because it reads rules, `AGENTS.md`, `CLAUDE.md` and skills from the folder it starts in, the folders above it, and the repo it is in. `session/new` still gives the workspace, where the agent reads, edits and runs commands. The folder goes with the session. | `workflow/harnesses/cursor_acp.py:302`, `workflow/harnesses/cursor_acp.py:454` | `test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace`, `test_by_default_cursor_agent_starts_in_the_workspace` |
 | `false` on Cursor through `cursor-agent`, and the temp folder is in a git repo, or a folder above it holds `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `.cursorrules`, `.cursor/rules`, or a `skills` folder in `.cursor`, `.claude`, `.codex`, `.grok` or `.agents`, as when `TMPDIR` is in a repo | Cursor is unavailable for the attempt, and the message names what it found, so the next harness in the node's list runs. The skills folders in your home folder don't count, because they load wherever Cursor starts. | `workflow/harnesses/cursor_acp.py:468` | `test_a_temp_folder_under_what_cursor_loads_makes_it_unavailable_without_project_instructions`, `test_your_home_folders_skills_above_the_temp_folder_do_not_count` |
-| `false` where a harness still loads a file | `wf validate` warns once for each harness, where the setting is. On Codex, your global `~/.codex/AGENTS.md` and the skills in your home folder stay. On Cursor through `cursor-agent`, for `edit` nodes or with `cursor_runtime: acp`, your account's User Rules and the skills in your home folder stay, and so do the repo's hooks in `.cursor/hooks.json` and `.claude/settings.json`. Cursor's SDK keeps none of them, so it gets no warning. | `workflow/validate.py:639`, `workflow/harnesses/__init__.py:61` | `test_project_instructions_off_warns_once_per_harness_that_keeps_a_file`, `test_project_instructions_off_on_cursors_sdk_keeps_nothing_out_and_gets_no_warning` |
+| `false` where a harness still loads a file | `wf validate` warns once for each harness, where the setting is. On Codex, your global `~/.codex/AGENTS.md` and the skills in your home folder stay. On Cursor through `cursor-agent`, for `edit` nodes, with `cursor_runtime: acp` or with no Cursor API key set, your account's User Rules and the skills in your home folder stay, and so do the repo's hooks in `.cursor/hooks.json` and `.claude/settings.json`. Cursor's SDK keeps none of them, so it gets no warning. | `workflow/validate.py:639`, `workflow/harnesses/__init__.py:61` | `test_project_instructions_off_warns_once_per_harness_that_keeps_a_file`, `test_project_instructions_off_on_cursors_sdk_keeps_nothing_out_and_gets_no_warning` |
 | `false`, and a template picks the harness | `wf validate` can't tell which harness runs, so it warns about each harness that keeps a file. | `workflow/validate.py:645` | `test_project_instructions_off_warns_about_every_harness_a_template_could_pick` |
 
 Through `cursor-agent`, `false` has a cost: Cursor's semantic code search and lint diagnostics don't cover the workspace.
@@ -534,6 +535,7 @@ A follow-up has a budget of its own (see [Follow-ups](#follow-ups)).
   included).
   Claude Code and Codex report them.
   Cursor reports them through its SDK, but not for `edit` nodes, which run through `cursor-agent`.
+  With no Cursor API key set, every Cursor node runs through `cursor-agent`, so none of them reports tokens.
 - **Cost** only counts harnesses that report it in dollars.
   Claude Code does.
   Codex and Cursor don't.
@@ -1489,7 +1491,7 @@ Warnings:
 - A node with `project_instructions: false` can run on a harness that still loads an instruction file.
   Codex loads your global `~/.codex/AGENTS.md` and the skills in your home folder.
   Cursor, through `cursor-agent`, loads your account's User Rules, the skills in your home folder, and the repo's hooks.
-  That is for its `edit` nodes, and for every node with `cursor_runtime: acp`.
+  That is for its `edit` nodes, and for every node with `cursor_runtime: acp` or with no Cursor API key set.
 - An agent with `access: full` reads output from an agent with `tools`.
   Messages, notes and mail that other people write can carry instructions aimed at agents.
 - A template reads a field of `follow_up` outside an `{% if follow_up %}` that checks it.
@@ -1515,7 +1517,7 @@ workflow/
     remote.py       a harness whose sessions run in another program: the wf-session protocol
     cursor.py       Cursor's SDK, in the Cursor host (cursor_host/, TypeScript), through remote.py
     files_tool.py   read and search files, only where the step may, for read-only agents on Cursor's SDK
-    cursor_acp.py   cursor-agent acp, the Agent Client Protocol over stdio: `edit`, and `cursor_runtime: acp`
+    cursor_acp.py   cursor-agent acp, the Agent Client Protocol over stdio: `edit`, `cursor_runtime: acp`, and no API key
     mcp_http.py     submit_result as an MCP server over HTTP, for cursor-agent
   settings.py       ~/.wf/config.yaml: wf's own settings, and the names it knows
   capacity.py       the agent slots: one cap on live agent sessions across all runs
@@ -1625,7 +1627,9 @@ Notes:
 - The Cursor host sets the SDK's `enableAgentRetries`, so the SDK carries a turn over a lost connection by itself.
   ACP switches that loop off, so on `cursor-agent` one lost stream ended the turn.
 - The host maps the SDK's errors to classes.
-  A refused or missing API key, a usage limit, or a model Cursor can't run makes Cursor unavailable.
+  A refused API key, a usage limit, or a model Cursor can't run makes Cursor unavailable.
+- With no API key set, read-only and full nodes run through `cursor-agent`'s ACP, as they did before the SDK.
+  The run's first such session warns once, and the warning says how to add a key.
   A lost connection that the SDK couldn't carry over fails the attempt, and the retry waits 30 seconds, also as a session opens.
 - A message from `wf steer` that Cursor doesn't answer within 8 seconds is `queued`.
   When Cursor sends it back later, the runner sends it as the next turn.
@@ -1639,7 +1643,7 @@ Notes:
   The SDK can't be bundled into one file, so the first Cursor session installs it beside the host with `npm ci --omit=dev --ignore-scripts`, from the host's `package-lock.json`.
   The protocol's frames are in `workflow/harnesses/cursor_host/protocol/`, as JSON Schema and an example of each.
 
-Through `cursor-agent`'s ACP, for `edit` nodes and for every node with `cursor_runtime: acp`:
+Through `cursor-agent`'s ACP, for `edit` nodes and for every node with `cursor_runtime: acp` or with no Cursor API key set:
 - Cursor asks before what it may not do by itself.
   The runner answers from the node's access level with "allow once" or "reject".
   It never answers "allow always", which Cursor would save.

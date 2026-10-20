@@ -23,6 +23,7 @@ Agents can also read Slack, Granola, Linear, Notion and Gmail through tools that
 Needs Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code, Codex or Cursor set up.
 Cursor runs through Cursor's SDK, so it needs Node.js 22.18 or later and a Cursor API key (`wf runtimes cursor signin`).
 Its `edit` steps run through `cursor-agent`, logged in.
+Until a key is set, all its steps run through `cursor-agent`, and each run warns once.
 
 ```sh
 uv tool install --editable .

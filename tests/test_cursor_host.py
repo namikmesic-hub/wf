@@ -137,7 +137,7 @@ def test_a_model_check_asks_the_host_and_names_what_cursor_has(tmp_path, monkeyp
 
 
 @needs_node
-def test_an_edit_node_has_its_model_checked_on_cursor_agent(tmp_path, monkeypatch, cursor_host):
+def test_an_edit_node_or_one_with_no_api_key_has_its_model_checked_on_cursor_agent(tmp_path, monkeypatch, cursor_host):
     from fakes import Fake
     acp = Fake("cursor", models={"composer-2.5"})
     use(monkeypatch, tmp_path, cursor_host, acp=acp.factory, key=None)
@@ -153,7 +153,10 @@ def test_an_edit_node_has_its_model_checked_on_cursor_agent(tmp_path, monkeypatc
     asyncio.run(check("composer-2.5", "edit"))  # no API key is needed on cursor-agent
     with pytest.raises(Unavailable, match="cursor has no model `gpt-9`"):
         asyncio.run(check("gpt-9", "edit"))
-    with pytest.raises(Unavailable, match="no Cursor API key was given to the Cursor host"):
+    with pytest.raises(Unavailable, match="cursor has no model `gpt-9`"):
+        asyncio.run(check("gpt-9", "read-only"))  # with no API key, read-only runs on cursor-agent too
+    keyring.set_password(*cursor.KEYCHAIN, "key_revoked")
+    with pytest.raises(Unavailable, match="Cursor refused the API key: Invalid User API Key. Create a Cursor API key"):
         asyncio.run(check(None, "read-only"))  # with no model: can the SDK run at all
 
 

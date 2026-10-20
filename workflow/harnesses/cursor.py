@@ -21,8 +21,10 @@ The API key: the SDK needs a Cursor API key, and cursor-agent's login doesn't wo
 reads it from the macOS Keychain (`wf runtimes cursor signin` keeps it there), or from the file
 that `cursor_api_key_file` in ~/.wf/config.yaml names: never from the environment. It goes to the
 host over stdin, in the protocol's hello, never on a command line. The host, and so the agent's
-commands, get the environment without CURSOR_API_KEY and CURSOR_AUTH_TOKEN. A missing or refused
-key makes Cursor unavailable, and the message says what to do (FIX).
+commands, get the environment without CURSOR_API_KEY and CURSOR_AUTH_TOKEN. With no key, read-only
+and full sessions run through cursor-agent's ACP, as they did before the SDK, and the run's first
+such session warns once and says what to do (FIX). A key that Cursor refuses makes Cursor
+unavailable, and the message says what to do.
 
 Access levels, as the host maps them (cursor_host/src/cursor.ts):
 - read-only: none of Cursor's tools that read files or run commands. wf's file tools
@@ -83,6 +85,8 @@ EDIT_ON_ACP = ("Cursor's SDK can't refuse a write outside the workspace, and no 
                "keeps writes in it, so `edit` runs through cursor-agent's ACP")
 FIX = ("Create a Cursor API key in the Cursor dashboard, then run `wf runtimes cursor signin` to keep it in the "
        "macOS Keychain, or name a file that holds it with `cursor_api_key_file` in ~/.wf/config.yaml")
+NO_KEY = ("no Cursor API key is set, so cursor runs read-only and full sessions through cursor-agent's ACP, "
+          "which counts no tokens")
 INSTALL_TIMEOUT = 600
 LABELS = {  # Cursor's tool names, as progress shows them, the same as on ACP where there's one
     "shell": "command", "read": "read", "edit": "edit", "write": "edit", "delete": "delete", "grep": "search",
@@ -253,6 +257,7 @@ class Cursor(remote.RemoteHarness):
         self._preparing = asyncio.Lock()
         self._acp: Harness | None = None
         self._acp_lock = asyncio.Lock()
+        self._warned = False  # about the missing API key
 
     async def open(self, run_dir: Path) -> None:
         self.run_dir = Path(run_dir)
@@ -289,16 +294,20 @@ class Cursor(remote.RemoteHarness):
             raise Unavailable(f"the Cursor host didn't start: {error or 'no answer'}") from error
 
     async def check_model(self, model: str | None, access: str = "read-only") -> None:
-        """On the SDK, or on ACP for the access levels that run there. Raises Unavailable."""
-        if access in ON_ACP:
+        """On the SDK, or on ACP for the sessions that run there. Raises Unavailable."""
+        if self._why_acp(access):
             await (await self._on_acp()).check_model(model, access)
         else:
             await super().check_model(model, access)
 
     async def session(self, spec: SessionSpec) -> remote.RemoteSession:
-        if spec.access in ON_ACP:
+        why = self._why_acp(spec.access)
+        if why:
             harness = await self._on_acp()
-            transcript(spec.log, "runtime", runtime="acp", why=EDIT_ON_ACP)
+            if why == NO_KEY and not self._warned:
+                self._warned = True
+                spec.emit({"event": "warning", "message": f"{NO_KEY}. {FIX}"})
+            transcript(spec.log, "runtime", runtime="acp", why=why)
             return await harness.session(spec)
         continuing = self.home / "continuing" / spec.fork_from if spec.fork_from else None
         saved = self.home / "sessions" / spec.fork_from if spec.fork_from else None
@@ -320,8 +329,15 @@ class Cursor(remote.RemoteHarness):
                    effective=session.facts.get("effective"), sdk=session.facts.get("sdk"), state=str(state))
         return session
 
+    def _why_acp(self, access: str) -> str | None:
+        """Why a session at this access level runs through cursor-agent's ACP, or None when it
+        runs on the SDK. Raises Unavailable when the API key can't be read."""
+        if access in ON_ACP:
+            return EDIT_ON_ACP
+        return NO_KEY if api_key() is None else None
+
     async def _on_acp(self) -> Harness:
-        """The ACP harness for `edit` sessions, opened on first use."""
+        """The ACP harness for `edit` sessions, and for every session when no API key is set, opened on first use."""
         async with self._acp_lock:
             if self._acp is None:
                 from .cursor_acp import CursorAcp

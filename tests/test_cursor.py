@@ -229,22 +229,44 @@ def test_progress_the_transcript_and_the_trace_show_text_and_tool_calls(repo, mo
     assert [r["text"] for r in trace if r["kind"] == "message"] == ["Looking."]
 
 
-def test_a_missing_api_key_makes_cursor_unavailable_and_says_how_to_add_one(repo, monkeypatch, cursor_host, capsys):
-    log = use(monkeypatch, repo, cursor_host, key=None)
+def test_with_no_api_key_sessions_run_through_cursor_agents_acp_and_one_warning_says_how_to_add_one(
+        repo, monkeypatch, cursor_host, capsys):
+    from fakes import Fake, submit
+    acp = Fake("cursor", submit({"summary": "from acp"}), submit({"summary": "from acp too"}))
+    log = use(monkeypatch, repo, cursor_host, key=None, acp=acp.factory)
     monkeypatch.setenv("CURSOR_API_KEY", KEY)  # never read from the environment
-    assert run() == 1
-    out = capsys.readouterr().out
-    assert "cursor is unavailable: no Cursor API key was given to the Cursor host. Create a Cursor API key" in out
-    assert "`wf runtimes cursor signin`" in out and "`cursor_api_key_file`" in out
-    assert entries(log, "create") == []
+    Path("flow.yaml").write_text(dedent("""
+        version: 1
+        name: cu
+        defaults: {harness: cursor, harnesses: {cursor: {model: composer-2.5}}}
+        start: {input: {}}
+        nodes:
+          ask: {needs: [start], instruction: Say hi}
+          other: {needs: [ask], instruction: Say hi too, access: full}
+        end: {output: {ask: "{{ ask.summary }}", other: "{{ other.summary }}"}}
+        """))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert output() == {"ask": "from acp", "other": "from acp too"}
+    assert [spec.access for spec in acp.specs] == ["read-only", "full"]
+    assert entries(log, "loaded") == []  # no Cursor host was started
+    (warning,) = events("warning")
+    assert warning["message"].startswith("no Cursor API key is set, so cursor runs read-only and full sessions "
+                                         "through cursor-agent's ACP, which counts no tokens. Create a Cursor API key")
+    assert "`wf runtimes cursor signin`" in warning["message"] and "`cursor_api_key_file`" in warning["message"]
+    assert capsys.readouterr().out.count("⚠ no Cursor API key is set") == 1
+    (line,) = [e for e in attempt_log() if e["kind"] == "runtime"]
+    assert line["runtime"] == "acp" and line["why"].startswith("no Cursor API key is set")
 
 
 def test_a_refused_api_key_makes_cursor_unavailable(repo, monkeypatch, cursor_host, capsys):
-    use(monkeypatch, repo, cursor_host, key="key_revoked")
+    from fakes import Fake, submit
+    acp = Fake("cursor", submit({"summary": "from acp"}))
+    use(monkeypatch, repo, cursor_host, key="key_revoked", acp=acp.factory)
     assert run() == 1
     out = capsys.readouterr().out
     assert "cursor is unavailable: Cursor refused the API key: Invalid User API Key. Create a Cursor API key" in out
     assert "attempt 2" not in out  # no retry on the same harness
+    assert acp.specs == [] and events("warning") == []  # a key that is set never hands the session to cursor-agent
 
 
 def test_the_api_key_can_come_from_a_file_that_a_setting_names(repo, monkeypatch, cursor_host, wf_home, fake_keyring):
