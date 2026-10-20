@@ -8,7 +8,8 @@ Driving a run alternates between two things:
    stream_mode="custom". Each chunk is a progress event a node sent with
    runtime.stream_writer: print it, add it to events.jsonl. When the stream
    ends, graph.aget_state() says why: state.interrupts lists what the graph
-   is waiting for, and no interrupts means it reached END.
+   is waiting for, and no interrupts means it reached END. While it streams,
+   `wf steer` messages reach the agent sessions that are open (steer.py).
 2. Deciding what's next, outside asyncio:
    - Human nodes: at a terminal, ask now and stream again with
      Command(resume={interrupt id: answers}). That's how LangGraph continues
@@ -52,8 +53,9 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, schemas, settings, spec, validate, workspaces
+from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, schemas, settings, spec, steer, validate, workspaces
 from .context import RunContext
+from .harnesses.base import short
 
 RECURSION_LIMIT = 10_000  # LangGraph's cap on steps; each pass of a node takes two
 STOPPED = 130  # exit code after Ctrl-C, as shells report it
@@ -453,10 +455,11 @@ async def _stream(ctx: RunContext, command) -> StateSnapshot:
         ctx.restart_clock((before.values or {}).get("elapsed_s", 0.0))
         ctx.trace.know(lambda: graph.variables(before.values, ctx))  # a job that reruns first may show them
         try:
-            async for event in compiled.astream(command, config, context=ctx, stream_mode="custom", durability="sync"):
-                ctx.run.add_event(event)
-                if (line := describe(event)) is not None:
-                    print(line, flush=True)
+            async with steer.answering(ctx.run, ctx.steering):
+                async for event in compiled.astream(command, config, context=ctx, stream_mode="custom", durability="sync"):
+                    ctx.run.add_event(event)
+                    if (line := describe(event)) is not None:
+                        print(line, flush=True)
         finally:
             await ctx.close_harnesses()
         return await compiled.aget_state(config)
@@ -608,6 +611,9 @@ def describe(event: dict) -> str | None:
         return f"  {where}: attempt {event['attempt']} got an agent slot after {event['waited_s']:g}s"
     if kind == "warning":
         return f"⚠ {event['message']}"
+    if kind == "steer":
+        detail = short(event["text"], 80) if "text" in event else event.get("reason")
+        return f"  {where}: message from wf steer {event['status']}" + (f": {detail}" if detail else "")
     return None
 
 

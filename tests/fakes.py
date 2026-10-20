@@ -8,9 +8,12 @@ from workflow.harnesses.base import TurnEnd, Unavailable, Usage
 
 
 class Fake:
+    """`steer(session, text, ident)`, if given, answers wf steer messages. Without it, the
+    session takes none, as Cursor's, and the runner sends them as the next turn."""
+
     def __init__(self, name: str, *turns, fork_fails: bool = False, models: set[str] | None = None,
-                 unavailable: str | None = None):
-        self.name, self.turns, self.fork_fails = name, list(turns), fork_fails
+                 unavailable: str | None = None, steer=None):
+        self.name, self.turns, self.fork_fails, self.steer = name, list(turns), fork_fails, steer
         self.models, self.unavailable = models, unavailable  # the models it has (None: any), and why open() fails
         self.sent, self.specs, self.replies, self.closed = [], [], [], 0
         self.opened = 0
@@ -54,6 +57,9 @@ class _FakeSession:
     def pending_usage(self) -> Usage:
         return self.pending
 
+    async def steer(self, text: str, ident: str):
+        return await self.fake.steer(self, text, ident) if self.fake.steer else None
+
     async def close(self):
         self.fake.closed += 1
 
@@ -89,6 +95,24 @@ def hang(tokens=0):
     async def turn(session):
         session.pending = Usage(tokens, 0.0)
         await asyncio.sleep(60)
+    return turn
+
+
+async def wait_at(folder: Path, name: str, until: str = "") -> None:
+    """Write <folder>/<name>.paused, and wait until <folder>/<until> (<name>.go) is there."""
+    (folder / f"{name}.paused").touch()
+    while not (folder / (until or f"{name}.go")).exists():
+        await asyncio.sleep(0.05)
+
+
+def paused(folder: Path, name: str, *results, until: str = "", end: TurnEnd | None = None):
+    """A turn that waits at a pause, as tests/steering.py expects, then submits each result and
+    ends as `end` says (done)."""
+    async def turn(session):
+        await wait_at(folder, name, until)
+        for result in results:
+            session.fake.replies.append(session.spec.tool.submit(result))
+        return end or TurnEnd("done", usage=Usage(10, 0.0))
     return turn
 
 

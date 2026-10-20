@@ -37,6 +37,11 @@ wf report --workflow implement           # what the runs did, per step
 wf trace <run-id> --var review.blocking_issues   # what one run's templates read, pass by pass
 ```
 
+`wf steer <run-id> <node> <message>` tells an agent something while it works.
+Claude Code and Codex agents read it at their next step.
+Cursor can't take a message during a turn.
+wf keeps it for the next turn, and drops it when the agent submits its result first, which is common.
+
 `wf run <file> --dry-run <script.yaml>` walks a workflow with scripted agent
 results, for free. `wf --help` lists every command.
 

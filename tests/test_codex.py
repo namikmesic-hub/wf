@@ -14,6 +14,7 @@ from textwrap import dedent, indent
 
 import pytest
 
+from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, harnesses, runner
 from workflow.harnesses.codex import Codex
 from workflow.output_tool import FINISH, REMINDER
@@ -30,10 +31,10 @@ def repo(tmp_path, monkeypatch):
     return tmp_path
 
 
-def codex(monkeypatch, tmp_path: Path, *turns, models=None, silent=(), skills=()) -> Path:
+def codex(monkeypatch, tmp_path: Path, *turns, models=None, silent=(), skills=(), steer=None) -> Path:
     """Use the fake app server for `codex`; returns its request log."""
     scenario, log = tmp_path / "scenario.json", tmp_path / "requests.jsonl"
-    scenario.write_text(json.dumps({"turns": list(turns), "silent": list(silent), "skills": list(skills),
+    scenario.write_text(json.dumps({"turns": list(turns), "silent": list(silent), "skills": list(skills), "steer": steer,
                                     **({"models": models} if models else {})}))
     monkeypatch.setitem(harnesses.FACTORIES, "codex",
                         lambda: Codex(command=[sys.executable, str(FAKE), str(scenario), str(log)], request_timeout=1))
@@ -250,6 +251,18 @@ def test_an_app_server_that_stops_answering_is_unavailable_not_a_node_timeout(re
     assert "timed out after" not in out.out + out.err
 
 
+def test_a_turn_that_codex_never_starts_makes_it_unavailable_and_the_next_harness_runs_without_a_retry(
+        repo, monkeypatch, capsys):
+    from fakes import Fake, submit
+    log = codex(monkeypatch, repo, [GOOD], silent=["turn/start"])
+    claude = Fake("claude-code", submit({"summary": "from claude"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", claude.factory)
+    assert run("harness: [codex, claude-code]\nmodel: {codex: gpt-6, claude-code: opus}\nretry: 2\n") == 0
+    assert output() == {"out": "from claude"}
+    assert len(sent(log, "turn/start")) == 1  # no retry on codex
+    assert "codex is unavailable: the Codex app server stopped answering" in capsys.readouterr().out
+
+
 def test_an_app_server_that_dies_mid_turn_is_unavailable_and_the_next_harness_runs(repo, monkeypatch, capsys):
     from fakes import Fake, submit
     codex(monkeypatch, repo, [{"exit": True}])
@@ -292,3 +305,56 @@ end:
     out = output()
     assert "periwinkle" in out["told"].lower() and "tangerine" in out["told"].lower()  # by default the repo's files reach it
     assert "periwinkle" not in out["kept_out"].lower() and "tangerine" not in out["kept_out"].lower()
+
+
+# ---------- wf steer ----------
+
+
+def test_a_message_from_wf_steer_joins_the_running_turn(repo, monkeypatch, capsys):
+    log = codex(monkeypatch, repo, [{"pause": "p"}, GOOD])
+    steering = at_pause(repo, "p")
+    assert run() == 0
+    done = steering.result()
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("Delivered to ask (attempt 1 on codex)")
+    assert sent(log, "turn/steer") == [{"threadId": "thread-1", "expectedTurnId": "turn-2",
+                                        "input": [{"type": "text", "text": STEER, "text_elements": []}]}]
+    assert len(sent(log, "turn/start")) == 1  # no turn of its own
+    (event,) = steer_events()
+    assert event == {"event": "steer", "id": event["id"], "status": "delivered", "text": STEER,
+                     "node": "ask", "pass": 1, "attempt": 1, "harness": "codex"}
+    assert steer_lines() == [{"kind": "steer", "id": event["id"], "status": "delivered", "text": STEER}]
+    assert left_in_mailbox() == []
+    assert f"ask: message from wf steer delivered: {STEER}" in capsys.readouterr().out
+
+
+def test_a_message_that_misses_the_turn_goes_as_the_next_turn_before_a_reminder(repo, monkeypatch):
+    log = codex(monkeypatch, repo, [{"pause": "p"}], [GOOD], steer="reject")  # the turn ended as turn/steer came
+    steering = at_pause(repo, "p")
+    assert run() == 0
+    assert steering.result().stdout.startswith("Queued for ask (attempt 1 on codex)")
+    assert [turn["input"][0]["text"] for turn in sent(log, "turn/start")] == [f"Say hi\n\n{FINISH}", STEER]
+    assert [(e["status"], e.get("text")) for e in steer_events()] == [("queued", STEER), ("delivered", None)]
+
+
+def test_a_message_codex_never_answers_for_is_unconfirmed_and_never_sent_again(repo, monkeypatch):
+    log = codex(monkeypatch, repo, [{"pause": "p"}, GOOD], silent=["turn/steer"])
+    steering = at_pause(repo, "p")
+    assert run() == 0
+    reason = "codex didn't answer as it took the message, so wf can't tell whether the agent read it"
+    assert steering.result().stdout == f"Unconfirmed for ask (attempt 1 on codex): {reason}.\n"
+    assert len(sent(log, "turn/steer")) == 1 and len(sent(log, "turn/start")) == 1
+    (unconfirmed,) = steer_events()
+    assert (unconfirmed["status"], unconfirmed["text"], unconfirmed["reason"]) == ("unconfirmed", STEER, reason)
+
+
+def test_a_message_codex_never_took_is_dropped_when_the_agent_submits_first(repo, monkeypatch):
+    log = codex(monkeypatch, repo, [{"pause": "p"}, GOOD], steer="reject")
+    steering = at_pause(repo, "p")
+    assert run() == 0
+    assert steering.result().returncode == 0
+    assert len(sent(log, "turn/start")) == 1
+    queued, dropped = steer_events()
+    assert (queued["status"], dropped["status"], dropped["id"]) == ("queued", "dropped", queued["id"])
+    assert dropped["reason"] == "the agent submitted its result before it read the message"
+    assert [line["status"] for line in steer_lines()] == ["queued", "dropped"]

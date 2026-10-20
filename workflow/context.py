@@ -17,10 +17,11 @@ belongs to the whole run is the top-level context's, reached through `root`:
 the clock, the usage counters and the limits (a sub-workflow's own `limits`
 are ignored; `limits` is the file's, with any `--limit` the run was given on
 top: limits.py), the agent cap and the attempts waiting for it, the open
-harnesses, the git lock, the checkpointer and the trace file. `trace` is the
-trace as this workflow writes it (trace.Scope): a sub-workflow's ids start with
-the attempt that runs it (`trace_parent`). The models that `wf retry`
-gives (overrides.py) are for the run's own nodes, so a sub-workflow has none.
+harnesses, the agent sessions that `wf steer` can reach (steer.py), the git
+lock, the checkpointer and the trace file. `trace` is the trace as this
+workflow writes it (trace.Scope): a sub-workflow's ids start with the attempt
+that runs it (`trace_parent`). The models that `wf retry` gives (overrides.py)
+are for the run's own nodes, so a sub-workflow has none.
 """
 
 import asyncio
@@ -35,6 +36,7 @@ from .limits import check
 from .runs import Run
 from .scheduler import Topology
 from .spec import Workflow
+from .steer import Steering
 from .trace import Scope, Trace
 
 
@@ -65,6 +67,7 @@ class RunContext:
     _agents_waiting: dict = field(default_factory=dict)  # attempts waiting for an agent slot, for status.json
     _trace_file: Trace | None = None  # the run's trace, on the top-level context
     _trace: Scope | None = None
+    _steering: Steering = field(default_factory=Steering)  # the open agent sessions, for wf steer
 
     def __post_init__(self):
         if self.topo is None:
@@ -148,11 +151,12 @@ class RunContext:
     def new_event_loop(self) -> None:
         """Forget asyncio objects from an earlier asyncio.run(): a semaphore that was
         waited on is bound to the loop it was waited on in, and can't be reused."""
-        root = self.root  # harnesses and the git lock live on the top-level context
+        root = self.root  # harnesses, the git lock and the open sessions live on the top-level context
         self._slots.clear()
         root._opening.clear()
         root._harnesses.clear()
         root._git = None
+        root._steering = Steering()
 
     def git_lock(self) -> asyncio.Lock:
         root = self.root
@@ -178,6 +182,13 @@ class RunContext:
             root._agents_waiting[key] = entry
         waiting = list(root._agents_waiting.values())
         root.run.set_status("running", **({"agents_waiting": waiting} if waiting else {}))
+
+    # ---------- wf steer ----------
+
+    @property
+    def steering(self) -> Steering:
+        """The run's open agent sessions, which `wf steer` messages reach."""
+        return self.root._steering
 
     # ---------- harnesses ----------
 

@@ -62,10 +62,26 @@ A usage limit arrives as a RateLimitEvent with status "rejected"
 ("allowed_warning" only says it's getting close). That, a login error, or a
 Claude Code that won't start makes the turn `unavailable`, which sends the
 runner to the node's next harness.
+
+Messages from `wf steer` (steer()): Claude Code keeps a user message that
+comes while the agent works. The agent reads it at its next step, next to that
+step's tool results. A message that comes after the agent's last step starts a
+turn of its own once this one ends, with a result of its own. So every message
+goes out with an id. With --replay-user-messages, Claude Code repeats each
+message with its id when it reads it, and then a message from `wf steer` counts
+as delivered. When a result comes while such a message is still unread, the
+adapter reads on to that message's turn. But if the agent already submitted
+its result, the session closes, and the message is dropped. A result that ends
+the attempt (the agent submitted, or the turn failed) ends the turn at once,
+also while a message is still being written: steer.py then cuts off that
+write, and the message is unconfirmed. A message that Claude Code repeated
+before the cut stays delivered. Until Claude Code has repeated a message in
+this session, steer() takes none, and the runner sends it as the next turn.
 """
 
 import asyncio
 import os
+import uuid
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -87,7 +103,7 @@ from claude_agent_sdk import (
 from .. import output_tool
 from ..output_tool import ResultTool
 from . import git_tool
-from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
+from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, steer_dropped, steered, transcript
 
 SERVER = "wf"
 TOOL = f"mcp__{SERVER}__{output_tool.NAME}"
@@ -96,6 +112,7 @@ SEARCH = ["Read", "Grep", "Glob"]
 WEB = ["WebSearch", "WebFetch"]
 API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 CONNECTORS = "ENABLE_CLAUDEAI_MCP_SERVERS"  # false: Claude Code loads none of your claude.ai connectors
+REPLAY = "replay-user-messages"  # Claude Code repeats each user message, with its id, when it reads it
 
 
 class ClaudeCode:
@@ -170,6 +187,7 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
              **({CONNECTORS: "false"} if spec.only_wf_tools else {})},
         resume=spec.fork_from,
         fork_session=spec.fork_from is not None,
+        extra_args={REPLAY: None},
     )
 
 
@@ -213,9 +231,16 @@ class ClaudeSession:
         self._client: ClaudeSDKClient | None = None
         self._cost_so_far = spec.prior_cost_usd if spec.fork_from else 0.0  # the running total, as last reported
         self._turn = Usage()  # tokens of the turn in progress, from its assistant messages
+        self._spent = Usage()  # what the results of the send() in progress reported
         self._seen: set[str] = set()  # message ids already counted in _turn
         self._relayed: set[str] = set()  # ids of the calls to wf tools, whose results aren't kept
         self._tool_prefixes = tuple(f"mcp__{server.name}__" for server in spec.tools)
+        self._working = False  # is a send() in progress?
+        self._repeats = False  # has Claude Code repeated a message it read (REPLAY)?
+        self._held: list[str] = []  # ids of messages from wf steer that Claude Code hasn't read yet
+        self._writing: set[str] = set()  # ids of messages from wf steer being written now
+        self._written = asyncio.Event()  # no message from wf steer is being written
+        self._written.set()
 
     async def start(self) -> None:
         self._client = ClaudeSDKClient(options(self.spec))
@@ -228,18 +253,67 @@ class ClaudeSession:
             raise
 
     def pending_usage(self) -> Usage:
-        return self._turn
+        return Usage(self._spent.tokens + self._turn.tokens, self._spent.cost_usd)
+
+    async def steer(self, text: str, ident: str) -> str | None:
+        if not self._working or not self._repeats:
+            return None
+        self._held.append(ident)  # first: Claude Code can read it, and say so, before the write returns
+        self._writing.add(ident)
+        self._written.clear()
+        try:
+            await self._say(text, ident)
+        except BaseException as error:
+            if ident in self._held:  # not read: the write failed, or was cut off
+                self._held.remove(ident)
+                raise
+            if isinstance(error, asyncio.CancelledError):  # cut off after Claude Code read it: still delivered
+                asyncio.current_task().cancel()  # and the task still stops, at its next wait
+            elif not isinstance(error, Exception):
+                raise
+        finally:
+            self._writing.discard(ident)
+            if not self._writing:
+                self._written.set()
+        return "queued" if ident in self._held else "delivered"  # read during the write: steer.py records it
 
     async def send(self, text: str) -> TurnEnd:
+        transcript(self.spec.log, "sent", text=text)
+        self._turn, self._seen, self._spent = Usage(), set(), Usage()
+        prompt = str(uuid.uuid4())
+        self._working = True
+        try:
+            await self._say(text, prompt)
+            status, message = await self._read(prompt)
+        finally:
+            self._working = False
+        usage, self._spent = self._spent, Usage()
+        return TurnEnd(status, message, usage)
+
+    async def _say(self, text: str, ident: str) -> None:
+        """Write a user message with an id, which Claude Code repeats when it reads the message."""
+
+        async def message():
+            yield {"type": "user", "message": {"role": "user", "content": text}, "parent_tool_use_id": None, "uuid": ident}
+
+        await self._client.query(message())
+
+    async def _read(self, prompt: str) -> tuple[str, str]:
+        """Claude Code's messages, up to the result that ends the turn: (status, message). Whether the
+        agent submitted comes from the messages read so far, not from the ResultTool. The SDK answers
+        tool calls as they come, before this reads up to them."""
         log, emit = self.spec.log, self.spec.emit
-        transcript(log, "sent", text=text)
-        self._turn, self._seen = Usage(), set()
-        await self._client.query(text)
-        status, message, usage = "done", "", Usage()
-        async for item in self._client.receive_response():
+        status, message, submits, submitted = "done", "", set(), False
+        async for item in self._client.receive_messages():
             if isinstance(item, SystemMessage):
                 if item.subtype == "init":
                     self.id = item.data.get("session_id", self.id)
+            elif isinstance(item, UserMessage) and item.uuid == prompt:
+                self._repeats = True
+            elif isinstance(item, UserMessage) and item.uuid in self._held:
+                self._held.remove(item.uuid)
+                if item.uuid not in self._writing:  # else steer() says it was delivered, and steer.py records that
+                    steered(self.spec, item.uuid, "delivered")
             elif isinstance(item, AssistantMessage):
                 if item.usage and item.message_id not in self._seen:  # several messages can share one response
                     self._seen.add(item.message_id)
@@ -252,11 +326,15 @@ class ClaudeSession:
                     elif isinstance(block, ToolUseBlock):
                         if block.name.startswith(self._tool_prefixes):
                             self._relayed.add(block.id)
+                        if block.name == TOOL:
+                            submits.add(block.id)
                         transcript(log, "tool", name=block.name, input=block.input)
                         self.spec.trace.tool_call(block.id, _tool_name(block.name), block.input)
                         emit({"event": "agent_tool", "tool": _tool_name(block.name), "detail": _detail(block, self.spec.cwd)})
             elif isinstance(item, UserMessage) and isinstance(item.content, list):
                 for block in item.content:
+                    if isinstance(block, ToolResultBlock) and block.tool_use_id in submits and not block.is_error:
+                        submitted = True
                     if isinstance(block, ToolResultBlock) and block.tool_use_id in self._relayed:
                         transcript(log, "tool_result", is_error=bool(block.is_error), kept=False,
                                    characters=len(str(block.content)))
@@ -272,12 +350,20 @@ class ClaudeSession:
             elif isinstance(item, ResultMessage):
                 self.id = item.session_id or self.id
                 usage, self._turn = self._usage(item), Usage()  # the result's own numbers replace the estimate
+                self._spent.add(usage)
                 transcript(log, "result", subtype=item.subtype, is_error=item.is_error, result=item.result,
                            tokens=usage.tokens, cost_usd=usage.cost_usd)
                 if item.is_error and status == "done":
                     reason = item.result or ", ".join(item.errors or []) or item.subtype
                     status, message = ("unavailable" if _login_problem(item) else "failed"), f"Claude Code: {reason}"
-        return TurnEnd(status, message, usage)
+                if status != "done" or submitted:  # the attempt ends now: steer.py cuts off a write still going
+                    break
+                while self._writing:  # whether a message being written gets a turn of its own depends on the write
+                    await self._written.wait()
+                if not self._held:
+                    break
+                # a message from wf steer came after the agent's last step: its own turn follows
+        return status, message
 
     def _usage(self, result: ResultMessage) -> Usage:
         counts = result.usage or {}
@@ -289,6 +375,9 @@ class ClaudeSession:
         return Usage(tokens=tokens, cost_usd=cost)
 
     async def close(self) -> None:
+        for ident in self._held:
+            steer_dropped(self.spec, ident)
+        self._held.clear()
         if self._client is not None:
             client, self._client = self._client, None
             try:

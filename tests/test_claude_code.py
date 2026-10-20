@@ -1,4 +1,5 @@
-"""The Claude Code adapter: settings per access level, and (opt-in) one real run.
+"""The Claude Code adapter: settings per access level, messages from wf steer against a fake
+Claude Code (fake_claude.py), and (opt-in) one real run.
 
 The real run costs a little quota. Run it with:  uv run pytest -m harness
 """
@@ -10,10 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from workflow import cli, schemas
+from claude_agent_sdk import AssistantMessage, ResultMessage, ToolResultBlock, ToolUseBlock, UserMessage
+from fake_claude import FakeClaude
+from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
+from workflow import cli, runner, schemas, steer
 from workflow.harnesses.base import SessionSpec, Unavailable
-from workflow.harnesses.claude_code import GIT, TOOL, ClaudeCode, options
-from workflow.output_tool import ResultTool
+from workflow.harnesses.claude_code import GIT, REPLAY, TOOL, ClaudeCode, ClaudeSession, options
+from workflow.output_tool import FINISH, ResultTool, REMINDER
 
 
 def spec(tmp_path, access="read-only", web=False, **extra) -> SessionSpec:
@@ -59,6 +63,7 @@ def test_every_session_sets_everything_explicitly(tmp_path, monkeypatch):
     assert o.system_prompt == {"type": "preset", "preset": "claude_code"}
     assert list(o.mcp_servers) == ["wf"]
     assert o.env == {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}  # use the subscription login
+    assert o.extra_args == {REPLAY: None}  # Claude Code says which messages it read: wf steer needs that
 
 
 def test_without_project_instructions_no_setting_source_loads(tmp_path):
@@ -93,6 +98,115 @@ def test_opening_finds_the_claude_code_program_as_the_sdk_does(tmp_path, monkeyp
         asyncio.run(ClaudeCode().open(tmp_path))
     program.chmod(0o755)
     asyncio.run(ClaudeCode().open(tmp_path))
+
+
+# ---------- wf steer ----------
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    monkeypatch.chdir(tmp_path / "repo")
+    monkeypatch.setattr(runner, "interactive", lambda: False)
+    subprocess.run(["git", "init", "-q"], check=True)
+    return tmp_path
+
+
+def run_flow() -> int:
+    Path("flow.yaml").write_text("""
+version: 1
+name: cc
+defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+start: {input: {}}
+nodes:
+  ask: {needs: [start], instruction: Say hi}
+end:
+  output:
+    out: "{{ ask.summary }}"
+    tokens: {type: integer, value: "{{ run.tokens }}"}
+    cost: {type: number, value: "{{ run.cost_usd }}"}
+""")
+    return cli.main(["run", "flow.yaml"])
+
+
+GOOD = {"submit": {"summary": "hi"}}
+
+
+def test_claude_code_reads_a_message_from_wf_steer_at_its_next_step(repo, monkeypatch):
+    claude = FakeClaude(repo, [{"tool": "Read"}, {"pause": "p"}, {"tool": "Bash"}, GOOD])
+    claude.install(monkeypatch)
+    steering = at_pause(repo, "p")
+    assert run_flow() == 0
+    done = steering.result()
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("Queued for ask (attempt 1 on claude-code)")
+    assert claude.read == [f"Say hi\n\n{FINISH}", STEER]  # in the same turn: no turn of its own
+    queued, delivered = steer_events()
+    assert (queued["status"], queued["text"], queued["harness"]) == ("queued", STEER, "claude-code")
+    assert (delivered["status"], delivered["id"]) == ("delivered", queued["id"])
+    assert [line["status"] for line in steer_lines()] == ["queued", "delivered"]
+    assert left_in_mailbox() == []
+
+
+def test_a_message_claude_code_hasnt_read_when_the_agent_submits_is_dropped(repo, monkeypatch):
+    claude = FakeClaude(repo, [GOOD, {"pause": "p"}])  # no step after the message comes
+    claude.install(monkeypatch)
+    steering = at_pause(repo, "p")
+    assert run_flow() == 0
+    assert steering.result().returncode == 0
+    queued, dropped = steer_events()
+    assert (queued["status"], dropped["status"], dropped["id"]) == ("queued", "dropped", queued["id"])
+    assert dropped["reason"] == "the agent submitted its result before it read the message"
+
+
+def test_a_message_after_the_last_step_gets_a_turn_of_its_own_and_no_reminder_goes(repo, monkeypatch):
+    claude = FakeClaude(repo, [{"pause": "p"}], [GOOD])
+    claude.install(monkeypatch)
+    steering = at_pause(repo, "p")
+    assert run_flow() == 0
+    assert steering.result().returncode == 0
+    assert claude.read == [f"Say hi\n\n{FINISH}", STEER]
+    assert REMINDER not in claude.read
+    assert [e["status"] for e in steer_events()] == ["queued", "delivered"]
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    results = [json.loads(line) for line in (folder / "nodes/ask/1/attempt-1.log").read_text().splitlines()
+               if json.loads(line)["kind"] == "result"]
+    assert len(results) == 2  # one send() read both turns' results
+    out = json.loads((folder / "output.json").read_text())
+    assert (out["tokens"], round(out["cost"], 6)) == (220, 0.02)  # and counted both
+
+
+class _Writer:
+    """A client that keeps what is written to Claude Code, and checks that the message is held first."""
+
+    def __init__(self, session):
+        self.session, self.written = session, []
+
+    async def query(self, prompt):
+        async for message in prompt:
+            assert message["uuid"] in self.session._held  # Claude Code can say it read it before the write returns
+            self.written.append(message)
+
+
+class _Broken:
+    async def query(self, prompt):
+        raise OSError("Claude Code is gone")
+
+
+def test_claude_code_takes_a_message_only_mid_turn_once_it_repeated_one(tmp_path):
+    session = ClaudeSession(spec(tmp_path))
+    session._client = _Writer(session)
+    steer = lambda ident: asyncio.run(session.steer("Stop", ident))
+    assert steer("id-1") is None  # between turns: the runner sends it as the next turn
+    session._working = True
+    assert steer("id-2") is None  # Claude Code hasn't shown yet that it repeats what it reads
+    session._repeats = True
+    assert steer("id-3") == "queued"
+    assert [m["uuid"] for m in session._client.written] == ["id-3"] and session._held == ["id-3"]
+    session._client = _Broken()
+    with pytest.raises(OSError):
+        steer("id-4")
+    assert session._held == ["id-3"]  # a message that wasn't written isn't waited for
 
 
 @pytest.mark.harness
@@ -175,3 +289,156 @@ end:
     assert "periwinkle" not in out["kept_out"].lower()  # and not one with the field off, whose instruction still did
     log = [json.loads(line) for line in (folder / "nodes" / "kept_out" / "1" / "attempt-1.log").read_text().splitlines()]
     assert not any(e["kind"] == "tool" and "CLAUDE.md" in json.dumps(e["input"]) for e in log)  # it didn't read the file either
+
+
+class _Stream:
+    """A client whose messages come from a queue the test fills, and whose writes can fail later."""
+
+    def __init__(self, session, fail_after: float | None = None):
+        self.session, self.fail_after, self.out = session, fail_after, asyncio.Queue()
+
+    async def query(self, prompt):
+        async for message in prompt:
+            if self.fail_after is not None:
+                await asyncio.sleep(self.fail_after)
+                raise OSError("Claude Code is gone")
+
+    async def receive_messages(self):
+        while True:
+            yield await self.out.get()
+
+
+def _result():
+    return ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1, session_id="s")
+
+
+def test_a_message_claude_code_reads_during_its_write_is_recorded_once_as_delivered(tmp_path):
+    events = []
+    session = ClaudeSession(spec(tmp_path))
+    session.spec.emit = events.append
+    session._working = session._repeats = True
+    stream = session._client = _Stream(session)
+
+    async def read_at_once(prompt):  # Claude Code reads it, and says so, before the write returns
+        async for message in prompt:
+            stream.out.put_nowait(UserMessage(content="Stop", uuid=message["uuid"]))
+            await asyncio.sleep(0.05)
+
+    stream.query = read_at_once
+
+    async def drive():
+        reading = asyncio.get_running_loop().create_task(session._read("the prompt"))
+        status = await session.steer("Stop", "id-1")
+        stream.out.put_nowait(_result())
+        await asyncio.wait_for(reading, 2)
+        return status
+
+    assert asyncio.run(drive()) == "delivered"
+    assert events == [] and session._held == []  # steer.py records it once, from the answer
+
+
+def test_a_write_that_fails_after_the_turns_result_doesnt_leave_the_turn_waiting(tmp_path):
+    session = ClaudeSession(spec(tmp_path))
+    session._working = session._repeats = True
+    session._client = _Stream(session, fail_after=0.2)
+
+    async def drive():
+        writing = asyncio.get_running_loop().create_task(session.steer("Stop", "id-1"))
+        await asyncio.sleep(0.05)  # the write is under way when the turn's result comes
+        session._client.out.put_nowait(_result())
+        status = await asyncio.wait_for(session._read("the prompt"), 2)
+        with pytest.raises(OSError):
+            await writing
+        return status
+
+    assert asyncio.run(drive()) == ("done", "")
+    assert session._held == []
+
+
+@pytest.mark.parametrize("ending, expected", [
+    ("submitted", ("done", "")),
+    ("failed", ("failed", "Claude Code: it broke")),
+])
+def test_a_result_that_ends_the_attempt_doesnt_wait_for_a_write_that_stalls(tmp_path, ending, expected):
+    session = ClaudeSession(spec(tmp_path))
+    session._working = session._repeats = True
+    session._client = _Stream(session, fail_after=60)  # the write never returns
+
+    async def drive():
+        writing = asyncio.get_running_loop().create_task(session.steer("Stop", "id-1"))
+        await asyncio.sleep(0.05)
+        out = session._client.out
+        if ending == "submitted":
+            out.put_nowait(AssistantMessage(content=[ToolUseBlock(id="call-1", name=TOOL, input={"summary": "hi"})],
+                                            model="fake"))
+            out.put_nowait(UserMessage(content=[ToolResultBlock(tool_use_id="call-1", content="ok", is_error=False)]))
+            out.put_nowait(_result())
+        else:
+            out.put_nowait(ResultMessage(subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
+                                         is_error=True, num_turns=1, session_id="s", result="it broke"))
+        status = await asyncio.wait_for(session._read("the prompt"), 2)
+        writing.cancel()
+        await asyncio.gather(writing, return_exceptions=True)
+        return status
+
+    assert asyncio.run(drive()) == expected
+    assert session._held == []
+
+
+@pytest.mark.parametrize("write_takes", [0.05, 60])  # ends during the teardown, or is cut off by it
+def test_a_message_claude_code_read_stays_delivered_when_the_result_comes_during_its_write(tmp_path, monkeypatch,
+                                                                                           write_takes):
+    monkeypatch.setattr(steer, "HANDOVER_SECONDS", 0.2)
+    events = []
+    session = ClaudeSession(spec(tmp_path))
+    session.spec.emit = events.append
+    session._working = session._repeats = True
+    stream = session._client = _Stream(session)
+
+    async def read_then_submit(prompt):  # Claude Code reads it, the agent submits, and the write goes on
+        async for message in prompt:
+            stream.out.put_nowait(UserMessage(content="Stop", uuid=message["uuid"]))
+            stream.out.put_nowait(AssistantMessage(content=[ToolUseBlock(id="call-1", name=TOOL, input={"summary": "hi"})],
+                                                   model="fake"))
+            stream.out.put_nowait(UserMessage(content=[ToolResultBlock(tool_use_id="call-1", content="ok", is_error=False)]))
+            stream.out.put_nowait(_result())
+            await asyncio.sleep(write_takes)
+
+    stream.query = read_then_submit
+
+    async def drive():
+        live = steer.Live(session.spec, 1, "claude-code", session)
+        live.start()
+        reading = asyncio.get_running_loop().create_task(session._read("the prompt"))
+        answer = asyncio.get_running_loop().create_task(live.take(steer.Message("id-1", "Stop")))
+        assert await asyncio.wait_for(reading, 2) == ("done", "")  # the result ends the turn before the write
+        await live.stop()
+        live.end()
+        return await answer
+
+    answer = asyncio.run(drive())
+    assert answer == {"status": "delivered", "attempt": 1, "harness": "claude-code"}
+    assert [(e["id"], e["status"]) for e in events if e["event"] == "steer"] == [("id-1", "delivered")]
+    assert session._held == []
+
+
+def test_a_turn_cut_off_after_a_message_from_wf_steer_still_counts_the_result_before_it(tmp_path):
+    session = ClaudeSession(spec(tmp_path))
+    session._repeats = True
+    stream = session._client = _Stream(session)
+
+    async def drive():
+        sending = asyncio.get_running_loop().create_task(session.send("Say hi"))
+        await asyncio.sleep(0.05)
+        assert await session.steer("Stop", "id-1") == "queued"
+        first = _result()  # the first turn ends: the message gets a turn of its own
+        first.usage, first.total_cost_usd = {"input_tokens": 100, "output_tokens": 10}, 0.01
+        stream.out.put_nowait(first)
+        stream.out.put_nowait(AssistantMessage(content=[], model="fake", usage={"input_tokens": 50}, message_id="m-2"))
+        await asyncio.sleep(0.05)
+        sending.cancel()  # the node's timeout cuts off the message's turn
+        await asyncio.gather(sending, return_exceptions=True)
+        return session.pending_usage()
+
+    usage = asyncio.run(drive())
+    assert (usage.tokens, usage.cost_usd) == (160, 0.01)

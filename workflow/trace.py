@@ -15,7 +15,7 @@ It is in the top-level run folder, and sub-workflows write to it too:
                                                    route taken
     attempt        an attempt starts               harness, model, effort, access, workspace, and
                                                    how its session starts (fresh, fork or load)
-    turn           a message goes to the agent     `sends` (instruction or reminder), the full text
+    turn           a message goes to the agent     `sends` (instruction, reminder or steer), the full text
     message        the agent writes text           the text
     tool_call      the agent calls a tool          the tool and its arguments
     tool_result    the tool answers                the answer, and if it is an error
@@ -512,11 +512,12 @@ class Attempt:
                          ended=_now(), duration_s=round(time.monotonic() - self._clock, 1), outcome=outcome,
                          **({"error": error} if error else {}))
 
-    async def turn(self, number: int, text: str, sending) -> Any:
-        """Await `sending`, the harness's turn with `text`, between a turn and a turn_end record."""
+    async def turn(self, number: int, sends: str, text: str, sending) -> Any:
+        """Await `sending`, the harness's turn with `text`, between a turn and a turn_end record.
+        `sends` is what the text is: the instruction, a reminder, or a `wf steer` message (steer)."""
         self._turn = number
         turn = f"{self.id}.t{number}"
-        self._write("turn", turn, self.id, sends="instruction" if number == 1 else "reminder", text=text)
+        self._write("turn", turn, self.id, sends=sends, text=text)
         try:
             end = await sending
         except BaseException as error:

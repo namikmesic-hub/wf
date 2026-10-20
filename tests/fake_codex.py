@@ -2,9 +2,11 @@
 
     python fake_codex.py scenario.json requests.jsonl
 
-scenario.json: {"models": [...], "config": {...}, "skills": [...], "silent": [method, ...], "turns": [[action, ...], ...]}.
-config/read answers with "config" (none: an empty one), and skills/list with "skills" for each cwd.
-Requests for a "silent" method never get an answer (a wedged app server). Each turn/start
+scenario.json: {"models": [...], "config": {...}, "skills": [...], "silent": [method, ...], "steer": "reject",
+"turns": [[action, ...], ...]}. config/read answers with "config" (none: an empty one), and skills/list
+with "skills" for each cwd.
+Requests for a "silent" method never get an answer (a wedged app server). turn/steer is
+accepted while the turn it names runs, unless "steer" is "reject". Each turn/start
 takes the next list of actions:
     {"tool": {"arguments": {...}, "name": "submit_result"}}  call a dynamic tool, wait for the reply
     {"tool": {"arguments": {...}, "name": "...", "namespace": "linear"}}   one in a namespace
@@ -18,6 +20,8 @@ takes the next list of actions:
     {"error": {"codexErrorInfo": "usageLimitExceeded", "message": "...", "willRetry": false}}
     {"end": "failed", "message": "..."}                      how the turn ends (default: completed)
     {"hang": true}                                           wait for turn/interrupt
+    {"pause": "p"}                                           write p.paused next to requests.jsonl, and wait
+                                                             until p.go is there (tests/steering.py)
     {"exit": true}                                           the app server dies
 Every request the client sends, and every reply to the fake's own requests, is
 appended to requests.jsonl.
@@ -28,6 +32,8 @@ import itertools
 import json
 import os
 import sys
+import time
+from pathlib import Path
 
 scenario = json.load(open(sys.argv[1]))
 log_path = sys.argv[2]
@@ -55,6 +61,7 @@ async def main() -> None:
     pending: dict[int, asyncio.Future] = {}
     interrupts: dict[str, asyncio.Event] = {}
     totals: dict[str, int] = {}
+    running: dict[str, str] = {}  # thread -> its turn in progress
 
     async def call(method: str, params: dict):
         request_id = next(ids)
@@ -68,6 +75,7 @@ async def main() -> None:
                                                    "arguments": tool["arguments"]}))
 
     async def run_turn(thread: str, turn: str, actions: list) -> None:
+        running[thread] = turn
         write({"method": "turn/started", "params": {"threadId": thread, "turn": {"id": turn, "items": [], "status": "inProgress"}}})
         status, error, background = "completed", None, []
         for action in actions:
@@ -103,7 +111,10 @@ async def main() -> None:
             elif "hang" in action:
                 await interrupts.setdefault(turn, asyncio.Event()).wait()
                 status = "interrupted"
+            elif "pause" in action:
+                await pause(action["pause"])
         await asyncio.gather(*background)
+        running.pop(thread, None)
         write({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": turn, "items": [], "status": status, "error": error}}})
 
     while line := await reader.readline():
@@ -136,11 +147,24 @@ async def main() -> None:
             turn = f"turn-{next(counter)}"
             write({"id": request_id, "result": {"turn": {"id": turn, "items": [], "status": "inProgress"}}})
             asyncio.ensure_future(run_turn(params["threadId"], turn, turns.pop(0) if turns else []))
+        elif method == "turn/steer":
+            if scenario.get("steer") == "reject" or running.get(params["threadId"]) != params["expectedTurnId"]:
+                write({"id": request_id, "error": {"code": -32600, "message": "no active turn to steer"}})
+            else:
+                write({"id": request_id, "result": {"turnId": params["expectedTurnId"]}})
         elif method == "turn/interrupt":
             interrupts.setdefault(params["turnId"], asyncio.Event()).set()
             write({"id": request_id, "result": {}})
         elif request_id is not None:
             write({"id": request_id, "error": {"code": -32601, "message": f"fake doesn't know {method}"}})
+
+
+async def pause(name: str) -> None:
+    folder = Path(log_path).parent
+    (folder / f"{name}.paused").touch()
+    deadline = time.monotonic() + 30
+    while not (folder / f"{name}.go").exists() and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
 
 
 asyncio.run(main())

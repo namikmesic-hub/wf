@@ -28,6 +28,9 @@ reports itself unavailable (usage limit, login, can't start) sends the loop
 straight to the next harness in the node's list; other failures count
 against `retry`. What an attempt spends is counted even when it fails; for a
 turn cut off by the timeout, that's what the harness reported before it.
+While a session is open, `wf steer` can send it messages (steer.py). The
+messages that the harness couldn't add to the running turn go as the next turn,
+before any reminder. They are dropped when the attempt ends first.
 With `session: continue`, a pass forks the session the node's last pass ended
 in (Claude Code's fork_session, Codex's thread/fork), so that session is never
 changed and a retry forks from the same point again. Cursor can't fork: it
@@ -269,13 +272,15 @@ def _no_slot(number: int, harness: str | None) -> AbstractAsyncContextManager[No
     return nullcontext()
 
 
-async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str | None, Attempt], Awaitable[Any]],
+async def _attempts(job: Job, ctx: RunContext, emit,
+                    attempt: Callable[[int, str | None, Attempt, asyncio.Timeout], Awaitable[Any]],
                     harnesses: list[str | None] = [None],
                     slot: Callable[[int, str | None], AbstractAsyncContextManager[None]] = _no_slot) -> tuple[Any, int]:
     """Up to 1 + retry attempts on each harness in turn, each within the node's timeout.
-    The call attempt(number, harness, record) makes one, inside slot(number, harness): for
-    an agent, its agent slot (_agent_slot). The attempt's part of the trace, `record`, ends
-    here with how the attempt went. Returns (output, attempt number)."""
+    The call attempt(number, harness, record, deadline) makes one, inside slot(number, harness):
+    for an agent, its agent slot (_agent_slot). The attempt's part of the trace, `record`, ends
+    here with how the attempt went. `deadline` is the node's timeout for the attempt.
+    Returns (output, attempt number)."""
     node_id = job["node"]
     retry = ctx.workflow.setting(node_id, "retry")
     timeout = ctx.workflow.setting(node_id, "timeout")
@@ -298,7 +303,7 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
                     deadline = asyncio.timeout(seconds(timeout) if timeout else None)
                     try:
                         async with deadline:
-                            result = await attempt(number, harness, record)
+                            result = await attempt(number, harness, record, deadline)
                     except BaseException as failure:
                         record.end(*_ending(failure, deadline, timeout))
                         raise
@@ -417,7 +422,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     listed = None if ctx.root.script else wf.setting(node_id, "tools")  # None: the node doesn't list tools
     uses = listed or ()
 
-    async def attempt(number: int, name: str, record: Attempt) -> dict:
+    async def attempt(number: int, name: str, record: Attempt, deadline: asyncio.Timeout) -> dict:
         model, effort = chosen[name]
         source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
         if source:  # Cursor can't fork: it loads the session itself
@@ -439,10 +444,10 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         except Unavailable as error:
             raise _Unavailable(str(error)) from error
         async with _attached(uses, number) as tools:
-            return await converse(number, name, agent, tools, record, source, why_not, session_facts)
+            return await converse(number, name, agent, tools, record, deadline, source, why_not, session_facts)
 
-    async def converse(number: int, name: str, agent, tools: list, record: Attempt, source: dict | None,
-                       why_not: str | None, session_facts: dict) -> dict:
+    async def converse(number: int, name: str, agent, tools: list, record: Attempt, deadline: asyncio.Timeout,
+                       source: dict | None, why_not: str | None, session_facts: dict) -> dict:
         """One session: the instruction, then reminders, until submit_result has a result.
         `source` is the session to continue, and `session_facts` the trace's record of it."""
         model, effort = chosen[name]
@@ -471,19 +476,20 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             project_instructions=wf.setting(node_id, "project_instructions"),
             trace=record,
         )
-        try:
-            session = await agent.session(spec)
-        except Unavailable as error:
-            if source is None:
-                raise _Unavailable(str(error)) from error
-            emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": str(error)})
-            session_facts.clear()
-            session_facts.update(start="fresh", fresh_because=str(error))
-            source, spec = None, replace(spec, fork_from=None, prior_cost_usd=0.0)  # the fork failed: start fresh
+        with ctx.steering.opening(spec.where, number, name):
             try:
                 session = await agent.session(spec)
             except Unavailable as error:
-                raise _Unavailable(str(error)) from error
+                if source is None:
+                    raise _Unavailable(str(error)) from error
+                emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": str(error)})
+                session_facts.clear()
+                session_facts.update(start="fresh", fresh_because=str(error))
+                source, spec = None, replace(spec, fork_from=None, prior_cost_usd=0.0)  # the fork failed: start fresh
+                try:
+                    session = await agent.session(spec)
+                except Unavailable as error:
+                    raise _Unavailable(str(error)) from error
         instruction = render(True) if source else fresh
         if source:
             emit({"event": "session_continued", **_label(job), "attempt": number})
@@ -492,29 +498,38 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                    "log": _in_run(ctx, spec.log)})
         spent_before, spent = usage.cost_usd, Usage()
         try:
-            for turn, text in enumerate([instruction] + [output_tool.REMINDER] * output_tool.REMINDERS, 1):
-                try:
-                    end = await record.turn(turn, text, session.send(text))
-                except Unavailable as error:
-                    raise _Unavailable(str(error)) from error
-                except dryrun.ScriptExhausted:
-                    raise
-                except Exception as error:  # the SDK or the agent process broke
-                    raise _AttemptFailed(f"{name}: {type(error).__name__}: {error}") from error
-                usage.add(end.usage)
-                spent.add(end.usage)
-                ctx.add_usage(end.usage)  # live, so limits apply before the next attempt
-                if spec.tool.result is not None:
-                    extra["session"] = {"harness": name, "model": model, "id": session.id,
-                                        "cost_usd": (source["cost_usd"] if source else 0.0) + usage.cost_usd - spent_before,
-                                        "streak": source["streak"] + 1 if source else 0}
-                    (folder / "session.json").write_text(json.dumps(extra["session"], indent=2) + "\n", encoding="utf-8")
-                    return schemas.absent_as_none(spec.tool.result, schema)
-                if end.status == "unavailable":
-                    raise _Unavailable(end.message)
-                if end.status == "failed":
-                    raise _AttemptFailed(end.message, end.retry_after)
-            raise _AttemptFailed("the agent never made a valid submit_result call")
+            async with ctx.steering.live(spec, number, name, session, deadline) as live:
+                turn, sends, text, reminders = 1, "instruction", instruction, output_tool.REMINDERS
+                while True:
+                    try:
+                        end = await record.turn(turn, sends, text, session.send(text))
+                    except Unavailable as error:
+                        raise _Unavailable(str(error)) from error
+                    except dryrun.ScriptExhausted:
+                        raise
+                    except Exception as error:  # the SDK or the agent process broke
+                        raise _AttemptFailed(f"{name}: {type(error).__name__}: {error}") from error
+                    live.sent(end)
+                    usage.add(end.usage)
+                    spent.add(end.usage)
+                    ctx.add_usage(end.usage)  # live, so limits apply before the next attempt
+                    if spec.tool.result is not None:
+                        extra["session"] = {"harness": name, "model": model, "id": session.id,
+                                            "cost_usd": (source["cost_usd"] if source else 0.0) + usage.cost_usd - spent_before,
+                                            "streak": source["streak"] + 1 if source else 0}
+                        (folder / "session.json").write_text(json.dumps(extra["session"], indent=2) + "\n", encoding="utf-8")
+                        return schemas.absent_as_none(spec.tool.result, schema)
+                    if end.status == "unavailable":
+                        raise _Unavailable(end.message)
+                    if end.status == "failed":
+                        raise _AttemptFailed(end.message, end.retry_after)
+                    turn += 1
+                    if (steered := await live.next_turn()) is not None:  # wf steer messages that waited for this turn to end
+                        sends, text = "steer", steered
+                    elif reminders:
+                        sends, text, reminders = "reminder", output_tool.REMINDER, reminders - 1
+                    else:
+                        raise _AttemptFailed("the agent never made a valid submit_result call")
         finally:
             cut_off = session.pending_usage()  # zero unless a timeout stopped a turn midway
             usage.add(cut_off)
@@ -638,7 +653,7 @@ async def _command(job, ctx: RunContext, folder: Path, variables: dict, workspac
     check = ctx.workflow.setting(node_id, "check")
     (folder / "instruction.md").write_text(command, encoding="utf-8")
 
-    async def attempt(number: int, harness: None, record: Attempt) -> dict:
+    async def attempt(number: int, harness: None, record: Attempt, _deadline) -> dict:
         log = folder / f"attempt-{number}.log"
         record.begin(command=command, cwd=workspace["path"], env={k: HIDDEN if k in secret else v for k, v in given.items()},
                      stdout=str(log.with_suffix(".stdout")), stderr=str(log.with_suffix(".stderr")), log=str(log))
@@ -749,7 +764,7 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
             return  # the run's own, not the sub-workflow's: the top-level graph reports those
         emit({**event, "node": f"{label}/{event['node']}"} if "node" in event else event)
 
-    async def attempt(number: int, _harness, record: Attempt) -> dict:
+    async def attempt(number: int, _harness, record: Attempt, _deadline) -> dict:
         child = ctx.child(sub, folder / f"attempt-{number}", home, path, label, record.id, outputs)
         # The folder nests a level per pass and attempt at every depth, so it names the thread uniquely
         thread = f"{ctx.run.id}/{child.run.dir.relative_to(ctx.root.run.dir)}"

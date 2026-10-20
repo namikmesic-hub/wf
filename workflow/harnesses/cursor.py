@@ -80,6 +80,10 @@ the node's retry starts RETRY_AFTER seconds later. Other text that starts with
 
 Usage: ACP reports neither tokens nor cost, so Cursor turns count as zero.
 
+A message from `wf steer` can't join a running turn: ACP has no request that
+adds to one. So steer() takes none, and the runner sends the message as the
+next session/prompt when this turn ends.
+
 session: continue loads the previous pass's session (session/load) in a new
 process with the same model, after moving the saved session into its config
 folder. Cursor can't fork, so the session itself carries on. It's marked while
@@ -321,6 +325,9 @@ class CursorSession:
 
     def pending_usage(self) -> Usage:
         return Usage()
+
+    async def steer(self, text: str, ident: str) -> None:
+        return None
 
     async def send(self, text: str) -> TurnEnd:
         log = self.spec.log

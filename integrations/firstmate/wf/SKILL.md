@@ -115,6 +115,55 @@ To abandon a run, retire its source with the printed owner token
 (`bin/fm-procevent.sh retire wf-<run-id> --if-owner <token>`) and tell the
 captain; the run folder stays for inspection.
 
+## Steering an agent while it works
+
+When an agent in a run works on the wrong thing, tell it, as you steer one of your own workers.
+Keep to the task that the run was given.
+A change of task is the captain's call.
+
+```sh
+wf steer <run-id> <node> "<message>"
+wf steer <run-id> <node> --item <index> --file <message.md>
+```
+
+`<node>` is an agent node, as `events.jsonl` names it: `implement`, or `build[1]/implement` inside a sub-workflow.
+`--item` names the item of a `for_each` node.
+`--file` takes a long message from a file, and `--file -` from stdin.
+
+`wf steer` trusts your user account, as every wf command does: any process that runs as you can steer a run.
+That includes an agent that can run commands as you: on Claude Code and Cursor with `edit` or `full` access, and on Codex with `full` access.
+
+`wf steer` says what became of the message:
+
+`delivered`
+: The agent reads it at its next step (Codex).
+
+`queued`
+: Claude Code gives it to the agent at the agent's next step.
+  Cursor gets it as its next turn, when its turn ends.
+  A turn often ends only when the agent submits its result, and then the message is dropped.
+  A `steer` event in `events.jsonl` says when the message was delivered, or why it was dropped.
+  An `unconfirmed` event means that the turn that carried the message failed, or that the attempt ended during that turn.
+  The harness may have the message, but wf can't tell whether the agent read it.
+
+`unconfirmed`
+: The harness may have the message, but wf can't tell whether the agent read it.
+  The attempt ended while the harness took the message, or the harness didn't answer as it took the message (Codex).
+  Read the attempt's log before you send it again: the agent may have it already.
+
+nothing was sent (`none` with `--json`)
+: Exit code 1.
+  The reason says why: the node has no agent session open now, the run isn't running, or 10 messages already wait for the session.
+  A message has at most 100,000 characters.
+
+the run is full
+: Exit code 1, and nothing was sent.
+  100 messages from `wf steer` wait for the run or are being answered.
+  Send the message again when some of them have their answers.
+
+A Claude Code agent can take a message that comes mid-turn for tool output, and ignore it.
+Read the attempt's log (`attempt-<n>.log`) to see whether the agent acted on the message.
+
 ## Talking to the captain about it
 
 Report what the run did and what it needs: the question in plain words, the

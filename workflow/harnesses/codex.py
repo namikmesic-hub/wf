@@ -48,6 +48,13 @@ with its source's total, which an earlier pass already counted: the first
 report's total minus its `last` (the response just made) is that inherited
 part, and counting starts from there. Codex reports no dollar cost.
 
+A message from `wf steer` (steer()) goes into the running turn with
+`turn/steer`. The request names the turn it expects, so the message can't land
+in a later one. The agent reads it at its next step. When no turn is running,
+or the turn ended before the request came, the runner sends the message as the
+next turn. When the app server doesn't answer the request, it may still have
+taken the message, so the message isn't sent again: it is `unconfirmed`.
+
 Limits: an `error` notification with codexErrorInfo "usageLimitExceeded" (or
 "unauthorized") that Codex won't retry makes the turn unavailable, which sends
 the runner to the next harness. A plain "rateLimitExceeded" is retried by
@@ -81,6 +88,7 @@ TESTED = "0.163.0"
 COMMAND = ["codex", "app-server", "--disable", "hooks", "--disable", "apps"]
 SANDBOX = {"read-only": "read-only", "edit": "workspace-write", "full": "danger-full-access"}
 UNAVAILABLE = {"usageLimitExceeded", "unauthorized"}
+STEER_TIMEOUT = 10  # seconds for turn/steer: inside the time `wf steer` waits for an answer (steer.py)
 DECLINE = {  # server requests that ask a person something: always no
     "item/commandExecution/requestApproval": {"decision": "decline"},
     "item/fileChange/requestApproval": {"decision": "decline"},
@@ -220,13 +228,24 @@ class CodexSession:
     def pending_usage(self) -> Usage:
         return Usage(tokens=self._total - self._turn_start) if self.turn else Usage()
 
+    async def steer(self, text: str, ident: str) -> str | None:
+        if not self.turn or self.rpc.dead:
+            return None
+        try:
+            await self.rpc.request("turn/steer", {"threadId": self.id, "expectedTurnId": self.turn, "input": _input(text)},
+                                   timeout=min(self.rpc.timeout, STEER_TIMEOUT))
+        except _RpcError:  # refused, as the turn had ended, or the app server is gone
+            return None
+        except TimeoutError:  # sent, but no answer: Codex may have taken it, so it isn't sent again
+            return "unconfirmed"
+        return "delivered"
+
     async def send(self, text: str) -> TurnEnd:
         log = self.spec.log
         transcript(log, "sent", text=text)
         self._turn_start = self._total
         try:
-            result = await self.rpc.request("turn/start", {"threadId": self.id,
-                                                           "input": [{"type": "text", "text": text, "text_elements": []}]})
+            result = await self.rpc.request("turn/start", {"threadId": self.id, "input": _input(text)})
         except TimeoutError:
             return TurnEnd("unavailable", "the Codex app server stopped answering")
         except _RpcError as error:
@@ -371,6 +390,8 @@ class _Connection:
         try:
             await self._write({"id": request_id, "method": method, "params": params})
             return await asyncio.wait_for(future, timeout or self.timeout)
+        except TimeoutError:  # an OSError too, but it means no answer, not a lost app server
+            raise
         except OSError as error:  # its stdin is gone: the app server died after the check above
             raise _RpcError(self.dead or f"lost the Codex app server: {error}") from error
         finally:
@@ -481,6 +502,11 @@ def _tool_label(item: dict) -> str:
         return TOOL_ITEMS[kind]
     name = item.get("tool") or kind
     return f"{item['namespace']}.{name}" if item.get("namespace") else name
+
+
+def _input(text: str) -> list[dict]:
+    """A user message, as turn/start and turn/steer take it."""
+    return [{"type": "text", "text": text, "text_elements": []}]
 
 
 def _tool_reply(text: str, success: bool) -> dict:
