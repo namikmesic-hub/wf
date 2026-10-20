@@ -911,13 +911,13 @@ class _Order:
                     todo.append(prev)
         return seen
 
-    def _certain(self, known: set[str], excluding: str | None) -> set[str]:
-        """`known` plus every node they're certain to make pending (a needs edge, or all of a node's routes)."""
+    def _certain(self, known: set[str], excluding: str | None, among: set[str] | None = None) -> set[str]:
+        """`known` plus every node of `among` they're certain to make pending (a needs edge, or all of a node's routes)."""
         done, changed = set(known), True
         while changed:
             changed = False
             for node in self.topo.order:
-                if node in done or node == excluding:
+                if node in done or node == excluding or (among is not None and node not in among):
                     continue
                 by_needs = any(need in done for need in self.topo.needs[node])
                 by_routes = any(s in done and all(node in r.targets for r in self.topo.routes[s]) for s in self.route_sources[node])
@@ -1109,8 +1109,8 @@ def _reads_follow_up(workflow: Workflow, node_id: str) -> bool:
 class _FollowUpOrder(_Order):
     """_Order for a follow-up, which starts at the nodes in `entry` instead of at start. The nodes they can
     lead to (`ahead`) run again from none. Of the others, only `kept`, the nodes certain to have run by the
-    end of the run, count as finished. The entry nodes all start pending, so each one runs. See waited()
-    for when one finishes before a node starts."""
+    end of the run, count as finished. The entry nodes all start pending, so each one runs. See first()
+    for when a node finishes before another starts."""
 
     def __init__(self, topo: Topology, entry: tuple[str, ...], kept: frozenset[str]):
         super().__init__(topo)
@@ -1123,20 +1123,36 @@ class _FollowUpOrder(_Order):
         triggers[END] = {n for n in self.ahead
                          if any(END in r.targets for r in topo.routes[n]) or not (topo.routes[n] or topo.dependents.get(n))}
         self.dominators = _dominators([START, *topo.order, END], triggers, self.ahead | {START, END})
+        # node -> the nodes it waits for while they're pending or running: they lead to a need (scheduler.settled)
+        self.waits = {n: {o for o in self.ahead - {n} if (set(topo.needs[n]) - {START}) & topo.reachable([o], avoiding=n)}
+                      for n in self.ahead}
+        self.stuck = _stuck(self.waits)
 
     def before(self, node: str) -> set[str]:
         if node not in self._before:
-            known = (self.dominators[node] - {node, START}) | self.waited(node)  # a follow-up's start ended long ago
-            self._before[node] = known | (self._ancestors(node) & self._certain(known, excluding=node)) | self.kept
+            earlier = {other for other in self.waits.get(node, ()) if self.first(other, node)}
+            known = (self.dominators[node] - {node, START}) | (self.entry & earlier)  # a follow-up's start ended long ago
+            self._before[node] = self._certain(known, excluding=node, among=earlier) | self.kept
         return self._before[node]
 
-    def waited(self, node: str) -> set[str]:
-        """The entry nodes that finish before `node` starts. A need of the node must wait for the entry
-        (scheduler.settled). When all pending nodes wait, the first one starts (scheduler.starts). So the
-        entry must also be pending before the node: the entries are pending first, in file order."""
-        earlier = {e for e in self.entry - {node} if node not in self.entry or self.position[e] < self.position[node]}
-        return {e for e in earlier if any(
-            need != START and need in self.topo.reachable([e], avoiding=node) for need in self.topo.needs[node])}
+    def first(self, other: str, node: str) -> bool:
+        """Does `other`, once it is pending, finish before `node` starts? `node` must wait for it. When every
+        pending node waits, the first one starts (scheduler.starts). That starts `node` before `other` only
+        when both are `stuck` and `node` is pending first. The entries are pending first, in file order."""
+        if other not in self.waits.get(node, ()):
+            return False
+        if node not in self.stuck or other not in self.stuck:
+            return True
+        return other in self.entry and (node not in self.entry or self.position[other] < self.position[node])
 
     def at_end(self) -> set[str]:
         return self._certain((self.dominators[END] - {END, START}) | self.entry, excluding=None) | self.kept
+
+
+def _stuck(waits: dict[str, set[str]]) -> set[str]:
+    """The nodes that can be pending while every pending node waits (scheduler.starts). Each of them waits
+    for another one, so their waits lead into a cycle. `waits`: node -> the nodes it waits for."""
+    stuck = set(waits)
+    while free := {n for n in stuck if not waits[n] & stuck}:
+        stuck -= free
+    return stuck

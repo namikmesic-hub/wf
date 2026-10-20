@@ -798,14 +798,64 @@ def test_an_entry_that_the_scheduler_starts_first_to_break_a_wait_reads_no_later
     found = problems(text)
     # a and b each wait for a need that the other leads to, so the scheduler starts a, the first in the file
     assert [p.split(":", 2)[1].strip() for p in found if "might not have run yet in a follow-up" in p] == ["nodes.a.command"]
+    assert [job["node"] for job in following_up().starts_now(0.0)] == ["a"]
+
+
+def test_an_entry_waits_for_a_later_entry_it_needs_when_no_wait_can_lock(repo):
+    write("later.yaml", """
+        version: 1
+        name: later
+        start: {input: {}}
+        follow_up: {to: [a, b]}
+        nodes:
+          a: {needs: [b], command: "echo {{ b.stdout | trim | quote }}{% if follow_up %} {{ follow_up.number }}{% endif %}"}
+          b: {needs: [start], command: "echo B"}
+        end: {output: {said: {type: string, value: "{{ a.stdout | trim }}"}}}
+    """)
+    # b waits for no node, so the scheduler never starts a first to break a wait: file order doesn't matter
+    assert [str(p) for p in validate.check("later.yaml").problems] == []
+    assert cli.main(["run", "later.yaml"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "more"]) == 0
+    assert run.output() == {"said": "B 1"}
+
+
+def test_a_node_that_an_entry_leads_to_isnt_run_before_a_join_that_the_scheduler_can_start_first(repo):
+    found = problems("""
+        version: 1
+        name: lock
+        start: {input: {}}
+        follow_up: {to: [a, b]}
+        nodes:
+          b: {needs: [start], command: "true"}
+          a: {needs: [start], command: "true"}
+          join: {needs: [x, b], command: "echo {% if follow_up %}{{ x.stdout | quote }}{% endif %}", routes: [{to: c, max: 1}, {to: end}]}
+          c: {needs: [start], command: "true"}
+          x: {needs: [a, c], command: "true"}
+        end: {output: {}}
+    """)
+    # x waits for c, which join leads to, and join waits for x. With both pending, the scheduler starts join, the first
+    assert [p.split(":", 2)[1].strip() for p in found if "might not have run yet in a follow-up" in p] == ["nodes.join.command"]
+    progress = following_up()
+    jobs = progress.starts_now(0.0)
+    assert [job["node"] for job in jobs] == ["b", "a"]
+    for job in jobs:
+        progress.record({"node": job["node"], "pass_no": job["pass_no"], "index": None, "ok": True, "output": {"stdout": ""},
+                         "error": None, "attempts": 1, "workspace": None, "usage": {}})
+    (join,) = progress.starts_now(0.0)
+    assert join["node"] == "join" and join["vars"]["x"] is None
+
+
+def following_up() -> state.Progress:
+    """The state of a run of check.yaml that succeeded, as its first follow-up starts."""
     workflow = spec.load("check.yaml")
     saved = {"run": {"id": "x", "dir": "x", "base": None, "branch": None, "repo": "."}, "status": "succeeded", "failure": None,
-             "outputs": {n: {"stdout": ""} for n in ("start", "a", "b", "c", "d")},
+             "outputs": {n: {"stdout": ""} for n in ("start", *workflow.nodes)},
              "errors": {}, "taken": {}, "history": {}, "pending": [], "active": {}, "output": {}, "sessions": {}, "passes": {},
              "usage": {"cost_usd": 0.0, "tokens": 0}, "follow_up": {"request": "more", "number": 1, "limits": {}, "pending": True}}
     progress = state.Progress(saved, workflow, scheduler.Topology.of(workflow), lambda event: None)
     progress.follow_up(0.0)
-    assert [job["node"] for job in progress.starts_now(0.0)] == ["a"]
+    return progress
 
 
 def test_a_node_after_an_entry_counts_as_run_before_a_join_that_waits_for_it(repo, capsys):
