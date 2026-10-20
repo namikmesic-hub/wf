@@ -127,8 +127,7 @@ wf continue <run-id> --file <request.md> --detach --json
 ```
 
 The run goes on from the node that its workflow's `follow_up` names.
-Without `follow_up`, it goes on from the first agent node that can change files and that the run ran.
-Then wf adds the request to the instruction of that node.
+Without `follow_up`, it goes on from the first agent node that can change files, and wf adds the request to its instruction.
 It works on the same branches, with the same agent sessions where the harness keeps them.
 Its routes count from zero again, so its review loop gets all of its rounds again.
 The follow-up has a budget of its own: the limits of the workflow file, or `--limit` values that you give.

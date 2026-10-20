@@ -53,7 +53,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, settings, shape, spec, steer, validate, workspaces
+from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, settings, spec, steer, validate, workspaces
 from .context import RunContext
 from .harnesses.base import short
 
@@ -683,8 +683,8 @@ def _parse(raw: str, field: dict):
 def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, as_json: bool = False,
               limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
     """`wf continue`: give a run that succeeded a follow-up request. Then drive it again from the nodes that take
-    the request (shape.follow_up_targets). `limit_pairs` (--limit) give the follow-up a budget of its own. With `detach`,
-    check and prepare everything here, then let a background `wf retry` drive it.
+    the request (scheduler.follow_up_targets). `limit_pairs` (--limit) give the follow-up a budget of its own.
+    With `detach`, check and prepare everything here, then let a background `wf retry` drive it.
 
     The run's lock is taken before anything is checked, and nothing changes until every check passed. Then the
     worktrees come back, status.json says the follow-up runs, and one write of the checkpoints holds the
@@ -726,7 +726,7 @@ def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: s
         print(f"{name}: {problem}", file=sys.stderr)
         return 1
     home = _run_home(run, state)
-    if problem := _repo_problem(run, workflow, home, state.values or {}) or _signing_problem(workflows, home):
+    if problem := _repo_problem(run, workflow, home) or _signing_problem(workflows, home):
         print(f"{name}: {problem}", file=sys.stderr)
         return 1
     try:
@@ -775,22 +775,21 @@ def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapsho
         return f"run {run.id} stopped before it ended: continue it with {run.command('retry')}"
     if status != "succeeded":
         return f"run {run.id} hasn't succeeded (its status is {status}), and only a run that succeeded takes a follow-up"
-    if not shape.follow_up_targets(workflow):
-        return (f"workflow `{workflow.name}` has no `follow_up`, which names the node that takes a follow-up request, "
-                "and no agent node with `edit` or `full` access to take it by default. Add `follow_up: {to: <node>}` "
-                "to name one. A run keeps the workflow files it started with, so only the runs that start after that "
-                "change take a follow-up")
+    if not scheduler.follow_up_targets(workflow):
+        return (f"workflow `{workflow.name}` has no `follow_up`, which names the node that takes a follow-up request. "
+                "And it has no agent node with `edit` or `full` access to take it by default. Add "
+                "`follow_up: {to: <node>}` to name one. A run keeps the workflow files it started with, so only the "
+                "runs that start after that change take a follow-up")
     if not _ended(run, state) or (state.values or {}).get("status") != "succeeded":
         return f"run {run.id} has no checkpoint of its end to continue from: {run.command('retry')} says where it stands"
     return None
 
 
-def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict, values: dict) -> str | None:
+def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | None:
     """Why the follow-up can't work in the run's `repo` workspace, or None. It can't when a node that the
-    follow-up can reach works there, and that checkout is now on another branch than the run's. `values` is
-    the state of the run, whose passes say where a workflow without `follow_up` sends the request."""
+    follow-up can reach works there, and that checkout is now on another branch than the run's."""
     kinds, topo = set(), scheduler.Topology.of(workflow)
-    for node in topo.reachable(shape.follow_up_targets(workflow, topo, values.get("passes") or {})):
+    for node in topo.reachable(scheduler.follow_up_targets(workflow, topo)):
         seen = set()
         while workflow.setting(node, "workspace") in workflow.nodes and node not in seen:
             seen.add(node)
@@ -879,6 +878,6 @@ def _run_record(ctx: RunContext, values: dict, answers: dict | None) -> dict:
 
 
 def _follow_up_hint(ctx: RunContext, status: str) -> str:
-    if status != "succeeded" or not shape.follow_up_targets(ctx.workflow, ctx.topo):
+    if status != "succeeded" or not scheduler.follow_up_targets(ctx.workflow, ctx.topo):
         return ""
     return f" Give it a follow-up with: {ctx.run.command('continue', '<request>')}"

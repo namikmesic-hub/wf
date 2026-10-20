@@ -17,7 +17,7 @@ Templates are checked without running them. templates.references() lists every
 name a template reads and its field path; _roots() says what each name holds,
 as a JSON Schema; schemas.field_at() walks the path through it.
 
-"Might not have run" is the subtle check. _Order works out which nodes are
+"Might not have run" is the subtle check. scheduler.Order works out which nodes are
 certain to have finished before a node starts: its dominators (nodes on every
 path of "this finishing made that pending" that leads to it), plus nodes those
 make certain and that must finish before it can start. A template that reads
@@ -30,8 +30,8 @@ import itertools
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import harnesses, scheduler, schemas, shape, spec, templates
-from .scheduler import END, START, Topology
+from . import harnesses, scheduler, schemas, spec, templates
+from .scheduler import END, START, Order, Topology, dominators
 from .schemas import ANY, EACH, NoField
 from .spec import HARNESSES, NODE_ID, RESERVED, Problem, SpecError, Workflow
 from .templates import Ref, TemplateError
@@ -79,17 +79,11 @@ def _notes(workflow: Workflow) -> list[str]:
     """Where `wf continue` sends a follow-up request, for a workflow without `follow_up`."""
     if workflow.follow_up is not None:
         return []
-    candidates = shape.follow_up_candidates(workflow)
-    if len(candidates) == 1:
-        return [f"`wf continue` sends a follow-up request to `{candidates[0]}`, the agent node with `edit` or `full` "
-                "access. `follow_up: {to: <node>}` names another node"]
-    if candidates:
-        listed = ", ".join(f"`{node}`" for node in candidates)
-        return [f"`wf continue` sends a follow-up request to the first of these agent nodes with `edit` or `full` "
-                f"access that the run ran, or else to `{candidates[0]}`: {listed}. `follow_up: {{to: <node>}}` names "
-                "another node"]
+    if targets := scheduler.follow_up_targets(workflow):
+        return [f"`wf continue` sends a follow-up request to `{targets[0]}`, the first agent node with `edit` or "
+                "`full` access. Name another node with `follow_up: {to: <node>}`"]
     return ["`wf continue` refuses the runs of this workflow, because it has no agent node with `edit` or `full` "
-            "access. `follow_up: {to: <node>}` names a node that takes a follow-up request"]
+            "access. Name a node that takes a follow-up request with `follow_up: {to: <node>}`"]
 
 
 @dataclass
@@ -154,7 +148,7 @@ class _Checker:
         self.roots = self._roots()  # without sub-workflow outputs yet; enough to follow tainted data
         self._sub_workflows()
         self.roots = self._roots()
-        self.order, self.follow_ups = (order := _Order(self.topo)), _FollowUps(self, order)
+        self.order, self.follow_ups = (order := Order(self.topo)), _FollowUps(self, order)
         if self.wf.defaults.tools is not None:  # once, whether or not an agent node inherits them
             self._tool_list("defaults.tools", self.wf.defaults.tools)
         self._secret_env()
@@ -296,7 +290,7 @@ class _Checker:
             "workspace": fields({n: per_pass(n, _WORKSPACE) for n in self.nodes}),
             "errors": fields({n: {"type": "array", "items": _ERROR_ITEM} for n in self.nodes}),
             "run": _RUN,
-            "session": _SESSION, **({"follow_up": _FOLLOW_UP} if shape.follow_up_targets(self.wf, self.topo) else {}),
+            "session": _SESSION, **({"follow_up": _FOLLOW_UP} if scheduler.follow_up_targets(self.wf, self.topo) else {}),
         }
 
     # ---------- 3. sub-workflows ----------
@@ -898,80 +892,6 @@ class _Checker:
                              "so that spending isn't counted; limits.duration caps every harness")
 
 
-class _Order:
-    """Which nodes are certain to have finished at a given point of a run."""
-
-    def __init__(self, topo: Topology):
-        self.topo = topo
-        self.route_sources: dict[str, list[str]] = {n: [] for n in topo.order}
-        for source in topo.order:
-            for route in topo.routes[source]:
-                for target in route.targets:
-                    if target != END and source not in self.route_sources[target]:
-                        self.route_sources[target].append(source)
-        # triggers: the nodes whose finishing can make a node pending
-        triggers = {n: set(topo.needs[n]) | set(self.route_sources[n]) for n in topo.order}
-        triggers[END] = {n for n in topo.order
-                         if any(END in r.targets for r in topo.routes[n]) or not (topo.routes[n] or topo.dependents.get(n))}
-        self.dominators = _dominators([START, *topo.order, END], triggers, topo.reachable([START]) | {END})
-        self.predecessors: dict[str, set[str]] = {n: set() for n in (START, *topo.order)}
-        for node, successors in topo.successors.items():
-            for nxt in successors:
-                self.predecessors[nxt].add(node)
-        self._before: dict[str, set[str]] = {}
-
-    def before(self, node: str) -> set[str]:
-        """Nodes certain to have finished before `node` starts."""
-        if node not in self._before:
-            known = self.dominators[node] - {node}
-            self._before[node] = known | (self._ancestors(node) & self._certain(known, excluding=node))
-        return self._before[node]
-
-    def at_end(self) -> set[str]:
-        """Nodes certain to have run by the time end.output is computed."""
-        return self._certain(self.dominators[END] - {END}, excluding=None)
-
-    def _ancestors(self, node: str) -> set[str]:
-        seen, todo = set(), [node]
-        while todo:
-            for prev in self.predecessors.get(todo.pop(), ()):
-                if prev not in seen and prev != node:
-                    seen.add(prev)
-                    todo.append(prev)
-        return seen
-
-    def _certain(self, known: set[str], excluding: str | None) -> set[str]:
-        """`known` plus every node they're certain to make pending (a needs edge, or all of a node's routes)."""
-        done, changed = set(known), True
-        while changed:
-            changed = False
-            for node in self.topo.order:
-                if node in done or node == excluding:
-                    continue
-                by_needs = any(need in done for need in self.topo.needs[node])
-                by_routes = any(s in done and all(node in r.targets for r in self.topo.routes[s]) for s in self.route_sources[node])
-                if by_needs or by_routes:
-                    done.add(node)
-                    changed = True
-        return done
-
-
-def _dominators(nodes: list[str], triggers: dict[str, set[str]], reached: set[str]) -> dict[str, set[str]]:
-    """Classic iterative dominators: d dominates n if every path from start to n passes through d."""
-    everything = set(nodes)
-    dominators = {n: set(everything) for n in nodes}
-    dominators[START] = {START}
-    changed = True
-    while changed:
-        changed = False
-        for node in nodes[1:]:
-            preds = [p for p in triggers.get(node, ()) if p in reached]
-            new = {node} | (set.intersection(*(dominators[p] for p in preds)) if preds else set())
-            if new != dominators[node]:
-                dominators[node], changed = new, True
-    return dominators
-
-
 def _cycles(graph: dict[str, tuple | list]) -> list[list[str]]:
     """Cycles in a graph, each as [a, b, ..., a]; a node is reported in at most one."""
     found, reported, state = [], set(), {}
@@ -1087,7 +1007,7 @@ class _FollowUps:
     a follow-up runs again reads `follow_up`. No template reads an output that a follow-up clears before it.
     `order` is the follow-up's _FollowUpOrder, or None without a good `follow_up`."""
 
-    def __init__(self, checker: "_Checker", order: _Order):
+    def __init__(self, checker: "_Checker", order: Order):
         self.checker, self.order = checker, None
         if checker.wf.follow_up is None:
             return
@@ -1136,8 +1056,8 @@ def _reads_follow_up(workflow: Workflow, node_id: str) -> bool:
     return False
 
 
-class _FollowUpOrder(_Order):
-    """_Order for a follow-up, which starts at the nodes in `entry` instead of at start. The nodes they can
+class _FollowUpOrder(Order):
+    """Order for a follow-up, which starts at the nodes in `entry` instead of at start. The nodes they can
     lead to (`ahead`) run again from none. Of the others, only `kept`, the nodes certain to have run by the
     end of the run, count as finished. Which nodes of `ahead` have finished at a point comes from stepping
     the scheduler through the follow-up (_follow_up_steps). The nodes in `lists` have `for_each`."""
@@ -1151,7 +1071,7 @@ class _FollowUpOrder(_Order):
             triggers[node].add(START)
         triggers[END] = {n for n in self.ahead
                          if any(END in r.targets for r in topo.routes[n]) or not (topo.routes[n] or topo.dependents.get(n))}
-        self.dominators = _dominators([START, *topo.order, END], triggers, self.ahead | {START, END})
+        self.dominators = dominators([START, *topo.order, END], triggers, self.ahead | {START, END})
         self.stepped = _follow_up_steps(topo, entry, lists)  # None: too many ways to step through
 
     def before(self, node: str) -> set[str]:

@@ -26,7 +26,7 @@ import operator
 from collections.abc import Callable
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from . import scheduler, schemas, shape, templates
+from . import scheduler, schemas, templates
 from .scheduler import START, Topology
 from .spec import Workflow
 
@@ -206,22 +206,21 @@ class Progress:
 
     def follow_up(self, elapsed_s: float) -> None:
         """Take in the request that `wf continue` gave a run that succeeded: a new pass of the run, from the
-        nodes that take the request (shape.follow_up_targets, which `to` keeps). With `follow_up`, every node they
-        can lead to reads none until it runs again. Without it, the node and the nodes after it read none, as on a
-        pass of the run from that node, so a node that only a loop leads back to keeps its output. The others keep
-        their outputs. Routes count from zero again, the limits count from `from`, and the next pass of a
-        `session: continue` node continues its last session."""
-        targets, given = list(shape.follow_up_targets(self.wf, self.topo, self.s["passes"])), self.s["follow_up"]
+        nodes that take the request (scheduler.follow_up_targets, which `to` keeps). Every node they can lead to
+        reads none until it runs again. Without `follow_up`, a node certain to have finished before the node that
+        takes the request starts (scheduler.Order) keeps its output. So that node finds what its template reads
+        without {% if %}, as on its first pass. The others keep their outputs. Routes count from zero again, the
+        limits count from `from`, and the next pass of a `session: continue` node continues its last session."""
+        targets, given = list(scheduler.follow_up_targets(self.wf, self.topo)), self.s["follow_up"]
         usage = self.s["usage"]
         self.s["follow_up"] = {**{k: v for k, v in given.items() if k != "pending"}, "to": targets,
                                "from": {"cost_usd": usage["cost_usd"], "tokens": usage["tokens"], "elapsed_s": elapsed_s}}
         self.s["status"], self.s["failure"], self.s["output"] = "running", None, None
         self.s["taken"] = {}
-        if self.wf.follow_up is not None:
-            again = self.topo.reachable(targets)
-        else:
-            steps = shape.Shape(self.wf, self.topo)
-            again = set().union(*(steps.after(node) for node in targets))
+        again = self.topo.reachable(targets)
+        if self.wf.follow_up is None:
+            order = scheduler.Order(self.topo)
+            again -= set().union(*(order.before(node) for node in targets))
         for node in again:
             self.s["outputs"].pop(node, None)
             self.s["errors"].pop(node, None)

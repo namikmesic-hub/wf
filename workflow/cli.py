@@ -742,10 +742,10 @@ def _continue_command(commands, no_input: dict, runs_dir: dict) -> None:
     following = commands.add_parser(
         "continue", help="give a run that succeeded a follow-up request, and run it again from its follow-up node",
         description="Give a run that succeeded a follow-up request. The run goes on from the node that its "
-                    "workflow's `follow_up` names, or else from the first agent node with edit or full access "
-                    "that the run ran (wf validate names them). It goes on on the same branches, with each "
-                    "`session: continue` node's last session, fresh route counters, and a budget of its own. A run "
-                    "that runs, waits or failed is refused: wf retry and wf answer continue those.")
+                    "workflow's `follow_up` names, or else from its first agent node with edit or full access "
+                    "(wf validate names it), on the same branches, with each `session: continue` node's "
+                    "last session, fresh route counters, and a budget of its own. A run that runs, waits or failed "
+                    "is refused: wf retry and wf answer continue those.")
     following.add_argument("run_id", metavar="run-id")
     following.add_argument("message", nargs="?", metavar="request", help="what the run should do now (or use --file)")
     following.add_argument("--file", type=Path, metavar="FILE", help="read the request from FILE (- for stdin)")

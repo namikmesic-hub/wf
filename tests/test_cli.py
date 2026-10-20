@@ -35,7 +35,7 @@ def test_the_starter_file_is_valid(here, capsys):
     assert cli.main(["validate", "my-flow.yaml"]) == 0
     assert capsys.readouterr().out.splitlines() == [
         "my-flow.yaml: note: `wf continue` refuses the runs of this workflow, because it has no agent node with "
-        "`edit` or `full` access. `follow_up: {to: <node>}` names a node that takes a follow-up request",
+        "`edit` or `full` access. Name a node that takes a follow-up request with `follow_up: {to: <node>}`",
         "my-flow.yaml: valid",
     ]
 
@@ -62,8 +62,8 @@ def test_validate_reports_warnings_and_passes(here, capsys):
     assert cli.main(["validate", "feature.yaml"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0].startswith("feature.yaml: warning: limits.cost_usd: codex doesn't report cost")
-    assert out[1] == ("feature.yaml: note: `wf continue` sends a follow-up request to `merge`, the agent node "
-                      "with `edit` or `full` access. `follow_up: {to: <node>}` names another node")
+    assert out[1] == ("feature.yaml: note: `wf continue` sends a follow-up request to `merge`, the first agent node "
+                      "with `edit` or `full` access. Name another node with `follow_up: {to: <node>}`")
     assert out[-1] == "feature.yaml: valid, 1 warning"  # a note isn't a warning
 
 

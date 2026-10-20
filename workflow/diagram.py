@@ -1,7 +1,7 @@
 """Diagram: a workflow as a Mermaid flowchart, for `wf graph`, and as rows of boxes, for `wf ui`.
 
 Solid arrows are `needs` edges. Dotted arrows are routes, labelled with their `when` and `max`,
-and the way in of a follow-up request (shape.follow_up_targets). Shapes show the kind of node:
+and the way in of a follow-up request (scheduler.follow_up_targets). Shapes show the kind of node:
 
     ("agent")   [/"command"/]   {{"human"}}   [["workflow"]]
 
@@ -14,8 +14,8 @@ place of the nodes before it, and file order breaks ties. The page draws the
 boxes and the edges from that.
 """
 
-from .shape import Shape, follow_up_targets
-from .scheduler import END, START
+from .shape import Shape
+from .scheduler import END, START, follow_up_targets
 from .spec import Workflow
 
 _SHAPES = {"agent": ('("', '")'), "command": ('[/"', '"/]'), "human": ('{{"', '"}}'), "workflow": ('[["', '"]]')}
