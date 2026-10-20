@@ -167,7 +167,7 @@ Each harness needs its own login, and only the harnesses a workflow uses need to
   wf runs Cursor through Cursor's SDK (`@cursor/sdk`), in the Cursor host, a program in TypeScript that ships with wf.
   Create the key in the Cursor dashboard, then run `wf runtimes cursor signin`, which keeps it in the macOS Keychain.
   Or name a file that holds the key with `cursor_api_key_file` in `~/.wf/config.yaml`.
-  Until a key is set, read-only and full nodes run through `cursor-agent` too, as before, and the run warns once and says how to add a key.
+  Until a key is set, read-only and full nodes run through `cursor-agent`, and the run warns once and says how to add a key.
   wf never reads the key from the environment, and removes `CURSOR_API_KEY` from the environment that Cursor and its agents see.
   An agent that runs commands at `edit` or `full` access could still read the key from the Keychain.
   It could read every other sign-in there too ([docs/tools.md](tools.md)).
