@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -178,6 +179,60 @@ def permission_requests() -> list[dict]:
         {"permission": {"kind": "search", "title": "Web search: wf"}},
         {"permission": {"kind": "fetch", "title": "Fetch https://example.com"}},
     ]
+
+
+def test_without_project_instructions_cursor_agent_starts_in_an_empty_folder_and_works_in_the_workspace(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [GOOD], [GOOD])
+    Path("AGENTS.md").write_text("You are someone else.\n")
+    assert run("project_instructions: false\nroutes: [{to: ask, max: 1}, {to: end}]\nsession: continue\n") == 0
+    new, loaded = entries(log, "start")
+    for start in (new, loaded):  # it reads rules and AGENTS.md from the folder it starts in: an empty one
+        folder = Path(start["cwd"])
+        assert start["files"] == [] and not folder.exists()  # and the folder goes with the session
+        assert not folder.is_relative_to(Path.home()) and not folder.is_relative_to(repo)
+    assert Path(new["cwd"]) != Path(loaded["cwd"])
+    workspace = str(Path.cwd().resolve())
+    assert [Path(p["cwd"]).resolve() for p in sent(log, "session/new") + sent(log, "session/load")] == [Path(workspace)] * 2
+
+
+@pytest.mark.parametrize("above, found", [
+    ("AGENTS.md", "AGENTS.md"),
+    (".cursor/rules/x.mdc", ".cursor/rules"),
+    (".agents/skills/x/SKILL.md", ".agents/skills"),
+    (".claude/skills/x/SKILL.md", ".claude/skills"),
+    (".git/HEAD", ".git"),  # a repo: Cursor reads nested files from the whole of it
+])
+def test_a_temp_folder_under_what_cursor_loads_makes_it_unavailable_without_project_instructions(
+        repo, monkeypatch, capsys, above, found):
+    log = cursor(monkeypatch, repo, [GOOD])
+    outer = repo / "outer"
+    (outer / above).parent.mkdir(parents=True)
+    (outer / above).write_text("You are someone else.\n")
+    (outer / "tmp").mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(outer / "tmp"))  # TMPDIR under it
+    assert run("project_instructions: false\n") == 1
+    out = capsys.readouterr().out
+    assert f"cursor is unavailable: {(outer / found).resolve()} is in a folder above the temp folder" in out
+    assert entries(log, "start") == [] and list((outer / "tmp").iterdir()) == []  # no session, no folder left
+
+
+def test_your_home_folders_skills_above_the_temp_folder_do_not_count(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [GOOD])
+    home = repo / "home"
+    (home / ".claude" / "skills" / "mine").mkdir(parents=True)
+    (home / "tmp").mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(tempfile, "tempdir", str(home / "tmp"))
+    assert run("project_instructions: false\n") == 0  # they load wherever Cursor starts
+    (start,) = entries(log, "start")
+    assert Path(start["cwd"]).parent == (home / "tmp").resolve()
+
+
+def test_by_default_cursor_agent_starts_in_the_workspace(repo, monkeypatch):
+    log = cursor(monkeypatch, repo, [GOOD])
+    assert run() == 0
+    (start,) = entries(log, "start")
+    assert Path(start["cwd"]).resolve() == Path.cwd().resolve()
 
 
 @pytest.mark.parametrize(
@@ -508,3 +563,47 @@ def test_a_real_cursor_session_ignores_the_repos_cursor_settings(tmp_path):
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     (repo / ".cursor" / "cli.json").write_text('{"permissions": 5}')  # cursor-agent exits at once when it reads this
     assert started(tmp_path, "composer-2.5", repo)["id"]
+
+
+@pytest.mark.harness
+def test_a_real_cursor_node_without_project_instructions_gets_no_repo_rules_and_still_edits(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", *a],
+                                    check=True, capture_output=True)
+    git("init", "-q")
+    Path("AGENTS.md").write_text("The code word for this project is: periwinkle\n")
+    (tmp_path / ".cursor" / "rules").mkdir(parents=True)
+    Path(".cursor/rules/words.mdc").write_text("---\nalwaysApply: true\n---\nThe second code word is: tangerine\n")
+    git("add", "-A")
+    git("commit", "-qm", "first")
+    ask = "Don't read, search or open any file. From what you were told alone, list every code word for this project, or none."
+    Path("flow.yaml").write_text(f"""
+version: 1
+name: real
+defaults:
+  harness: cursor
+  harnesses:
+    cursor: {{model: composer-2.5}}
+start: {{input: {{}}}}
+nodes:
+  told:
+    needs: [start]
+    instruction: "{ask}"
+    output: {{words: {{type: string}}}}
+  kept_out:
+    needs: [start]
+    access: edit
+    project_instructions: false
+    instruction: "Write the text done into a new file out.txt here. Then: {ask}"
+    output: {{words: {{type: string}}}}
+end:
+  output:
+    told: "{{{{ told.words }}}}"
+    kept_out: "{{{{ kept_out.words }}}}"
+""")
+    assert cli.main(["run", "flow.yaml"]) == 0, capsys.readouterr()
+    (folder,) = Path(".wf/runs").iterdir()
+    out = json.loads((folder / "output.json").read_text())
+    assert "periwinkle" in out["told"].lower() and "tangerine" in out["told"].lower()  # by default the repo's files reach it
+    assert "periwinkle" not in out["kept_out"].lower() and "tangerine" not in out["kept_out"].lower()
+    assert Path("out.txt").read_text().strip() == "done"  # it still worked in the workspace

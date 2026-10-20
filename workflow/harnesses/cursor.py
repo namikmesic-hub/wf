@@ -87,9 +87,23 @@ a continued attempt runs, and the mark goes only when a turn of that attempt
 ends with a result. When the attempt fails, even after its result came in (a
 timeout), the next one starts fresh instead of loading the failure.
 
-What can't be switched off: the repo's rules and AGENTS.md load, and so do your
-Cursor account's User Rules and the skills in your home folder (such as
-~/.claude/skills and ~/.agents/skills). Cursor runs a web fetch its server
+Instruction files: cursor-agent reads the repo's rules, skills, subagents and
+commands from the folder it starts in, not from session/new's cwd. It reads
+.cursor/rules, .cursorrules, AGENTS.md, CLAUDE.md and CLAUDE.local.md there, in
+each folder above it, and in folders below it. It also reads the skills in the
+.cursor, .claude, .codex, .grok and .agents folders. So a session starts in the
+workspace, unless the node sets `project_instructions: false`. Then it starts
+in a new empty folder in the system's temp folder (_bare_folder), and
+session/new still gives the workspace, where the agent works. The session is
+unavailable instead when the temp folder is in a git repo (TMPDIR in a repo).
+It is also unavailable when a folder above it holds such a file or skills
+folder. Only your home folder's skills don't count: they load anywhere. The cost:
+Cursor's semantic code search and lint diagnostics don't cover the workspace.
+
+What can't be switched off: your Cursor account's User Rules, and the skills in
+your home folder (such as ~/.claude/skills and ~/.agents/skills). The repo's
+hooks (.cursor/hooks.json, .claude/settings.json) load from session/new's cwd,
+even with `project_instructions: false`. Cursor runs a web fetch its server
 marks as needing no approval, even with `web: false`.
 
 wf is tested with one cursor-agent version (TESTED), because it reads the
@@ -104,6 +118,7 @@ import os
 import re
 import shutil
 import signal
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -112,7 +127,7 @@ from ..runs import write_json
 from . import git_tool, mcp_http
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
-TESTED = "2026.10.16-e3cb207"
+TESTED = "2026.10.18-ea085cb"
 COMMAND = ["cursor-agent"]
 FLAGS = ["--sandbox", "disabled", "--disable-project-configs"]
 SERVER = "wf"  # the MCP server name the agent sees
@@ -142,6 +157,8 @@ RETRY_AFTER = 30  # seconds
 AUTH_REQUIRED = -32000  # ACP's error code for "authenticate first"
 LABELS = {"read": "read", "edit": "edit", "delete": "delete", "move": "move", "search": "search",
           "execute": "command", "fetch": "web fetch"}
+LOADED_FROM_ABOVE = (".git", "AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", ".cursorrules", ".cursor/rules")  # .git: in a repo
+SKILLS = tuple(f"{folder}/skills" for folder in (".cursor", ".claude", ".codex", ".grok", ".agents"))
 
 
 class Cursor:
@@ -236,6 +253,7 @@ class CursorSession:
         self.harness, self.spec = harness, spec
         self.id = ""
         self.folder: Path | None = None  # this process's config folder
+        self.bare: Path | None = None  # an empty folder to start in, without the repo's instruction files
         self.rpc: _Connection | None = None
         self.url = ""  # this session's MCP server
         self.tool_urls: list[str] = []  # its wf tools' servers
@@ -270,8 +288,10 @@ class CursorSession:
                 self.id = spec.fork_from  # set first: close() puts the session back even if loading fails
                 (self.folder / "acp-sessions").mkdir()
                 saved.rename(self.folder / "acp-sessions" / self.id)
-            self.rpc = await _Connection.start(command, spec.cwd, harness.env(self.folder), harness.home / "cursor-agent.log",
-                                               harness.request_timeout, self)
+            if not spec.project_instructions:
+                self.bare = _bare_folder()
+            self.rpc = await _Connection.start(command, self.bare or spec.cwd, harness.env(self.folder),
+                                               harness.home / "cursor-agent.log", harness.request_timeout, self)
             await self.rpc.request("initialize", {
                 "protocolVersion": 1, "clientInfo": {"name": "wf", "version": "0.1.0"},
                 "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False,
@@ -401,6 +421,9 @@ class CursorSession:
                 self._keep_session()
                 shutil.rmtree(self.folder, ignore_errors=True)
                 self.folder = None
+            if self.bare is not None:
+                shutil.rmtree(self.bare, ignore_errors=True)
+                self.bare = None
 
     def _keep_session(self) -> None:
         """Move the session out of the config folder, which goes, when a later pass may load it."""
@@ -410,6 +433,21 @@ class CursorSession:
             shutil.rmtree(target, ignore_errors=True)
             target.parent.mkdir(exist_ok=True)
             store.rename(target)
+
+
+def _bare_folder() -> Path:
+    """A new empty folder in the system's temp folder, for cursor-agent to start in. Cursor also reads
+    instruction files from the folders above that one, and from the whole repo it is in. So a folder in a
+    repo, or under such a file or skills folder, is refused. Your home folder's skills load anyway."""
+    folder = Path(tempfile.mkdtemp(prefix="wf-cursor-")).resolve()
+    home = Path.home().resolve()
+    found = next((parent / name for parent in folder.parents
+                  for name in LOADED_FROM_ABOVE + (() if parent == home else SKILLS) if (parent / name).exists()), None)
+    if found is not None:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise Unavailable(f"{found} is in a folder above the temp folder {folder.parent}, so Cursor could load instruction "
+                          "files from there: set TMPDIR to a folder outside any repo, with none of them above it")
+    return folder
 
 
 def notice(message: str) -> str:

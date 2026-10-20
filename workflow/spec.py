@@ -191,6 +191,7 @@ class AgentNode(_Node):
     budget_usd: float | None = Field(None, gt=0)
     tools: Tools | None = None
     tools_with_shell: StrictBool | None = None  # only here, not in defaults: each such node says so
+    project_instructions: StrictBool | None = None
 
 
 class CommandNode(_Node):
@@ -255,6 +256,7 @@ class Defaults(_Model):
     access: Access | None = None
     web: bool | None = None
     tools: Tools | None = None
+    project_instructions: StrictBool | None = None
     session: Literal["fresh", "continue"] | None = None
     max_turns: int | None = Field(None, ge=1)
     budget_usd: float | None = Field(None, gt=0)
@@ -291,6 +293,7 @@ _BUILTIN = {
     "workspace": "repo",
     "access": "read-only",
     "web": False,
+    "project_instructions": True,
     "session": "fresh",
     "check": True,
 }

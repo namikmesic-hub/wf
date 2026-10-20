@@ -30,10 +30,11 @@ def repo(tmp_path, monkeypatch):
     return tmp_path
 
 
-def codex(monkeypatch, tmp_path: Path, *turns, models=None, silent=()) -> Path:
+def codex(monkeypatch, tmp_path: Path, *turns, models=None, silent=(), skills=()) -> Path:
     """Use the fake app server for `codex`; returns its request log."""
     scenario, log = tmp_path / "scenario.json", tmp_path / "requests.jsonl"
-    scenario.write_text(json.dumps({"turns": list(turns), "silent": list(silent), **({"models": models} if models else {})}))
+    scenario.write_text(json.dumps({"turns": list(turns), "silent": list(silent), "skills": list(skills),
+                                    **({"models": models} if models else {})}))
     monkeypatch.setitem(harnesses.FACTORIES, "codex",
                         lambda: Codex(command=[sys.executable, str(FAKE), str(scenario), str(log)], request_timeout=1))
     return log
@@ -102,6 +103,25 @@ def test_access_levels_map_to_sandboxes(repo, monkeypatch, settings, sandbox, co
     assert run(settings + "model: gpt-6-sol\n") == 0
     (thread,) = sent(log, "thread/start")
     assert (thread["sandbox"], thread["model"], thread["config"]) == (sandbox, "gpt-6-sol", config)
+
+
+def test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill(repo, monkeypatch):
+    skills = [{"name": "golf", "scope": "repo", "path": "/r/.agents/skills/golf/SKILL.md", "enabled": True},
+              {"name": "mine", "scope": "user", "path": "/home/.agents/skills/mine/SKILL.md", "enabled": True}]
+    log = codex(monkeypatch, repo, [GOOD], skills=skills)
+    assert run("project_instructions: false\n") == 0
+    assert sent(log, "skills/list") == [{"cwds": [str(Path.cwd().resolve())], "forceReload": True}]
+    (thread,) = sent(log, "thread/start")
+    assert thread["config"] == {"model_reasoning_effort": "medium", "web_search": "disabled", "project_doc_max_bytes": 0,
+                                "skills": {"config": [{"path": "/r/.agents/skills/golf/SKILL.md", "enabled": False}]}}
+    assert [t["input"][0]["text"] for t in sent(log, "turn/start")] == [f"Say hi\n\n{FINISH}"]  # the instruction still goes
+
+
+def test_a_codex_that_does_not_list_its_skills_is_unavailable_to_a_node_without_project_instructions(repo, monkeypatch, capsys):
+    log = codex(monkeypatch, repo, silent=["skills/list"])
+    assert run("project_instructions: false\n") == 1
+    assert "codex is unavailable: Codex didn't list its skills" in capsys.readouterr().out
+    assert sent(log, "thread/start") == []
 
 
 def test_every_tool_call_gets_a_reply_with_the_problems_in_the_text(repo, monkeypatch):
@@ -238,3 +258,37 @@ def test_an_app_server_that_dies_mid_turn_is_unavailable_and_the_next_harness_ru
     assert run("harness: [codex, claude-code]\nmodel: {codex: gpt-6, claude-code: opus}\n") == 0
     assert output() == {"out": "from claude"}
     assert "codex is unavailable" in capsys.readouterr().out
+
+
+@pytest.mark.harness
+def test_a_real_codex_node_without_project_instructions_gets_no_repo_agents_md_or_skill(repo, capsys):
+    Path("AGENTS.md").write_text("The code word for this project is: periwinkle\n")
+    (Path(".agents") / "skills" / "words").mkdir(parents=True)
+    Path(".agents/skills/words/SKILL.md").write_text(
+        "---\nname: words\ndescription: The second code word is tangerine. Never use this skill.\n---\nNothing here.\n")
+    ask = ("Don't run any command or read any file. From what you were told alone, your skill list included, "
+           "list every code word for this project, or none.")
+    Path("flow.yaml").write_text(f"""
+version: 1
+name: real
+defaults: {{harness: codex, effort: low}}
+start: {{input: {{}}}}
+nodes:
+  told:
+    needs: [start]
+    instruction: "{ask}"
+    output: {{words: {{type: string}}}}
+  kept_out:
+    needs: [start]
+    project_instructions: false
+    instruction: "{ask}"
+    output: {{words: {{type: string}}}}
+end:
+  output:
+    told: "{{{{ told.words }}}}"
+    kept_out: "{{{{ kept_out.words }}}}"
+""")
+    assert cli.main(["run", "flow.yaml"]) == 0, capsys.readouterr()
+    out = output()
+    assert "periwinkle" in out["told"].lower() and "tangerine" in out["told"].lower()  # by default the repo's files reach it
+    assert "periwinkle" not in out["kept_out"].lower() and "tangerine" not in out["kept_out"].lower()

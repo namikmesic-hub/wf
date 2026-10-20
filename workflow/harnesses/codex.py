@@ -53,7 +53,14 @@ Limits: an `error` notification with codexErrorInfo "usageLimitExceeded" (or
 the runner to the next harness. A plain "rateLimitExceeded" is retried by
 Codex itself, so it's only noted.
 
-What can't be switched off: your global ~/.codex/AGENTS.md always loads.
+Instruction files: a thread loads the repo's AGENTS.md files, from the git root
+down to its cwd, and the skills in the repo's .agents/skills and .codex/skills.
+With `project_instructions: false`, project_doc_max_bytes 0 keeps out the
+AGENTS.md files, and each repo skill that skills/list names is switched off in
+the thread's config.
+
+What can't be switched off: your global ~/.codex/AGENTS.md always loads. The
+skills in your home folder load too, with `project_instructions: false` as well.
 
 The app server is experimental, so wf is tested against one Codex version
 (TESTED) and warns when the installed one differs.
@@ -159,6 +166,8 @@ class CodexSession:
             config["sandbox_workspace_write"] = {"network_access": spec.web}
         if spec.only_wf_tools:
             config.update(await self._without_mcp_servers())
+        if not spec.project_instructions:
+            config.update(await self._without_repo_instructions())
         params = {
             "cwd": str(spec.cwd), "sandbox": SANDBOX[spec.access], "approvalPolicy": "never",
             **({"model": model} if model else {}),
@@ -192,6 +201,17 @@ class CodexSession:
         off = {"enabled": False}
         return {"mcp_servers": {name: off for name in found.get("mcp_servers") or {}},
                 "plugins": {name: off for name in found.get("plugins") or {}}}
+
+    async def _without_repo_instructions(self) -> dict:
+        """Thread config that keeps out the repo's AGENTS.md files (and a fallback such as CLAUDE.md), and
+        switches off each skill skills/list finds in the repo."""
+        try:
+            listed = await self.rpc.request("skills/list", {"cwds": [str(self.spec.cwd)], "forceReload": True})
+        except (_RpcError, TimeoutError) as error:
+            raise Unavailable(f"Codex didn't list its skills, so wf can't keep the repo's out: {error}") from error
+        paths = [skill["path"] for entry in listed.get("data") or [] for skill in entry.get("skills") or []
+                 if skill.get("scope") == "repo" and skill.get("path")]
+        return {"project_doc_max_bytes": 0, "skills": {"config": [{"path": path, "enabled": False} for path in paths]}}
 
     def pending_usage(self) -> Usage:
         return Usage(tokens=self._total - self._turn_start) if self.turn else Usage()

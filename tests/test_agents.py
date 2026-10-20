@@ -110,6 +110,23 @@ def test_access_web_and_limits_reach_the_session(repo, monkeypatch):
     assert (spec.access, spec.web, spec.max_turns, spec.budget_usd) == ("edit", True, 7, 1.5)
 
 
+def test_project_instructions_reach_the_session_from_the_node_or_defaults(repo, monkeypatch):
+    fake = Fake("claude-code", *[submit({"summary": "s"})] * 3)
+    install(monkeypatch, fake)
+    nodes = """
+        a: {needs: [start], instruction: x}
+        b: {needs: [start], instruction: x, project_instructions: true}
+        c: {needs: [start], instruction: x, project_instructions: false}
+        """
+    assert cli.main(["run", flow(nodes)]) == 0
+    assert sorted((s.log.parts[-3], s.project_instructions) for s in fake.specs) == [("a", True), ("b", True), ("c", False)]
+    fake.specs.clear()
+    fake.turns = [submit({"summary": "s"})] * 3
+    Path("flow.yaml").write_text(Path(flow(nodes)).read_text().replace("defaults:\n", "defaults:\n  project_instructions: false\n"))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert sorted((s.log.parts[-3], s.project_instructions) for s in fake.specs) == [("a", False), ("b", True), ("c", False)]
+
+
 # ---------- reminders and retries ----------
 
 

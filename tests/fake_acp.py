@@ -25,7 +25,7 @@ Sessions are kept in CURSOR_CONFIG_DIR/acp-sessions/<id>, as Cursor keeps them, 
 works across processes; it replays the history first, as Cursor does. A new or loaded session
 reports its model and parameters in configOptions: the effort in a model id only when initialize
 asked for parameterized models, as with Cursor. Every request, the arguments,
-environment and cli-config.json each process started with, the MCP tools offered (`tools` for wf's server,
+folder (and the files in it), environment and cli-config.json each process started with, the MCP tools offered (`tools` for wf's server,
 `server_tools` for the others), and every answer to the fake's own requests are appended to requests.jsonl.
 """
 
@@ -219,7 +219,8 @@ if args[-1:] == ["--list-models"]:
     print("Available models\n\n" + "\n".join(f"{model} - {model.title()}" for model in models))
     sys.exit(0)
 config = os.environ.get("CURSOR_CONFIG_DIR")
-log("start", {"args": args, "cwd": os.getcwd(), "config": config, "data": os.environ.get("CURSOR_DATA_DIR"),
+log("start", {"args": args, "cwd": os.getcwd(), "files": sorted(os.listdir()), "config": config,
+              "data": os.environ.get("CURSOR_DATA_DIR"),
               "settings": json.loads(Path(config, "cli-config.json").read_text()),
               "api_key": "CURSOR_API_KEY" in os.environ, "auth_token": "CURSOR_AUTH_TOKEN" in os.environ,
               "no_browser": os.environ.get("NO_OPEN_BROWSER")})

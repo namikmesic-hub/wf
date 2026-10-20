@@ -6,6 +6,9 @@ Read base.py first (the Harness and Session interfaces), then the adapters:
     cursor.py        Cursor, through `cursor-agent acp` (the Agent Client Protocol
                      over stdio), with mcp_http.py serving it submit_result
 
+KEPT_INSTRUCTIONS names what a harness still gives its agent when a node sets
+`project_instructions: false`, which `wf validate` warns about.
+
 KEYCHAIN_SHELL names the access levels at which a harness's agent runs commands
 that can reach the macOS Keychain, and so every stored sign-in of wf tools: no
 sandbox at all, or Codex's danger-full-access. A node with `tools` runs there
@@ -45,6 +48,12 @@ FACTORIES: dict[str, Callable[[], Harness]] = {"claude-code": _claude_code, "cod
 
 KEYCHAIN_SHELL = {"claude-code": ("edit", "full"), "cursor": ("edit", "full"), "codex": ("full",)}
 
+KEPT_INSTRUCTIONS = {  # what a harness still loads with `project_instructions: false`
+    "codex": "your global ~/.codex/AGENTS.md, or the skills in your home folder (~/.agents/skills, ~/.codex/skills)",
+    "cursor": "your Cursor account's User Rules, the skills in your home folder (~/.claude/skills, ~/.agents/skills "
+              "and others), or the repo's hooks in .cursor/hooks.json and .claude/settings.json",
+}
+
 
 def reaches_keychain(harness: str, access: str) -> bool:
     return access in KEYCHAIN_SHELL.get(harness, ())
@@ -56,4 +65,4 @@ def create(name: str) -> Harness:
     return FACTORIES[name]()
 
 
-__all__ = ["FACTORIES", "KEYCHAIN_SHELL", "reaches_keychain", "Harness", "Session", "SessionSpec", "TurnEnd", "Unavailable", "Usage", "create"]
+__all__ = ["FACTORIES", "KEPT_INSTRUCTIONS", "KEYCHAIN_SHELL", "reaches_keychain", "Harness", "Session", "SessionSpec", "TurnEnd", "Unavailable", "Usage", "create"]

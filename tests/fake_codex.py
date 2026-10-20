@@ -2,8 +2,8 @@
 
     python fake_codex.py scenario.json requests.jsonl
 
-scenario.json: {"models": [...], "config": {...}, "silent": [method, ...], "turns": [[action, ...], ...]}.
-config/read answers with "config" (none: an empty one).
+scenario.json: {"models": [...], "config": {...}, "skills": [...], "silent": [method, ...], "turns": [[action, ...], ...]}.
+config/read answers with "config" (none: an empty one), and skills/list with "skills" for each cwd.
 Requests for a "silent" method never get an answer (a wedged app server). Each turn/start
 takes the next list of actions:
     {"tool": {"arguments": {...}, "name": "submit_result"}}  call a dynamic tool, wait for the reply
@@ -119,6 +119,9 @@ async def main() -> None:
             write({"id": request_id, "result": {"data": models}})
         elif method == "config/read":
             write({"id": request_id, "result": {"config": scenario.get("config", {}), "origins": {}}})
+        elif method == "skills/list":
+            write({"id": request_id, "result": {"data": [{"cwd": cwd, "skills": scenario.get("skills", []), "errors": []}
+                                                         for cwd in params.get("cwds") or []]}})
         elif method == "thread/start":
             thread = f"thread-{next(counter)}"
             totals[thread] = 0

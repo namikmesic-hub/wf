@@ -408,6 +408,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             prior_cost_usd=source["cost_usd"] if source else 0.0,
             tools=tools,
             only_wf_tools=listed is not None,
+            project_instructions=wf.setting(node_id, "project_instructions"),
         )
         try:
             session = await agent.session(spec)
