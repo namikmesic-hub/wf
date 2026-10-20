@@ -117,8 +117,7 @@ def trace(kind: str) -> list[dict]:
 
 
 def test_the_trace_keeps_the_parts_of_the_tokens_that_the_sdk_reports(repo, monkeypatch, cursor_host):
-    reported = {"inputTokens": 300, "outputTokens": 250, "cacheReadTokens": 600, "cacheWriteTokens": 50,
-                "reasoningTokens": 120, "totalTokens": 1200}
+    reported = {"inputTokens": 300, "outputTokens": 250, "cacheReadTokens": 600, "cacheWriteTokens": 50, "reasoningTokens": 120}
     use(monkeypatch, repo, cursor_host, [{"usage": reported}, {"text": "Looking."}], [{"usage": reported}, GOOD], usage=False)
     assert run() == 0
     each = {"tokens": 1200, "cost_usd": 0.0, "input_tokens": 300, "output_tokens": 250, "cache_read_tokens": 600,
@@ -355,7 +354,7 @@ def test_a_timeout_cancels_the_turn(repo, monkeypatch, cursor_host, capsys):
 
 
 def test_a_turn_that_a_timeout_cancels_still_counts_what_cursor_reports_as_it_ends(repo, monkeypatch, cursor_host):
-    late = {"inputTokens": 900, "outputTokens": 100, "cacheReadTokens": 0, "cacheWriteTokens": 0, "totalTokens": 1000}
+    late = {"inputTokens": 900, "outputTokens": 100, "cacheReadTokens": 0, "cacheWriteTokens": 0}
     use(monkeypatch, repo, cursor_host, [{"hang": True, "usage": late}])
     assert run("retry: 0\ntimeout: 2s\n") == 1
     (failed,) = events("node_failed")

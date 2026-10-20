@@ -44,7 +44,9 @@ left in place), and a workspace-write sandbox gets network access only with
 
 Usage: thread/tokenUsage/updated reports the thread's running total, so a
 turn's tokens are the difference. The report has such a total for each part
-of the tokens too: input, cache reads and writes, output, and reasoning. A
+of the tokens too: input, cache reads and writes, output, and reasoning. When
+a turn overflows the model's context window, Codex sets the total to the
+window's size with every part 0. That turn then counts tokens and no parts. A
 forked thread (session: continue) starts with its source's total, which an
 earlier pass already counted: the first report's total minus its `last` (the
 response just made) is that inherited part, and counting starts from there.
@@ -536,7 +538,7 @@ def _tokens(breakdown: dict) -> Usage:
         return int(breakdown.get(key) or 0)
 
     read, written = count("cachedInputTokens"), count("cacheWriteInputTokens")
-    return Usage(tokens=count("totalTokens"), input_tokens=max(count("inputTokens") - read - written, 0),
+    return Usage(tokens=count("totalTokens"), input_tokens=count("inputTokens") - read - written,
                  output_tokens=count("outputTokens"), cache_read_tokens=read, cache_write_tokens=written,
                  reasoning_tokens=count("reasoningOutputTokens"))
 

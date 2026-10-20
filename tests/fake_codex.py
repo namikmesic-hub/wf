@@ -18,6 +18,8 @@ takes the next list of actions:
     {"tokens": 1200}                                         a response of 1200 tokens: thread/tokenUsage/updated
                                                              (total: the thread's running total, last: 1200)
     {"tokens": {"inputTokens": 900, "outputTokens": 300}}    a response with these counts (breakdown())
+    {"fill": 272000}                                         the turn overflows a context window of 272000 tokens: the
+                                                             total becomes the window's size, with every part 0
     {"error": {"codexErrorInfo": "usageLimitExceeded", "message": "...", "willRetry": false}}
     {"end": "failed", "message": "..."}                      how the turn ends (default: completed)
     {"hang": true}                                           wait for turn/interrupt
@@ -102,6 +104,11 @@ async def main() -> None:
             elif "tokens" in action:
                 last = breakdown(action["tokens"])
                 totals[thread] = {key: totals[thread][key] + value for key, value in last.items()}
+                write({"method": "thread/tokenUsage/updated",
+                       "params": {"threadId": thread, "turnId": turn, "tokenUsage": {"total": totals[thread], "last": last}}})
+            elif "fill" in action:
+                before, totals[thread] = totals[thread]["totalTokens"], {**breakdown(0), "totalTokens": action["fill"]}
+                last = {**breakdown(0), "totalTokens": max(action["fill"] - before, 0)}
                 write({"method": "thread/tokenUsage/updated",
                        "params": {"threadId": thread, "turnId": turn, "tokenUsage": {"total": totals[thread], "last": last}}})
             elif "error" in action:

@@ -55,8 +55,11 @@ def test_usage_limits_and_token_counts_are_reported_as_expected(schema):
     error = schema("ErrorNotification")
     info = json.dumps(error["definitions"]["CodexErrorInfo"])
     assert "usageLimitExceeded" in info and "unauthorized" in info and "rateLimitExceeded" in info
-    usage = schema("ThreadTokenUsageUpdatedNotification")["definitions"]["TokenUsageBreakdown"]
-    assert "totalTokens" in usage["required"]
+    notification = schema("ThreadTokenUsageUpdatedNotification")["definitions"]
+    assert {"total", "last"} <= set(notification["ThreadTokenUsage"]["required"])
+    usage = notification["TokenUsageBreakdown"]
+    assert {"totalTokens", "inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens"} <= set(usage["required"])
+    assert usage["properties"]["cacheWriteInputTokens"]["default"] == 0  # not required: 0 when it is missing
 
 
 def test_dynamic_tools_come_in_namespaces_and_calls_name_theirs(schema):

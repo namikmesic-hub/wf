@@ -76,8 +76,8 @@ test("the SDK's errors get the protocol's classes", () => {
 });
 
 test("the SDK's token counts become the protocol's usage object, with its cost still to come", () => {
-  assert.deepEqual(fromTokens({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 3, cacheWriteTokens: 1, totalTokens: 15, reasoningTokens: 2 }), {
-    input_tokens: 10, cached_input_tokens: 3, cache_write_tokens: 1, output_tokens: 5, reasoning_tokens: 2, total_tokens: 15,
+  assert.deepEqual(fromTokens({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 3, cacheWriteTokens: 1, totalTokens: 19, reasoningTokens: 2 }), {
+    input_tokens: 10, cached_input_tokens: 3, cache_write_tokens: 1, output_tokens: 5, reasoning_tokens: 2, total_tokens: 19,
     cost_usd: null, cost_source: "pending",
   });
 });

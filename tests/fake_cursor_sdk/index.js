@@ -11,7 +11,7 @@
 //   {"call": {"name": "shell", "args": {...}, "late_args": {...}, "result": ..., "status": "completed"}}
 //                                                     one of Cursor's own tools
 //   {"mcp": {"server": "github", "tool": "create_issue", "args": {...}}}  another MCP server's tool
-//   {"usage": {"inputTokens": 1, ...}}                a usage message
+//   {"usage": {"inputTokens": 1, ...}}                a usage message, whose totalTokens the fake adds up
 //   {"error": {"name": "RateLimitError", "message": "...", "isRetryable": false}}  the stream throws it
 //   {"run_error": {"message": "...", "code": "..."}}  the run ends with status "error"
 //   {"hang": true}                                    wait until the run is cancelled
@@ -30,7 +30,11 @@ const SCENARIO = JSON.parse(readFileSync(process.env.FAKE_CURSOR_SDK_SCENARIO, "
 const LOG = process.env.FAKE_CURSOR_SDK_LOG;
 const KEY = SCENARIO.key ?? "key_test";
 // As the SDK's toTokenUsage() makes it, totalTokens adds up the input, output and cache counts.
-const USAGE = { inputTokens: 400, outputTokens: 200, cacheReadTokens: 600, cacheWriteTokens: 0, totalTokens: 1200 };
+function tokenUsage(usage) {
+  return { ...usage, totalTokens: usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens };
+}
+
+const USAGE = tokenUsage({ inputTokens: 400, outputTokens: 200, cacheReadTokens: 600, cacheWriteTokens: 0 });
 
 function log(kind, data = {}) {
   appendFileSync(LOG, JSON.stringify({ kind, data }) + "\n");
@@ -215,7 +219,8 @@ class FakeRun {
   }
 
   push(message) {
-    this.messages.push({ agent_id: this.agentId, run_id: this.id, ...message });
+    const made = message.type === "usage" ? { ...message, usage: tokenUsage(message.usage) } : message;
+    this.messages.push({ agent_id: this.agentId, run_id: this.id, ...made });
     this.wake();
   }
 

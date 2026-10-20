@@ -16,7 +16,7 @@ import pytest
 
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, harnesses, runner
-from workflow.harnesses.codex import Codex
+from workflow.harnesses.codex import Codex, _tokens
 from workflow.output_tool import FINISH, REMINDER
 
 FAKE = Path(__file__).parent / "fake_codex.py"
@@ -182,6 +182,39 @@ def test_a_forked_thread_counts_only_its_own_parts_of_the_tokens(repo, monkeypat
     codex(monkeypatch, repo, [{"tokens": RESPONSE}, GOOD], [{"tokens": RESPONSE}, GOOD])
     assert run("session: continue\nroutes: [{to: ask, max: 1}, {to: end}]\n") == 0
     assert [r["usage"] for r in trace("attempt_end")] == [PARTS, PARTS]  # the fork's thread holds both passes' counts
+
+
+def test_input_that_the_cache_read_and_wrote_all_of_leaves_no_input_tokens(repo, monkeypatch):
+    every = {"inputTokens": 100, "cachedInputTokens": 40, "cacheWriteInputTokens": 60, "outputTokens": 10,
+             "reasoningOutputTokens": 5}
+    codex(monkeypatch, repo, [{"tokens": every}, GOOD])
+    assert run() == 0
+    (turn,) = trace("turn_end")
+    assert turn["usage"] == {"tokens": 110, "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 10, "cache_read_tokens": 40,
+                             "cache_write_tokens": 60, "reasoning_tokens": 5}
+
+
+def test_the_parts_add_up_to_the_total_even_when_codex_reports_more_cache_than_input():
+    usage = _tokens({"totalTokens": 1100, "inputTokens": 1000, "cachedInputTokens": 800, "cacheWriteInputTokens": 500,
+                     "outputTokens": 100})
+    assert usage.input_tokens == -300  # shown as it is, not hidden as 0
+    assert usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens == usage.tokens
+
+
+def test_a_turn_that_a_timeout_cuts_off_keeps_the_parts_that_codex_reported(repo, monkeypatch):
+    codex(monkeypatch, repo, [{"tokens": RESPONSE}, {"hang": True}])
+    assert run("retry: 0\ntimeout: 1s\n") == 1
+    (attempt,) = trace("attempt_end")
+    assert (attempt["outcome"], attempt["usage"]) == ("timed_out", PARTS)
+
+
+def test_a_turn_that_overflows_the_context_window_counts_its_tokens_and_no_parts(repo, monkeypatch):
+    codex(monkeypatch, repo, [{"tokens": RESPONSE}], [{"fill": 272000}, {"end": "failed", "message": "context window exceeded"}])
+    assert run("retry: 0\n") == 1
+    first, second = (r["usage"] for r in trace("turn_end"))
+    assert first == PARTS
+    assert second == {"tokens": 272000 - 1200, "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0,
+                      "cache_write_tokens": 0, "reasoning_tokens": 0}  # 0, not below it: Codex set each part of its total to 0
 
 
 def test_approval_requests_are_declined(repo, monkeypatch):
