@@ -804,11 +804,9 @@ def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | N
 
 def _follow_up_sessions(workflow: spec.Workflow, values: dict) -> set[str]:
     """The ids of the agent sessions that a follow-up may continue: the last session of each node that it
-    can reach, and those of their sub-workflows. None without `follow_up`."""
-    if workflow.follow_up is None:
-        return set()
-    sessions = values.get("sessions") or {}
-    reached = scheduler.Topology.of(workflow).reachable(workflow.follow_up.targets)
+    can reach, and those of their sub-workflows. None when no node takes a follow-up."""
+    sessions, topo = values.get("sessions") or {}, scheduler.Topology.of(workflow)
+    reached = topo.reachable(scheduler.follow_up_targets(workflow, topo))
     return {ident for node in reached for ident in _session_ids(sessions.get(node))}
 
 
