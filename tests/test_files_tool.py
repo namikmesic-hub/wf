@@ -109,3 +109,24 @@ def test_the_tools_names_differ_from_cursors_own():
     for name in files_tool.NAMES:
         assert files_tool.schema(name)["type"] == "object" and files_tool.description(name)
     assert os.sep == "/"  # the tools speak in / paths, as the agent does
+
+
+def test_a_named_pipe_is_refused_without_waiting_for_a_writer(workspace):
+    os.mkfifo(workspace / "pipe")
+    text, is_error = call("read_file", workspace, path="pipe")
+    assert is_error and "isn't a regular file" in text
+
+
+def test_a_search_whose_pattern_takes_too_long_stops(workspace, monkeypatch):
+    monkeypatch.setattr(files_tool, "SEARCH_SECONDS", 2)
+    (workspace / "long.txt").write_text("a" * 40 + "!\n")
+    text, is_error = call("search_files", workspace, pattern="(a+)+$")
+    assert is_error and "the search took longer than 2 seconds, so it stopped" in text
+
+
+def test_one_star_stays_in_one_folder_and_two_cross_folders(workspace):
+    (workspace / "src" / "deep").mkdir()
+    (workspace / "src" / "deep" / "b.py").write_text("x\n")
+    assert call("find_files", workspace, pattern="src/*.py")[0] == "src/a.py"
+    assert call("find_files", workspace, pattern="src/**/*.py")[0] == "src/a.py\nsrc/deep/b.py"
+    assert call("find_files", workspace, pattern="*.py")[0] == "src/a.py\nsrc/deep/b.py"  # a name alone: any depth

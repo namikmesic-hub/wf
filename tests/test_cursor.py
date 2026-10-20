@@ -315,6 +315,45 @@ def test_a_timeout_cancels_the_turn(repo, monkeypatch, cursor_host, capsys):
     assert len(entries(log, "close")) == 1  # and the session closed
 
 
+def test_a_turn_that_a_timeout_cancels_still_counts_what_cursor_reports_as_it_ends(repo, monkeypatch, cursor_host):
+    late = {"inputTokens": 900, "outputTokens": 100, "cacheReadTokens": 0, "cacheWriteTokens": 0, "totalTokens": 1000}
+    use(monkeypatch, repo, cursor_host, [{"hang": True, "usage": late}])
+    assert run("retry: 0\ntimeout: 2s\n") == 1
+    (failed,) = events("node_failed")
+    assert failed["tokens"] == 1000
+    assert events("agent_usage")[-1]["tokens"] == 1000
+
+
+def test_a_lost_connection_as_a_session_opens_fails_the_attempt_and_the_retry_waits(repo, monkeypatch, cursor_host, capsys):
+    pauses = []
+
+    async def pause(ctx, wait):
+        pauses.append(wait)
+
+    monkeypatch.setattr("workflow.nodes._pause", pause)
+    use(monkeypatch, repo, cursor_host, create_error={"name": "NetworkError", "message": "Service unavailable"})
+    assert run("retry: 1\n") == 1
+    out = capsys.readouterr().out
+    assert "attempt 1 failed: cursor: Service unavailable" in out and "is unavailable" not in out
+    assert pauses == [30.0]
+
+
+def test_a_turn_too_big_for_a_frame_fails_and_says_why(repo, monkeypatch, cursor_host, capsys):
+    log = use(monkeypatch, repo, cursor_host, [GOOD])
+    Path("flow.yaml").write_text(dedent("""
+        version: 1
+        name: cu
+        defaults: {harness: cursor, harnesses: {cursor: {model: composer-2.5}}}
+        start: {input: {}}
+        nodes:
+          ask: {needs: [start], retry: 0, instruction: "BIG"}
+        end: {output: {}}
+        """).replace("BIG", "x" * 1_100_000))
+    assert cli.main(["run", "flow.yaml"]) == 1
+    assert "cursor: the turn's text is too big to send: a req frame of 1,100," in capsys.readouterr().err
+    assert entries(log, "send") == []
+
+
 def test_the_host_dying_mid_turn_fails_the_attempt_and_a_retry_starts_another(repo, monkeypatch, cursor_host, capsys):
     log = use(monkeypatch, repo, cursor_host, [{"exit": True}], [GOOD])
     assert run() == 0
@@ -407,6 +446,31 @@ def test_a_folder_of_wfs_that_the_instruction_names_is_readable_too(repo, monkey
     assert [path.resolve() for path in other.read_roots] == [Path.cwd().resolve()]  # the repo, ask's workspace
 
 
+def test_a_continued_pass_may_read_what_its_own_instruction_names(repo, monkeypatch):
+    from fakes import Fake, submit
+    from workflow import harnesses
+    fake = Fake("cursor", submit({"summary": "done"}), submit({"summary": "done"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "cursor", fake.factory)
+    Path("flow.yaml").write_text(dedent("""
+        version: 1
+        name: cu
+        defaults: {harness: cursor, harnesses: {cursor: {model: composer-2.5}}}
+        start: {input: {}}
+        nodes:
+          ask:
+            needs: [start]
+            workspace: temp
+            session: continue
+            routes: [{to: ask, max: 1}, {to: end}]
+            instruction: "{% if session.continued %}Look again at {{ run.dir }}{% else %}Look{% endif %}"
+        end: {output: {}}
+        """))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    first, second = fake.specs
+    assert first.read_roots == []
+    assert [path.resolve() for path in second.read_roots] == [run_folder().resolve()]  # named by the continued text alone
+
+
 # ---------- session: continue ----------
 
 
@@ -479,6 +543,48 @@ def test_a_message_from_wf_steer_goes_to_cursor_as_the_next_turn(repo, monkeypat
     assert steering.result().stdout.startswith("Queued for ask (attempt 1 on cursor)")
     assert [send["text"] for send in entries(log, "send")] == [f"Say hi\n\n{FINISH}", STEER]
     assert [(e["status"], e.get("text")) for e in steer_events()] == [("queued", STEER), ("delivered", None)]
+
+
+def test_a_message_that_cursor_sends_back_late_goes_at_the_start_of_the_next_turn(tmp_path):
+    import asyncio
+    from workflow import schemas
+    from workflow.harnesses import cursor, remote
+    from workflow.harnesses.base import SessionSpec
+    from workflow.output_tool import REMINDER, ResultTool
+
+    class Peer:  # answers each request as the Cursor host would
+        name, dead = "the stub host", None
+
+        def __init__(self):
+            self.sent = []
+
+        async def request(self, op, args, timeout=None):
+            self.sent.append((op, args))
+            return {"turn.steer": {"status": "queued"}, "turn.start": {"turn": f"trn_{len(self.sent)}"}}.get(op, {})
+
+        def attach(self, session): pass
+        def detach(self, session): pass
+        async def stop(self): pass
+
+    async def main():
+        spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="m", effort=None,
+                           tool=ResultTool(schemas.object_schema({})), log=tmp_path / "attempt-1.log", emit=lambda e: None)
+        peer = Peer()
+        session = remote.RemoteSession(cursor.Cursor(), peer, spec)
+        session.session, session.turn, session.turns = "ses_a", "trn_0", 1  # its first turn runs
+        assert await session.steer("Use the v2 API", "st_1") == "queued"
+        session.turn = None
+        session.events.put_nowait({"kind": "steer.status", "turn": "trn_0", "data": {"id": "st_1", "status": "declined"}})
+        session.events.put_nowait({"kind": "turn.ended", "turn": "trn_2", "data": {"status": "done", "usage": {}}})
+        end = await session.send(REMINDER)
+        return end, peer.sent
+
+    end, sent = asyncio.run(main())
+    assert end.status == "done"
+    assert sent[1] == ("turn.start", {"session": "ses_a", "kind": "reminder", "text": f"Use the v2 API\n\n{REMINDER}"})
+    lines = [json.loads(line) for line in (tmp_path / "attempt-1.log").read_text().splitlines()]
+    assert [(line["kind"], line.get("id"), line.get("status")) for line in lines if line["kind"] == "steer"] == [
+        ("steer", "st_1", "delivered")]
 
 
 def test_a_message_for_cursor_is_dropped_when_the_agent_submits_first(repo, monkeypatch, cursor_host):
@@ -619,31 +725,50 @@ def test_a_real_cursor_session_takes_a_message_from_wf_steer_or_says_it_cannot(t
         assert "kumquat" in result["summary"].lower()
 
 
-@pytest.mark.harness
-def test_cursors_sandbox_keeps_edit_writes_in_the_workspace(tmp_path, live_key):
-    """What decides whether `edit` may leave ACP: a write outside the workspace, by a command or by
-    Cursor's edit tool, must fail under the SDK's sandbox."""
+def sandboxed_edit(tmp_path: Path, task: str) -> Path:
+    """Run one real `edit` session on the SDK, with Cursor's sandbox, on this task. Returns the workspace."""
     import asyncio
-    workspace, outside = tmp_path / "work", tmp_path / "outside"
+    workspace = tmp_path / "work"
     workspace.mkdir()
-    outside.mkdir()
 
     async def main():
         harness, spec, start = real_session(workspace, "edit")
         await harness.open(tmp_path / "run")
         session = await start()
         try:
-            await session.send(f"Run the shell command `echo x > {outside}/shell.txt`. Then use your file edit tool to "
-                               f"create {outside}/edit.txt with the text x. Then create inside.txt here with the text x. "
-                               f"Whatever fails, report it in your summary. " + FINISH)
+            await session.send(task + " Whatever fails, report it in your summary. " + FINISH)
         finally:
             await session.close()
             await harness.close()
 
     asyncio.run(main())
+    return workspace
+
+
+@pytest.mark.harness
+def test_cursors_sandbox_keeps_edit_writes_in_the_workspace_and_lets_commands_reach_the_network(tmp_path, live_key):
+    """What lets `edit` leave cursor-agent's ACP: a write outside the workspace, by a command or by
+    Cursor's edit tool, fails under the SDK's sandbox, and commands still reach the network, as
+    they do on ACP."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace = sandboxed_edit(tmp_path, f"Run the shell command `echo x > {outside}/shell.txt`. Then use your file edit "
+                                         f"tool to create {outside}/edit.txt with the text x. Then create inside.txt here "
+                                         f"with the text x. Then run `curl -sS -m 20 -o /dev/null https://example.com; "
+                                         f"echo $? > network.txt` here.")
     assert (workspace / "inside.txt").exists()  # it could write in the workspace
     assert not (outside / "shell.txt").exists(), "a command wrote outside the workspace"
     assert not (outside / "edit.txt").exists(), "the edit tool wrote outside the workspace"
+    assert (workspace / "network.txt").read_text().strip() == "0", "a command couldn't reach the network"
+
+
+@pytest.mark.harness
+def test_cursors_sandbox_keeps_edit_commands_from_the_keychain(tmp_path, live_key):
+    """Whether an `edit` agent on the SDK could read stored sign-ins, which decides KEYCHAIN_SHELL
+    for Cursor at `edit` once `edit` runs on the SDK (docs/tools.md, Who can reach the Keychain)."""
+    workspace = sandboxed_edit(tmp_path, "Run `security show-keychain-info > keychain.txt 2>&1; echo $? >> keychain.txt` "
+                                         "here.")
+    assert (workspace / "keychain.txt").read_text().split()[-1] != "0", "a command reached the Keychain"
 
 
 @pytest.mark.harness
@@ -692,6 +817,6 @@ end: {output: {summary: "{{ read.summary }}"}}
     if proxy.connects == 0:
         pytest.skip("the SDK's traffic didn't go through HTTPS_PROXY, so this test can't cut it")
     assert code == 0, capsys.readouterr()
-    assert proxy.paused_for >= 45
+    assert proxy.held >= 40  # the turn's own stream stalled, for most of the 45 seconds
     assert events("attempt_failed") == [] and events("attempt_started") == []  # one attempt
     assert output()["summary"].split() == [f"word{number}" for number in range(1, 7)]

@@ -15,6 +15,7 @@
 //   {"error": {"name": "RateLimitError", "message": "...", "isRetryable": false}}  the stream throws it
 //   {"run_error": {"message": "...", "code": "..."}}  the run ends with status "error"
 //   {"hang": true}                                    wait until the run is cancelled
+//   {"hang": true, "usage": {...}}                    the same, and report that usage as it ends
 //   {"pause": "p"}                                    write p.paused next to the log, wait for p.go
 //   {"exit": true} | {"child": true} | {"unhandled": true} | {"sleep": 100}
 // Without "usage": false each turn ends with a usage message of USAGE.
@@ -226,6 +227,7 @@ class FakeRun {
       if (!this.cancelled && SCENARIO.usage !== false && this.status === "running" && !this.thrown) {
         this.push({ type: "usage", usage: USAGE });
       }
+      if (this.cancelled && this.cancelUsage) this.push({ type: "usage", usage: this.cancelUsage });
     } catch (error) {
       this.thrown = error;
     }
@@ -251,13 +253,16 @@ class FakeRun {
       await new Promise((resolve) => setTimeout(resolve, 200));
       if (!this.cancelled) this.push({ type: "tool_call", call_id: id, name: "mcp", status: "completed", args, result: { content: [] } });
     }
-    if ("usage" in action) this.push({ type: "usage", usage: action.usage });
+    if ("usage" in action && !("hang" in action)) this.push({ type: "usage", usage: action.usage });
     if ("error" in action) throw made(action.error);
     if ("run_error" in action) {
       this.status = "error";
       this.error = action.run_error;
     }
-    if ("hang" in action) await new Promise((resolve) => { this.onCancel = resolve; });
+    if ("hang" in action) {
+      this.cancelUsage = action.usage;
+      await new Promise((resolve) => { this.onCancel = resolve; });
+    }
     if ("pause" in action) {
       const folder = dirname(LOG);
       writeFileSync(join(folder, `${action.pause}.paused`), "");

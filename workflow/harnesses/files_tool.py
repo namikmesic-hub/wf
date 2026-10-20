@@ -17,14 +17,24 @@ A path is relative to the workspace, or absolute. Either way it must lead into o
 search follows no symlink out of them. A search lists the files the way git does (tracked and
 untracked, without what .gitignore leaves out), or walks the folder when git lists none there,
 skipping .git. Every answer stops at LIMIT characters, and a search at MAX_FILES files.
+Only regular files are read: a named pipe or a device is refused, and opened without waiting.
+
+An agent's regular expression can take time that grows without bound, and Python can't stop a
+thread that runs one. So search_files runs in a Python process of its own, stopped after
+SEARCH_SECONDS.
+
+A glob pattern's `*` and `?` stay within one folder, and `**` crosses folders. A pattern without
+a `/` matches a file's name at any depth.
 
 run() is plain Python. Each adapter wraps it in its own tool type, like submit_result.
 """
 
-import fnmatch
+import json
 import os
 import re
+import stat
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -35,6 +45,7 @@ MAX_FILES = 50_000  # files one search looks at
 MAX_BYTES = 2_000_000  # a bigger file isn't searched
 MAX_READ = 20_000_000  # nor read
 LINES = 2_000  # lines read_file returns when the call gives no limit
+SEARCH_SECONDS = 30
 WHERE = "a path relative to the workspace, or an absolute path inside it or inside a folder your instruction names"
 
 TOOLS = {
@@ -48,7 +59,8 @@ TOOLS = {
              {"pattern": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"},
               "case_insensitive": {"type": "boolean"}, "files_only": {"type": "boolean"}}, ["pattern"]),
     "find_files": ("List the files under a folder (the workspace by default) whose path relative to it matches "
-             f"a glob pattern, such as **/*.py or src/*.ts. The folder is {WHERE}.",
+             f"a glob pattern, such as **/*.py or src/*.ts, where * stays within one folder and ** crosses "
+             f"folders. A pattern without / matches file names at any depth. The folder is {WHERE}.",
              {"pattern": {"type": "string"}, "path": {"type": "string"}}, ["pattern"]),
     "list_dir": (f"List a folder's entries (the workspace by default). Folders end with /. The folder is {WHERE}.",
                  {"path": {"type": "string"}}, []),
@@ -78,7 +90,7 @@ def run(name: str, cwd: Path, roots: list[Path], args: object) -> tuple[str, boo
         if name == "read_file":
             text = _read(Path(cwd), allowed, args)
         elif name == "search_files":
-            text = _search(Path(cwd), allowed, args)
+            text = _search_apart(Path(cwd), allowed, args)
         elif name == "find_files":
             text = _find(Path(cwd), allowed, args)
         elif name == "list_dir":
@@ -112,6 +124,26 @@ def _shown(cwd: Path, path: Path) -> str:
         return str(path.relative_to(cwd.resolve()))
     except ValueError:
         return str(path)
+
+
+def _search_apart(cwd: Path, allowed: list[Path], args: dict) -> str:
+    """search_files, in a Python process of its own that stops after SEARCH_SECONDS."""
+    request = json.dumps({"cwd": str(cwd), "roots": [str(root) for root in allowed], "args": args})
+    try:
+        done = subprocess.run([sys.executable, "-I", "-m", __name__], input=request, capture_output=True, text=True,
+                              timeout=SEARCH_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise _Refused(f"the search took longer than {SEARCH_SECONDS} seconds, so it stopped: "
+                       "make the pattern simpler, or search a smaller folder") from None
+    except OSError as error:
+        raise _Refused(f"the search didn't start: {error}") from None
+    try:
+        text, refused = json.loads(done.stdout)
+    except ValueError:
+        raise _Refused(f"the search failed: {done.stderr.strip()[-500:] or 'no answer'}") from None
+    if refused:
+        raise _Refused(text)
+    return text
 
 
 def _read(cwd: Path, allowed: list[Path], args: dict) -> str:
@@ -195,10 +227,32 @@ def _list(cwd: Path, allowed: list[Path], args: dict) -> str:
 
 
 def _matches(path: str, pattern: str) -> bool:
-    """Does a relative path match a glob? `**/` also matches no folder at all, as in most tools."""
-    candidates = {pattern, pattern.replace("**/", "")} if "**/" in pattern else {pattern}
-    return any(fnmatch.fnmatchcase(path, p) for p in candidates) or (
-        "/" not in pattern and fnmatch.fnmatchcase(path.rsplit("/", 1)[-1], pattern))
+    """Does a relative path match a glob? A pattern without `/` is matched against the file's name."""
+    return _glob(pattern).match(path if "/" in pattern else path.rsplit("/", 1)[-1]) is not None
+
+
+def _glob(pattern: str) -> re.Pattern:
+    """A glob as a regular expression: `**/` is any folders or none, `**` anything, `*` and `?`
+    anything within one folder, and `[...]` one of its characters (`[!...]` none of them)."""
+    out, at = [], 0
+    while at < len(pattern):
+        if pattern.startswith("**/", at):
+            out.append("(?:.*/)?")
+            at += 3
+        elif pattern.startswith("**", at):
+            out.append(".*")
+            at += 2
+        elif pattern[at] in "*?":
+            out.append("[^/]*" if pattern[at] == "*" else "[^/]")
+            at += 1
+        elif pattern[at] == "[" and (end := pattern.find("]", at + 2)) != -1:
+            inside = pattern[at + 1:end].replace("\\", "\\\\")
+            out.append("[" + ("^" + inside[1:] if inside.startswith("!") else inside) + "]")
+            at = end + 1
+        else:
+            out.append(re.escape(pattern[at]))
+            at += 1
+    return re.compile("".join(out) + r"\Z")
 
 
 def _files(folder: Path, allowed: list[Path]) -> Iterator[Path]:
@@ -233,10 +287,15 @@ def _walk(folder: Path) -> Iterator[Path]:
 
 
 def _bytes(path: Path, limit: int) -> bytes:
+    """A regular file's bytes. It's opened without waiting, so a named pipe can't hold the read."""
     try:
-        if path.stat().st_size > limit:
-            raise _Refused(f"{path.name} is bigger than {limit} bytes")
-        return path.read_bytes()
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as file:
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise _Refused(f"{path.name} isn't a regular file")
+            if info.st_size > limit:
+                raise _Refused(f"{path.name} is bigger than {limit} bytes")
+            return file.read()
     except OSError as error:
         raise _Refused(f"can't read {path.name}: {error.strerror or error}") from None
 
@@ -247,3 +306,12 @@ def _cut(text: str) -> str:
 
 def _unique(paths: list[Path]) -> list[Path]:
     return list(dict.fromkeys(paths))
+
+
+if __name__ == "__main__":  # _search_apart's process: the request on stdin, [text, refused] on stdout
+    asked = json.loads(sys.stdin.read())
+    try:
+        found = _search(Path(asked["cwd"]), [Path(root) for root in asked["roots"]], asked["args"]), False
+    except _Refused as refusal:
+        found = str(refusal), True
+    sys.stdout.write(json.dumps(found))

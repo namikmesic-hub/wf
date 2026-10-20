@@ -763,6 +763,22 @@ def test_cursors_sdk_reports_text_and_tool_calls_for_the_trace_but_not_what_a_wf
 
 
 @needs_node
+def test_an_answer_too_big_for_a_frame_reaches_cursors_agent_as_an_error(vendor, repo, monkeypatch, cursor_host):
+    sign_in(vendor)
+    big = "q" * 1_100_000  # the fake vendor's answer repeats the query
+    log = use(monkeypatch, repo, cursor_host, [{"tool": {"server": "linear", "name": "list_issues", "arguments": {"query": big}}},
+                                               {"tool": {"name": "submit_result", "arguments": {"summary": "done"}}}])
+    assert cli.main(["run", flow("[linear]", harness="cursor")]) == 0
+    read, result = sdk_entries(log, "tool_result")
+    assert read["result"]["isError"] is True
+    assert "the answer was too big to pass on" in read["result"]["content"][0]["text"]
+    assert result["result"]["isError"] is False
+    (call,) = [r for r in trace_records() if r["kind"] == "tool_call" and r["tool"] == "linear.list_issues"]
+    assert call["arguments"]["truncated"] is True  # the event was too big as well: its arguments are cut, its call stays
+    assert [r.get("kept", True) for r in trace_records() if r["kind"] == "tool_result"] == [False, True]
+
+
+@needs_node
 def test_cursors_sdk_reports_a_tool_call_that_a_timeout_stops_for_the_trace(repo, monkeypatch, cursor_host):
     use(monkeypatch, repo, cursor_host, [{"call": {"name": "shell", "args": {"command": "sleep 600"}, "status": "running"}},
                                          {"hang": True}])

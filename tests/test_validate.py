@@ -702,12 +702,19 @@ def test_project_instructions_off_warns_once_per_harness_that_keeps_a_file(tmp_p
 
 def test_project_instructions_off_warns_about_every_harness_a_template_could_pick(tmp_path):
     report = check(tmp_path, flow(
-        'a: {needs: [start], instruction: x, harness: "{{ start.task }}", project_instructions: false, '
+        'a: {needs: [start], instruction: x, access: edit, harness: "{{ start.task }}", project_instructions: false, '
         'model: {cursor: composer-2.5}}'))
     assert [(p.level, p.where) for p in report.problems] == [("warning", "nodes.a.project_instructions")] * len(
         harnesses.KEPT_INSTRUCTIONS)
-    assert all(f"on {name}," in p.message for p, name in zip(report.problems, sorted(harnesses.KEPT_INSTRUCTIONS)))
+    assert [p.message.split(",")[0] for p in report.problems] == ["on codex", "on cursor through cursor-agent"]
     assert "your Cursor account's User Rules, the skills in your home folder" in report.problems[1].message
+
+
+def test_project_instructions_off_on_cursors_sdk_keeps_nothing_out_and_gets_no_warning(tmp_path, monkeypatch):
+    text = flow("a: {needs: [start], instruction: x, harness: cursor, model: composer-2.5, project_instructions: false}")
+    assert check(tmp_path, text).problems == []  # read-only runs on the SDK, which loads no settings layer
+    monkeypatch.setenv("WF_CURSOR_RUNTIME", "acp")
+    assert [p.message.split(",")[0] for p in check(tmp_path, text).problems] == ["on cursor through cursor-agent"]
 
 
 # ---------- malformed files are reported, never crash ----------

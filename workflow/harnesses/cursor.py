@@ -53,9 +53,11 @@ import contextlib
 import fcntl
 import json
 import os
-import re
+import platform
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -70,7 +72,7 @@ from .base import Harness, SessionSpec, Unavailable, short, transcript
 
 HOST = Path(__file__).parent / "cursor_host"
 ENTRY = "wf-cursor-host.js"
-NODE_MIN = (22, 18)  # Node runs TypeScript as it is from this version on
+NODE_MIN = "22.18 or later (23.6 or later on 23)"  # the Node versions that run TypeScript as it is
 CLIENT = {"name": "wf", "version": "0.1.0"}
 KEYCHAIN = ("wf runtimes", "cursor")  # the Keychain item's service and account
 SECRETS = ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN")
@@ -147,31 +149,33 @@ def env() -> dict:
 
 
 def find_node(node: str = "node") -> str:
-    """The Node program to run the host with, if it's new enough. Raises Unavailable."""
+    """The Node program to run the host with, if it runs TypeScript as it is: Node itself says so,
+    which its version alone doesn't (23.0 to 23.5 don't, and an option can switch it off). Raises Unavailable."""
     found = shutil.which(node)
     if found is None:
-        raise Unavailable(f"Cursor's runtime needs Node.js {'.'.join(map(str, NODE_MIN))} or later, and there's no "
-                          f"`{node}` on PATH")
+        raise Unavailable(f"Cursor's runtime needs Node.js {NODE_MIN}, and there's no `{node}` on PATH")
     try:
-        out = subprocess.run([found, "--version"], capture_output=True, text=True, timeout=30).stdout
+        version = subprocess.run([found, "--version"], capture_output=True, text=True, timeout=30).stdout.strip()
+        typescript = subprocess.run([found, "-p", "process.features.typescript"], capture_output=True, text=True,
+                                    timeout=30).stdout.strip()
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise Unavailable(f"`{found} --version` didn't answer: {error}") from error
-    version = tuple(int(part) for part in re.findall(r"\d+", out)[:2])
-    if version < NODE_MIN:
-        raise Unavailable(f"Cursor's runtime needs Node.js {'.'.join(map(str, NODE_MIN))} or later, and {found} is "
-                          f"{out.strip() or 'of an unknown version'}")
+        raise Unavailable(f"`{found}` didn't answer: {error}") from error
+    if typescript not in ("strip", "transform"):
+        raise Unavailable(f"Cursor's runtime needs Node.js {NODE_MIN}, which runs TypeScript as it is, and {found} "
+                          f"({version or 'of an unknown version'}) doesn't")
     return found
 
 
 def missing(host: Path) -> list[str]:
-    """The packages that package-lock.json pins for the host and that aren't installed beside it."""
+    """The packages that package-lock.json pins for the host and that aren't installed beside it: all
+    but those for development, and of the optional ones, the one for this machine (the SDK's binaries)."""
     try:
         packages = json.loads((host / "package-lock.json").read_text(encoding="utf-8"))["packages"]
     except (OSError, ValueError, KeyError) as error:
         return [f"package-lock.json ({error})"]
     lacking = []
     for where, entry in packages.items():
-        if not where or entry.get("dev") or entry.get("optional"):
+        if not where or entry.get("dev") or (entry.get("optional") and not _for_this_machine(entry)):
             continue
         try:
             installed = json.loads((host / where / "package.json").read_text(encoding="utf-8")).get("version")
@@ -182,27 +186,53 @@ def missing(host: Path) -> list[str]:
     return lacking
 
 
-def ensure(host: Path, node: str) -> None:
-    """Install what the host needs from its lockfile, if it isn't there. One wf process installs
-    at a time. Raises Unavailable."""
+def _for_this_machine(entry: dict) -> bool:
+    """Is a package that names its systems (`os`, `cpu`) one for this machine?"""
+    system = {"darwin": "darwin", "linux": "linux", "win32": "win32"}.get(sys.platform, sys.platform)
+    cpu = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(platform.machine().lower(), "")
+    return "os" in entry and "cpu" in entry and system in entry["os"] and cpu in entry["cpu"]
+
+
+async def ensure(host: Path, node: str) -> None:
+    """Install what the host needs from its lockfile, if it isn't there. One wf process installs at
+    a time. A timeout or a cancellation stops npm, and the wait for another process. Raises Unavailable."""
     if not missing(host):
         return
     npm = shutil.which("npm", path=os.pathsep.join([str(Path(node).parent), os.environ.get("PATH", "")]))
     if npm is None:
         raise Unavailable(f"Cursor's SDK isn't installed in {host}, and there's no npm to install it")
     try:
-        with (host / ".install.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            if not missing(host):  # another process installed it while this one waited
-                return
-            done = subprocess.run([npm, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund",
-                                   "--loglevel=error"], cwd=host, env=env(), stdin=subprocess.DEVNULL,
-                                  capture_output=True, text=True, timeout=INSTALL_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as error:
+        lock = (host / ".install.lock").open("a")
+    except OSError as error:
         raise Unavailable(f"can't install Cursor's SDK in {host}: {error}") from error
+    with lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:  # another wf process installs it
+                await asyncio.sleep(0.2)
+        if not missing(host):
+            return
+        try:
+            process = await asyncio.create_subprocess_exec(
+                npm, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error",
+                cwd=host, env=env(), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, start_new_session=True)
+        except OSError as error:
+            raise Unavailable(f"can't install Cursor's SDK in {host}: {error}") from error
+        try:
+            out, err = await asyncio.wait_for(process.communicate(), INSTALL_TIMEOUT)
+        except BaseException as error:  # too slow, or cancelled: npm stops too
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
+            if isinstance(error, TimeoutError):
+                raise Unavailable(f"`npm ci` in {host} took longer than {INSTALL_TIMEOUT} seconds") from error
+            raise
     left = missing(host)
-    if done.returncode != 0 or left:
-        said = short(done.stderr or done.stdout or ", ".join(left), 400)
+    if process.returncode != 0 or left:
+        said = short((err or out).decode(errors="replace") or ", ".join(left), 400)
         raise Unavailable(f"`npm ci --omit=dev` in {host} didn't install Cursor's SDK: {said}")
 
 
@@ -239,7 +269,7 @@ class Cursor(remote.RemoteHarness):
         async with self._preparing:
             if not self._prepared:
                 self.node = await asyncio.to_thread(find_node, self.node)
-                await asyncio.to_thread(ensure, self.host, self.node)
+                await ensure(self.host, self.node)
                 self._prepared = True
 
     async def peer(self, key: str | None = None) -> remote.Peer:
@@ -257,6 +287,13 @@ class Cursor(remote.RemoteHarness):
             raise Unavailable(str(error)) from error
         except (remote.PeerGone, TimeoutError) as error:
             raise Unavailable(f"the Cursor host didn't start: {error or 'no answer'}") from error
+
+    async def check_model(self, model: str | None, access: str = "read-only") -> None:
+        """On the SDK, or on ACP for the access levels that run there. Raises Unavailable."""
+        if access in ON_ACP:
+            await (await self._on_acp()).check_model(model, access)
+        else:
+            await super().check_model(model, access)
 
     async def session(self, spec: SessionSpec) -> remote.RemoteSession:
         if spec.access in ON_ACP:
@@ -363,7 +400,7 @@ async def doctor(models: list[str]) -> tuple[list[str], bool]:
         return [f"Node.js: {error}"], False
     lines = [f"Node.js: {version} ({node})"]
     try:
-        await asyncio.to_thread(ensure, HOST, node)
+        await ensure(HOST, node)
     except Unavailable as error:
         return [*lines, f"Cursor's SDK: {error}"], False
     sdk = json.loads((HOST / "node_modules" / "@cursor" / "sdk" / "package.json").read_text(encoding="utf-8")).get("version")

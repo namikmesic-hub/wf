@@ -15,7 +15,9 @@ KEPT_INSTRUCTIONS names what a harness still gives its agent when a node sets
 `project_instructions: false`, which `wf validate` warns about.
 
 reports_tokens() says whether a harness counts a session's tokens: Cursor does on its SDK,
-but not through cursor-agent's ACP, which runs its `edit` sessions.
+but not through cursor-agent's ACP, which runs its `edit` sessions (cursor_on_acp()).
+KEPT_INSTRUCTIONS["cursor"] is what cursor-agent keeps. On the SDK a session with
+`project_instructions: false` loads none of Cursor's settings layers.
 
 KEYCHAIN_SHELL names the access levels at which a harness's agent runs commands
 that can reach the macOS Keychain, and so every stored sign-in of wf tools: no
@@ -30,7 +32,7 @@ FACTORIES.
 
 from collections.abc import Callable
 
-from .base import Harness, Session, SessionSpec, TurnEnd, Unavailable, Usage
+from .base import Harness, Session, SessionSpec, StartFailed, TurnEnd, Unavailable, Usage
 
 
 def _claude_code() -> Harness:
@@ -67,18 +69,28 @@ def reaches_keychain(harness: str, access: str) -> bool:
     return access in KEYCHAIN_SHELL.get(harness, ())
 
 
-def reports_tokens(harness: str, access: str) -> bool:
-    """Does the harness report a session's tokens at this access level? A cursor_runtime setting
-    that can't be read counts as the default, since a run would stop at it anyway."""
-    if harness != "cursor":
-        return True
+def cursor_on_acp(access: str) -> bool:
+    """Does a Cursor session at this access level run through cursor-agent's ACP? A cursor_runtime
+    setting that can't be read counts as the default, since a run would stop at it anyway."""
     from .cursor import ON_ACP, runtime
 
     try:
         on_acp = runtime() == "acp"
     except Unavailable:
         on_acp = False
-    return not on_acp and access not in ON_ACP
+    return on_acp or access in ON_ACP
+
+
+def reports_tokens(harness: str, access: str) -> bool:
+    """Does the harness report a session's tokens at this access level?"""
+    return harness != "cursor" or not cursor_on_acp(access)
+
+
+def kept_instructions(harness: str, access: str) -> str | None:
+    """What a session at this access level still loads with `project_instructions: false`, or None."""
+    if harness == "cursor" and not cursor_on_acp(access):
+        return None
+    return KEPT_INSTRUCTIONS.get(harness)
 
 
 def create(name: str) -> Harness:
@@ -87,4 +99,4 @@ def create(name: str) -> Harness:
     return FACTORIES[name]()
 
 
-__all__ = ["FACTORIES", "KEPT_INSTRUCTIONS", "KEYCHAIN_SHELL", "reaches_keychain", "reports_tokens", "Harness", "Session", "SessionSpec", "TurnEnd", "Unavailable", "Usage", "create"]
+__all__ = ["FACTORIES", "KEPT_INSTRUCTIONS", "KEYCHAIN_SHELL", "reaches_keychain", "reports_tokens", "kept_instructions", "cursor_on_acp", "Harness", "Session", "SessionSpec", "StartFailed", "TurnEnd", "Unavailable", "Usage", "create"]

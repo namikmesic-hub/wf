@@ -646,11 +646,13 @@ class _Checker:
             possible = set(HARNESSES)
         own = self.nodes[node_id].project_instructions is not None
         where = f"nodes.{node_id}.project_instructions" if own else "defaults.project_instructions"
+        access = self.wf.setting(node_id, "access")
         for name in sorted(possible & harnesses.KEPT_INSTRUCTIONS.keys()):
-            if (where, name) not in self._warned:
+            kept = harnesses.kept_instructions(name, access)
+            if kept and (where, name) not in self._warned:
                 self._warned.add((where, name))
-                self.warn(where, f"on {name}, `project_instructions: false` doesn't keep out "
-                                 f"{harnesses.KEPT_INSTRUCTIONS[name]}")
+                label = "cursor through cursor-agent" if name == "cursor" else name
+                self.warn(where, f"on {label}, `project_instructions: false` doesn't keep out {kept}")
 
     def _tool_list(self, where: str, uses: list) -> None:
         seen = set()

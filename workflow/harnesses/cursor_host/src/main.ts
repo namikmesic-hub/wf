@@ -15,6 +15,10 @@ const VERSION = "0.1.0";
 const SHELL_SPAWN = ["dump_zsh_state", "dump_bash_state", "__CURSOR_SANDBOX_ENV_RESTORE"];
 
 const wire = new Wire(process.stdout);
+wire.onOverflow = () => {
+  log("wf stopped reading the host's frames");
+  void shutdown("wf stopped reading", 2_000);
+};
 const sessions = new Map<string, CursorSession>();
 let greeted = false;
 let apiKey: string | null = null;
@@ -73,12 +77,13 @@ function hello(frame: Frame): void {
 
 async function request(frame: Frame): Promise<void> {
   const args = (frame.args !== null && typeof frame.args === "object" ? frame.args : {}) as Record<string, unknown>;
+  const session = typeof args.session === "string" ? args.session : null;
   try {
     const [result, after] = await operation(String(frame.op), args);
-    wire.respond(frame.id, result);
+    wire.respond(frame.id, result, typeof result.session === "string" ? result.session : session);
     after?.();
   } catch (error) {
-    wire.refuse(frame.id, classify(error));
+    wire.refuse(frame.id, classify(error), session);
   }
 }
 
@@ -103,7 +108,7 @@ async function operation(op: string, args: Record<string, unknown>): Promise<Ans
     case "turn.start":
       return find(args).startTurn(args);
     case "turn.steer":
-      return [{ status: await find(args).steer(String(args.text ?? "")) }];
+      return [{ status: await find(args).steer(String(args.id ?? ""), String(args.text ?? "")) }];
     case "turn.cancel":
       await find(args).cancel();
       return [{}];

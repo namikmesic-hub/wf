@@ -7,6 +7,8 @@ import type { Writable } from "node:stream";
 
 export const PROTOCOL = "wf-session/0";
 export const MAX_FRAME = 1024 * 1024; // bytes in one line, in both directions
+export const MAX_BACKLOG = 64 * 1024 * 1024; // bytes waiting for the client to read, before the host gives up
+const BIG_VALUE = 64 * 1024; // characters of one value in an event that is too big as it is
 
 export type ErrorClass =
   | "unavailable" // the runtime can't run here: not installed, can't start, no such model
@@ -87,13 +89,16 @@ export interface Ret {
 
 export type Frame = Record<string, unknown> & { t: string };
 
-// Writes frames, numbers events, and keeps the calls that wait for a `ret`.
+// Writes frames, numbers events, and keeps the calls that wait for a `ret`. An event too big for
+// a frame keeps its small fields, and each big value becomes { truncated, characters }. When the
+// client stops reading and MAX_BACKLOG bytes wait, onOverflow runs, and the host stops.
 export class Wire {
   private out: Writable;
   private seq = 0;
   private callIds = 0;
   private waiting = new Map<string, (ret: Ret) => void>();
   private gone: string | null = null;
+  onOverflow: () => void = () => undefined;
 
   constructor(out: Writable) {
     this.out = out;
@@ -103,17 +108,19 @@ export class Wire {
     if (this.gone !== null) return;
     let line = JSON.stringify(frame);
     if (Buffer.byteLength(line) > MAX_FRAME && frame.t === "ev") {
-      line = JSON.stringify({ ...frame, data: { truncated: true, kind: frame.kind } });
+      line = JSON.stringify({ ...frame, data: shrink(frame.data as Record<string, unknown>) });
+      if (Buffer.byteLength(line) > MAX_FRAME) line = JSON.stringify({ ...frame, data: { truncated: true } });
     }
     this.out.write(line + "\n");
+    if (this.out.writableLength > MAX_BACKLOG) this.onOverflow();
   }
 
-  respond(id: unknown, result: unknown): void {
-    this.send({ t: "res", id, ok: true, result });
+  respond(id: unknown, result: unknown, session: string | null = null): void {
+    this.send({ t: "res", id, ...(session ? { session } : {}), ok: true, result });
   }
 
-  refuse(id: unknown, error: ErrorInfo): void {
-    this.send({ t: "res", id, ok: false, error });
+  refuse(id: unknown, error: ErrorInfo, session: string | null = null): void {
+    this.send({ t: "res", id, ...(session ? { session } : {}), ok: false, error });
   }
 
   event(session: string, turn: string | null, kind: string, data: Record<string, unknown>): void {
@@ -152,6 +159,13 @@ export class Wire {
     for (const answer of this.waiting.values()) answer(errorRet(reason));
     this.waiting.clear();
   }
+}
+
+function shrink(data: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(data ?? {}).map(([key, value]) => {
+    const text = JSON.stringify(value ?? null);
+    return [key, text.length > BIG_VALUE ? { truncated: true, characters: text.length } : value];
+  }));
 }
 
 function errorRet(reason: string): Ret {

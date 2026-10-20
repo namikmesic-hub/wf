@@ -678,8 +678,10 @@ def _tools_doctor(args) -> int:
 
 
 def _cursor_signin(args) -> int:
+    """Check the key first, and keep it only when Cursor takes it, so a wrong key never replaces a good one."""
     from keyring.errors import KeyringError
 
+    from . import settings
     from .harnesses import Unavailable, cursor
 
     if not sys.stdin.isatty():
@@ -692,17 +694,23 @@ def _cursor_signin(args) -> int:
         print("wf runtimes cursor signin: no key was given", file=sys.stderr)
         return 1
     try:
+        found = asyncio.run(cursor.check(key=key))
+    except Unavailable as error:
+        print(f"wf runtimes cursor signin: {error}. The Keychain keeps what it had.", file=sys.stderr)
+        return 1
+    try:
         cursor.save_key(key)
     except KeyringError as error:
         print(f"wf runtimes cursor signin: can't save the key in the Keychain: {error or type(error).__name__}", file=sys.stderr)
         return 1
-    print("Saved the Cursor API key in the macOS Keychain. Checking that it works:")
+    print(f"Saved the Cursor API key in the macOS Keychain: {cursor.works(found)}.")
     try:
-        found = asyncio.run(cursor.check(key=key))
-    except Unavailable as error:
-        print(f"wf runtimes cursor signin: {error}", file=sys.stderr)
-        return 1
-    print(f"  {cursor.works(found)}")
+        file = settings.get("cursor_api_key_file")
+    except settings.SettingsError:
+        file = None
+    if file is not None:
+        print(f"Note: cursor_api_key_file in {settings.path()} names {file}, and Cursor sessions take the key from there "
+              "first. Remove that setting to use the key you saved.")
     return 0
 
 

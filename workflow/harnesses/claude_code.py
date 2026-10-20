@@ -121,7 +121,7 @@ class ClaudeCode:
     async def open(self, run_dir) -> None:
         find_program()  # nothing else is shared: every session is its own process
 
-    async def check_model(self, model: str | None) -> None:
+    async def check_model(self, model: str | None, access: str = "read-only") -> None:
         pass  # Claude Code lists no models: a session with a wrong one fails
 
     async def session(self, spec: SessionSpec) -> "ClaudeSession":

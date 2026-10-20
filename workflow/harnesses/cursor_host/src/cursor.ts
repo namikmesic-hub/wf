@@ -215,24 +215,28 @@ export class CursorSession {
   }
 
   // turn.start: the turn's id at once, then its events, and turn.ended when it ends.
+  // The turn is taken at once, so a second turn.start fails even before the first one begins.
   startTurn(args: Record<string, unknown>): [Record<string, unknown>, () => void] {
     if (this.agent === null) throw fail("invalid", "protocol.session", "the session isn't open");
     if (this.turnDone !== null) throw fail("invalid", "protocol.turn", "a turn of this session is still running");
     if (typeof args.text !== "string") throw fail("invalid", "protocol.text", "turn.start needs a text");
     const turn = newId("trn");
-    const kind = typeof args.kind === "string" ? args.kind : "message";
+    const kind = typeof args.kind === "string" ? args.kind : "instruction";
+    let ended = () => undefined as void;
+    this.turnDone = new Promise<void>((resolve) => { ended = resolve; });
+    this.turnId = turn;
+    this.cancelled = false;
+    this.outside = null;
     const begin = () => {
-      this.turnDone = this.runTurn(turn, kind, args.text as string).finally(() => {
+      this.runTurn(turn, kind, args.text as string).finally(() => {
         this.turnDone = null;
+        ended();
       });
     };
     return [{ turn }, begin];
   }
 
   private async runTurn(turn: string, kind: string, text: string): Promise<void> {
-    this.turnId = turn;
-    this.cancelled = false;
-    this.outside = null;
     this.wire.event(this.id, turn, "turn.started", { kind, text });
     let reported: Usage | null = null;
     let status = "done";
@@ -286,24 +290,27 @@ export class CursorSession {
     }
   }
 
+  // A session's own tool is one on OWN_SERVER, or one whose server isn't known (yet) with the
+  // name of one of them. A tool of another server with such a name isn't the session's.
   private tool(turn: string, message: Extract<SDKMessage, { type: "tool_call" }>): void {
     const mcp = mcpCall(message);
-    const name = mcp?.tool ?? message.name;
-    const client = this.clients.get(name); // wf names no tool as Cursor names its own
+    const ours = mcp !== null && mcp.tool !== null && (mcp.server === OWN_SERVER || mcp.server === null);
+    const client = ours ? this.clients.get(mcp.tool as string) : undefined;
     const args = mcp ? mcp.args : message.args;
     const base = {
       call: message.call_id,
-      tool: client ? client.name : name,
+      tool: client ? client.name : mcp ? (mcp.tool ?? "mcp") : message.name,
       server: client ? client.server : mcp?.server === OWN_SERVER ? null : (mcp?.server ?? null),
       args: args ?? null,
     };
-    if (message.status === "running") {
-      const key = JSON.stringify(args ?? null);
+    const final = message.status !== "running";
+    this.checkAccess(message, mcp, client, final);
+    if (!final) {
+      const key = JSON.stringify([base.tool, base.server, args ?? null]);
       const seen = this.calls.get(message.call_id);
       if (seen === key) return;
       this.calls.set(message.call_id, key);
       this.wire.event(this.id, turn, "turn.tool", { ...base, status: seen === undefined ? "started" : "updated" });
-      if (seen === undefined) this.refuseOutside(message, client, mcp);
       return;
     }
     this.calls.delete(message.call_id);
@@ -314,27 +321,40 @@ export class CursorSession {
     });
   }
 
-  // A tool the options should have kept from this session: stop the turn, and fail it.
-  private refuseOutside(message: { name: string }, client: ClientTool | undefined, mcp: McpCall | null): void {
-    if (client || mcp?.server === OWN_SERVER) return; // only the session's own callbacks answer there
+  // Each message of a call is checked, the last one too: a tool the options should have kept from
+  // this session stops the turn, and fails it. A call whose MCP server isn't known yet waits for
+  // a later message, and at its last one counts as the session's only when it has a session tool's name.
+  private checkAccess(message: { name: string }, mcp: McpCall | null, client: ClientTool | undefined, final: boolean): void {
+    if (this.outside !== null || client !== undefined) return;
     let why: string | null = null;
-    if (mcp && this.ownMcpOnly) why = `Cursor called ${mcp.server ?? "an MCP server"}.${mcp.tool ?? "?"}, an MCP tool wf didn't give this session`;
-    else if (!mcp && this.allowed && !this.allowed.has(message.name)) why = `Cursor ran ${message.name}, a tool outside the session's read-only list`;
-    if (why === null || this.outside !== null) return;
+    if (mcp !== null) {
+      if (mcp.server === OWN_SERVER) return; // only the session's own callbacks answer there
+      if ((mcp.server === null || mcp.tool === null) && !final) return;
+      if (this.ownMcpOnly) {
+        why = `Cursor called ${mcp.server ?? "an MCP server it didn't name"}.${mcp.tool ?? "?"}, an MCP tool wf didn't give this session`;
+      }
+    } else if (this.allowed !== null && !this.allowed.has(message.name)) {
+      why = `Cursor ran ${message.name}, a tool outside the session's read-only list`;
+    }
+    if (why === null) return;
     this.outside = why;
     this.run?.cancel().catch(() => undefined);
   }
 
-  async steer(text: string): Promise<"delivered" | "declined" | "unconfirmed"> {
+  // A message for the running turn. When Cursor answers within STEER_MS, the answer says what
+  // became of it. Else it is `queued`, and a steer.status event says so once Cursor answers:
+  // `delivered`, or `declined`, when the client sends it on itself.
+  async steer(id: string, text: string): Promise<"delivered" | "declined" | "queued"> {
     const run = this.run;
+    const turn = this.turnId;
     if (run === null || run.status !== "running" || typeof run.steer !== "function") return "declined";
-    try {
-      const outcome = await Promise.race([run.steer(text), sleep(STEER_MS).then(() => "no answer" as const)]);
-      if (outcome === "complete_delivered") return "delivered";
-      return outcome === "no answer" ? "unconfirmed" : "declined";
-    } catch {
-      return "declined";
+    const answer = run.steer(text).then((outcome) => outcome === "complete_delivered" ? "delivered" as const : "declined" as const,
+      () => "declined" as const);
+    const outcome = await Promise.race([answer, sleep(STEER_MS).then(() => "queued" as const)]);
+    if (outcome === "queued") {
+      void answer.then((status) => this.wire.event(this.id, turn, "steer.status", { id, status }));
     }
+    return outcome;
   }
 
   async cancel(): Promise<void> {
@@ -387,15 +407,16 @@ interface McpCall {
   args: unknown;
 }
 
+// An MCP tool call: its server, its tool and its arguments, each null when not known yet. The SDK
+// names a custom tool's call `mcp` with those in its arguments, or `custom-user-tools-<tool>`.
 function mcpCall(message: { name: string; args?: unknown }): McpCall | null {
-  const args = message.args as Record<string, unknown> | undefined;
-  const named = args !== null && typeof args === "object" && typeof args.toolName === "string";
-  if (message.name !== "mcp" && !named) return null;
-  return {
-    server: typeof args?.providerIdentifier === "string" ? args.providerIdentifier : null,
-    tool: typeof args?.toolName === "string" ? args.toolName : null,
-    args: args?.args ?? null,
-  };
+  const args = (message.args !== null && typeof message.args === "object" ? message.args : {}) as Record<string, unknown>;
+  const server = typeof args.providerIdentifier === "string" ? args.providerIdentifier : null;
+  const tool = typeof args.toolName === "string" ? args.toolName : null;
+  const ownName = message.name.startsWith(`${OWN_SERVER}-`) ? message.name.slice(OWN_SERVER.length + 1) : null;
+  if (ownName !== null) return { server: OWN_SERVER, tool: ownName, args: "args" in args ? args.args : (message.args ?? null) };
+  if (message.name !== "mcp" && server === null && tool === null) return null;
+  return { server, tool, args: args.args ?? null };
 }
 
 function capped(result: unknown): unknown {

@@ -1,6 +1,7 @@
 """A local HTTPS CONNECT proxy that can go silent, as a sleeping laptop's network does: for the
 opt-in test of Cursor's own retries (tests/test_cursor.py). While paused, it reads nothing and
-sends nothing in either direction, and keeps every connection open."""
+sends nothing in either direction, and keeps every connection open. `held` is the longest time it
+really held bytes that it had read, so a test can tell that a stream went through it and stalled."""
 
 import asyncio
 import threading
@@ -10,7 +11,7 @@ import time
 class Blackhole:
     def __init__(self):
         self.connects = 0
-        self.paused_for = 0.0
+        self.held = 0.0
         self._until = 0.0
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
@@ -23,7 +24,6 @@ class Blackhole:
 
     def pause(self, seconds: float) -> None:
         self._until = time.monotonic() + seconds
-        self.paused_for = seconds
 
     def stop(self) -> None:
         self._loop.call_soon_threadsafe(self._loop.stop)
@@ -62,7 +62,9 @@ class Blackhole:
                 data = await reader.read(65536)
                 if not data:
                     break
+                began = time.monotonic()
                 await self._held()  # held: never delivered while paused
+                self.held = max(self.held, time.monotonic() - began)
                 writer.write(data)
                 await writer.drain()
         except OSError:

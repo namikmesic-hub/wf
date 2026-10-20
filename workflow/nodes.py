@@ -114,7 +114,7 @@ from langgraph.types import interrupt
 from . import capacity, dryrun, output_tool, overrides, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
-from .harnesses import SessionSpec, Unavailable, Usage, reaches_keychain
+from .harnesses import SessionSpec, StartFailed, Unavailable, Usage, reaches_keychain
 from .spec import seconds
 from .state import Finished, Job
 from .trace import HIDDEN, Attempt
@@ -482,12 +482,14 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             tools=tools,
             only_wf_tools=listed is not None,
             project_instructions=wf.setting(node_id, "project_instructions"),
-            read_roots=readable,
+            read_roots=list(readable),
             trace=record,
         )
         with ctx.steering.opening(spec.where, number, name):
             try:
                 session = await agent.session(spec)
+            except StartFailed as error:
+                raise _AttemptFailed(str(error), error.retry_after) from error
             except Unavailable as error:
                 if source is None:
                     raise _Unavailable(str(error)) from error
@@ -497,9 +499,13 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                 source, spec = None, replace(spec, fork_from=None, prior_cost_usd=0.0)  # the fork failed: start fresh
                 try:
                     session = await agent.session(spec)
+                except StartFailed as error:
+                    raise _AttemptFailed(str(error), error.retry_after) from error
                 except Unavailable as error:
                     raise _Unavailable(str(error)) from error
         instruction = render(True) if source else fresh
+        spec.read_roots.extend(path for path in _named_folders(instruction, ctx, variables, workspace)
+                               if path not in spec.read_roots)  # what a continued pass's own text names
         if source:
             emit({"event": "session_continued", **_label(job), "attempt": number})
             (folder / "instruction.md").write_text(instruction, encoding="utf-8")
@@ -564,10 +570,15 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             ctx.add_usage(cut_off)
             tell_usage()
             session_facts["id"] = session.id
-            record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
             try:
                 await session.close()
             finally:
+                late = session.late_usage() if hasattr(session, "late_usage") else Usage()  # reported as it closed
+                usage.add(late)
+                spent.add(late)
+                ctx.add_usage(late)
+                tell_usage()
+                record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
                 spec.emit({"event": "session_ended"})
 
     result, number = await _attempts(job, ctx, emit, attempt, names,
@@ -655,15 +666,20 @@ async def _start_commit(ctx: RunContext, folder: Path, workspace: dict) -> tuple
 
 
 def _named_folders(instruction: str, ctx: RunContext, variables: dict, workspace: dict) -> list[Path]:
-    """wf's folders that an instruction names: the run folder, and other nodes' workspaces. A harness
-    whose agent reads files only through wf's tools lets it read these too (files_tool.py)."""
-    found = [str(ctx.root.run.dir)]
+    """wf's folders that an instruction names: the run folder, the run's repo, and other nodes'
+    workspaces, as the `run` and `workspace` variables give them. A harness whose agent reads files
+    only through wf's tools lets it read these too (files_tool.py). Other folders stay out."""
+    found = [str(ctx.run_info["dir"]), str(ctx.run_info["repo"])]
     for value in (variables.get("workspace") or {}).values():
         for one in value if isinstance(value, list) else [value]:
             if isinstance(one, dict) and isinstance(one.get("path"), str):
                 found.append(one["path"])
-    own = Path(workspace["path"]).resolve()
-    return [Path(path) for path in dict.fromkeys(found) if path and path in instruction and Path(path).resolve() != own]
+    own, text, named = Path(workspace["path"]).resolve(), instruction, set()
+    for path in sorted(set(filter(None, found)), key=len, reverse=True):  # the run folder can be inside the repo
+        if path in text:
+            named.add(path)
+            text = text.replace(path, "\0")  # so a folder above it isn't named by the same text
+    return [Path(path) for path in dict.fromkeys(found) if path in named and Path(path).resolve() != own]
 
 
 def _continue_from(previous: dict | None, harness: str, model: str | None) -> tuple[dict | None, str | None]:

@@ -8,10 +8,12 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
 import jsonschema
+import keyring
 import pytest
 
 from cursor_sdk import KEY, entries, needs_node, use
@@ -84,6 +86,11 @@ end: {output: {out: "{{ ask.summary }}"}}
     events = [frame for way, frame in frames if frame["t"] == "ev"]
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))  # numbered, in order
     assert all(e["session"].startswith("ses_") for e in events)
+    after = [frame for way, frame in frames if frame["t"] not in ("hello", "welcome")
+             and not (frame["t"] == "req" and frame["op"] == "session.open")]
+    assert all(frame["session"].startswith("ses_") for frame in after)  # every frame names its session
+    starts = [frame["args"]["kind"] for way, frame in frames if frame["t"] == "req" and frame["op"] == "turn.start"]
+    assert starts == ["instruction", "reminder"]
     for way, frame in frames:
         assert problems(frame) == [], (way, frame)
 
@@ -129,6 +136,27 @@ def test_a_model_check_asks_the_host_and_names_what_cursor_has(tmp_path, monkeyp
         asyncio.run(check("nope"))
 
 
+@needs_node
+def test_an_edit_node_has_its_model_checked_on_cursor_agent(tmp_path, monkeypatch, cursor_host):
+    from fakes import Fake
+    acp = Fake("cursor", models={"composer-2.5"})
+    use(monkeypatch, tmp_path, cursor_host, acp=acp.factory, key=None)
+
+    async def check(model, access):
+        harness = harnesses.create("cursor")
+        await harness.open(tmp_path / "run")
+        try:
+            await harness.check_model(model, access)
+        finally:
+            await harness.close()
+
+    asyncio.run(check("composer-2.5", "edit"))  # no API key is needed on cursor-agent
+    with pytest.raises(Unavailable, match="cursor has no model `gpt-9`"):
+        asyncio.run(check("gpt-9", "edit"))
+    with pytest.raises(Unavailable, match="no Cursor API key was given to the Cursor host"):
+        asyncio.run(check(None, "read-only"))  # with no model: can the SDK run at all
+
+
 # ---------- installing and finding what the host needs ----------
 
 
@@ -171,9 +199,42 @@ def test_the_first_session_installs_the_sdk_from_the_lockfile(tmp_path, monkeypa
     bin_dir = fake_npm(tmp_path, 'mkdir -p node_modules/@cursor/sdk && echo \'{"version": "1.0.38"}\' > node_modules/@cursor/sdk/package.json')
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("CURSOR_API_KEY", "key")
-    cursor.ensure(host, sys.executable)
-    cursor.ensure(host, sys.executable)  # installed: npm doesn't run again
+    asyncio.run(cursor.ensure(host, sys.executable))
+    asyncio.run(cursor.ensure(host, sys.executable))  # installed: npm doesn't run again
     assert (tmp_path / "npm.log").read_text() == f"{host} ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error\n"
+
+
+def test_this_machines_package_of_the_sdks_binaries_counts_as_needed(tmp_path, monkeypatch):
+    monkeypatch.setattr(cursor.sys, "platform", "darwin")
+    monkeypatch.setattr(cursor.platform, "machine", lambda: "arm64")
+    lockfile(tmp_path, **{"@cursor/sdk-darwin-arm64": {"version": "1.0.38", "optional": True, "os": ["darwin"], "cpu": ["arm64"]},
+                          "@cursor/sdk-linux-x64": {"version": "1.0.38", "optional": True, "os": ["linux"], "cpu": ["x64"]}})
+    assert cursor.missing(tmp_path) == ["@cursor/sdk-darwin-arm64@1.0.38"]
+    installed(tmp_path, "@cursor/sdk-darwin-arm64", "1.0.38")
+    assert cursor.missing(tmp_path) == []
+
+
+def test_a_cancelled_install_stops_npm(tmp_path, monkeypatch):
+    host = tmp_path / "host"
+    host.mkdir()
+    lockfile(host, **{"@cursor/sdk": {"version": "1.0.38"}})
+    bin_dir = fake_npm(tmp_path, f"echo $$ > {tmp_path / 'npm.pid'}; sleep 60")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    async def main():
+        task = asyncio.ensure_future(cursor.ensure(host, sys.executable))
+        while not (tmp_path / "npm.pid").exists():
+            await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    began = time.monotonic()
+    asyncio.run(main())
+    assert time.monotonic() - began < 10
+    pid = int((tmp_path / "npm.pid").read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 def test_an_install_that_fails_makes_cursor_unavailable_and_says_where(tmp_path, monkeypatch):
@@ -183,18 +244,18 @@ def test_an_install_that_fails_makes_cursor_unavailable_and_says_where(tmp_path,
     bin_dir = fake_npm(tmp_path, "echo 'npm error network request failed' >&2; exit 1")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     with pytest.raises(Unavailable, match=f"`npm ci --omit=dev` in {host} didn't install Cursor's SDK: npm error network"):
-        cursor.ensure(host, sys.executable)
+        asyncio.run(cursor.ensure(host, sys.executable))
 
 
-@pytest.mark.parametrize("version, ok", [("v26.10.0", True), ("v22.18.0", True), ("v22.13.1", False), ("v20.11.0", False)])
-def test_node_must_run_typescript(tmp_path, version, ok):
+@pytest.mark.parametrize("typescript, ok", [("strip", True), ("transform", True), ("undefined", False), ("false", False)])
+def test_node_must_say_that_it_runs_typescript(tmp_path, typescript, ok):
     node = tmp_path / "node"
-    node.write_text(f"#!/bin/sh\necho {version}\n")
+    node.write_text(f'#!/bin/sh\nif [ "$1" = --version ]; then echo v23.1.0; else echo {typescript}; fi\n')
     node.chmod(0o755)
     if ok:
         assert cursor.find_node(str(node)) == str(node)
     else:
-        with pytest.raises(Unavailable, match=f"Cursor's runtime needs Node.js 22.18 or later, and {node} is {version}"):
+        with pytest.raises(Unavailable, match=f"which runs TypeScript as it is, and {node} \\(v23.1.0\\) doesn't"):
             cursor.find_node(str(node))
     with pytest.raises(Unavailable, match="there's no `no-such-node` on PATH"):
         cursor.find_node("no-such-node")
@@ -263,8 +324,20 @@ def test_signin_keeps_the_key_in_the_keychain_and_checks_it(monkeypatch, cursor_
     assert cli.main(["runtimes", "cursor", "signin"]) == 0
     assert fake_keyring.items[cursor.KEYCHAIN] == KEY
     out = capsys.readouterr().out
-    assert "Saved the Cursor API key in the macOS Keychain" in out
-    assert "the key works: wf tests (someone@example.com), 3 models" in out
+    assert "Saved the Cursor API key in the macOS Keychain: the key works: wf tests (someone@example.com), 3 models" in out
+    assert "cursor_api_key_file" not in out
+
+
+@needs_node
+def test_signin_says_when_a_key_file_wins_over_the_keychain(monkeypatch, cursor_host, tmp_path, capsys, wf_home):
+    use(monkeypatch, tmp_path, cursor_host, key=None)
+    monkeypatch.setattr(cursor, "HOST", cursor_host)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("getpass.getpass", lambda prompt: KEY)
+    (wf_home / "config.yaml").write_text(f"cursor_api_key_file: {tmp_path / 'old-key'}\n")
+    assert cli.main(["runtimes", "cursor", "signin"]) == 0
+    out = capsys.readouterr().out
+    assert f"names {tmp_path / 'old-key'}, and Cursor sessions take the key from there first. Remove that setting" in out
 
 
 @needs_node
@@ -273,8 +346,11 @@ def test_signin_with_a_key_that_cursor_refuses_says_so(monkeypatch, cursor_host,
     monkeypatch.setattr(cursor, "HOST", cursor_host)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("getpass.getpass", lambda prompt: "key_typo")
+    keyring.set_password(*cursor.KEYCHAIN, KEY)  # the good key it had
     assert cli.main(["runtimes", "cursor", "signin"]) == 1
-    assert "Cursor refused the API key: Invalid User API Key" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "Cursor refused the API key: Invalid User API Key" in err and "The Keychain keeps what it had" in err
+    assert keyring.get_password(*cursor.KEYCHAIN) == KEY
 
 
 def test_signin_needs_a_terminal(monkeypatch, capsys):

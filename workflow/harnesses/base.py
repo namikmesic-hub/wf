@@ -128,7 +128,9 @@ class Session(Protocol):
 
     def pending_usage(self) -> Usage:
         """What a turn that hasn't returned yet has used so far (zero between turns), so a turn
-        cut off by a timeout still counts. Harnesses that can't tell return Usage()."""
+        cut off by a timeout still counts. Harnesses that can't tell return Usage(). A harness
+        that learns more of it only as close() ends the turn has late_usage() too, which the runner
+        reads after close()."""
 
     async def steer(self, text: str, ident: str) -> Literal["delivered", "queued", "unconfirmed"] | None:
         """A message from `wf steer`, with its id. "delivered": the running turn has it now.
@@ -147,17 +149,28 @@ class Harness(Protocol):
     async def open(self, run_dir: Path) -> None:
         """Before the first session of a stream (e.g. start an app server)."""
 
-    async def check_model(self, model: str | None) -> None:
-        """After open(): raise Unavailable if the harness knows that it can't run `model`."""
+    async def check_model(self, model: str | None, access: str = "read-only") -> None:
+        """After open(): raise Unavailable if the harness knows that it can't run `model` for a node
+        at this access level. With no model, whether the harness can run at all."""
 
     async def session(self, spec: SessionSpec) -> Session:
-        """A new session. Raises Unavailable if the harness can't start one."""
+        """A new session. Raises Unavailable if the harness can't start one, or StartFailed when a
+        retry may."""
 
     async def close(self) -> None: ...
 
 
 class Unavailable(Exception):
     """The harness can't run: not installed, not logged in, or out of quota."""
+
+
+class StartFailed(Exception):
+    """The harness couldn't start a session now, for a reason that a retry can clear. The retry on
+    the same harness waits `retry_after` seconds."""
+
+    def __init__(self, message: str, retry_after: float = 0):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 def transcript(path: Path, kind: str, **data) -> None:
