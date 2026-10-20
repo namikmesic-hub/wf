@@ -284,8 +284,8 @@ class Run:
             return None
 
     def leave_worktrees(self, worktrees: dict[str, tuple[str | None, str]]) -> None:
-        """Before the run's worktrees (workspaces.run_worktrees) go: record the named branches (leave_branches),
-        and each worktree's branch and commit in worktrees.json, so that `wf continue` brings them back."""
+        """Before the run's worktrees (workspaces.run_worktrees) go, record the named branches (leave_branches).
+        Also record each worktree's branch and commit in worktrees.json, so that `wf continue` brings them back."""
         self.leave_branches(worktrees)
         write_json(self.dir / "worktrees.json", {path: {"branch": branch, "commit": commit}
                                                  for path, (branch, commit) in worktrees.items()})

@@ -1054,9 +1054,9 @@ def _not_yet(target: str) -> str:
 
 
 class _FollowUps:
-    """The checks of a workflow's `follow_up` (`wf continue`): it names nodes of the workflow, a template of a
-    node that a follow-up runs again reads `follow_up`, and a template doesn't read an output that a
-    follow-up clears before it. `order` is the follow-up's _FollowUpOrder, or None without a good `follow_up`."""
+    """The checks of a workflow's `follow_up` (`wf continue`). It names nodes of the workflow, and a node that
+    a follow-up runs again reads `follow_up`. No template reads an output that a follow-up clears before it.
+    `order` is the follow-up's _FollowUpOrder, or None without a good `follow_up`."""
 
     def __init__(self, checker: "_Checker", order: _Order):
         self.checker, self.order = checker, None
@@ -1109,7 +1109,8 @@ def _reads_follow_up(workflow: Workflow, node_id: str) -> bool:
 class _FollowUpOrder(_Order):
     """_Order for a follow-up, which starts at the nodes in `entry` instead of at start. The nodes they can
     lead to (`ahead`) run again from none. Of the others, only `kept`, the nodes certain to have run by the
-    end of the run, count as finished. The entry nodes are certain to run, as start's nodes are in a run."""
+    end of the run, count as finished. The entry nodes all start pending, so each one runs. One finishes
+    before a node starts only when a need of that node waits for it (scheduler.settled)."""
 
     def __init__(self, topo: Topology, entry: tuple[str, ...], kept: frozenset[str]):
         super().__init__(topo)
@@ -1125,8 +1126,10 @@ class _FollowUpOrder(_Order):
     def before(self, node: str) -> set[str]:
         if node not in self._before:
             known = self.dominators[node] - {node, START}  # a follow-up's start ended long ago
-            certain = self._certain(known | self.entry, excluding=node)
-            self._before[node] = known | (self._ancestors(node) & certain) | self.kept
+            waited = {entry for entry in self.entry - {node} if any(
+                need != START and need in self.topo.reachable([entry], avoiding=node) for need in self.topo.needs[node])}
+            certain = self._certain(known, excluding=node)
+            self._before[node] = known | waited | (self._ancestors(node) & certain) | self.kept
         return self._before[node]
 
     def at_end(self) -> set[str]:

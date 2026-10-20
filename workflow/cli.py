@@ -37,12 +37,12 @@ folders outside the repo, in a folder per repo under DIR, instead of in ./.wf/ru
 main() parses the arguments and returns the exit code. The pyproject entry
 point (`wf = "workflow.cli:main"`) passes that code to the shell.
 
-Exit codes: 0 success, 1 failure (including bad arguments), 2 paused waiting
-for a person (wf run, wf retry and wf continue, only with --no-input or without a
-terminal), 3 nothing new before the timeout (wf wait), 130 stopped with
-Ctrl-C. Bad arguments exit with 1, not argparse's usual 2, so a script can
-tell a pause from a typo. A message that `wf steer` doesn't send fails too:
-exit code 1.
+Exit codes: 0 means success, and 1 means failure, bad arguments included. A
+pause for a person gives 2, from wf run, wf retry and wf continue, only with
+--no-input or without a terminal. Nothing new before the timeout gives 3 (wf
+wait), and Ctrl-C gives 130. Bad arguments exit with 1, not argparse's usual
+2, so a script can tell a pause from a typo. A message that `wf steer`
+doesn't send fails too: exit code 1.
 """
 
 import argparse

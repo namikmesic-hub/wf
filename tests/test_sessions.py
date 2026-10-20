@@ -118,3 +118,33 @@ end: {output: {}}
 """)
     assert cli.main(["run", "flow.yaml"]) == 0
     assert [s.continuable for s in fake.specs] == [False, False]
+
+
+def test_a_workflow_node_passes_its_sub_workflows_sessions_to_its_next_pass(repo, monkeypatch):
+    fake = Fake("claude-code", submit({"summary": "one"}), submit({"summary": "two"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    Path("child.yaml").write_text("""
+version: 1
+name: child
+defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+start: {input: {}}
+nodes:
+  work: {needs: [start], session: continue, instruction: "{% if session.continued %}Again{% else %}The task{% endif %}"}
+end: {output: {}}
+""")
+    Path("flow.yaml").write_text("""
+version: 1
+name: outer
+start: {input: {}}
+nodes:
+  build: {needs: [start], workflow: child.yaml}
+  check:
+    needs: [build]
+    command: "echo try >> tries; test $(wc -l < tries) -ge 2"
+    check: false
+    routes: [{when: "check.exit_code != 0", to: build, max: 1}, {to: end}]
+end: {output: {}}
+""")
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert [s.fork_from for s in fake.specs] == [None, "session-1"]
+    assert fake.sent[1] == f"Again\n\n{NEW_RESULT}\n\n{FINISH}"

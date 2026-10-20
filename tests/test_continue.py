@@ -163,6 +163,34 @@ def test_a_session_continue_node_continues_its_last_session_in_a_follow_up(repo,
     assert fake.sent[3].startswith("Follow-up: add a flag")
 
 
+def test_a_session_continue_node_in_a_sub_workflow_continues_its_session_in_a_follow_up(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 3)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("parent.yaml", """
+        version: 1
+        name: parent
+        start: {input: {}}
+        follow_up: {to: build}
+        nodes:
+          build: {needs: [start], workflow: child.yaml, with: {task: "{{ follow_up.request if follow_up else 'start' }}"}}
+        end: {output: {}}
+    """)
+    write("child.yaml", """
+        version: 1
+        name: child
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {task: {type: string}}}
+        nodes:
+          work: {needs: [start], session: continue, instruction: "{{ start.task }}"}
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "parent.yaml"]) == 0
+    assert cli.main(["continue", only_run().id, "add a flag"]) == 0
+    # The follow-up's new sub-workflow thread starts with the sessions that the last one ended with
+    assert [s.fork_from for s in fake.specs] == [None, "session-1"]
+    assert fake.sent[1].startswith("add a flag")
+
+
 def test_routes_count_from_zero_again_in_a_follow_up(repo, capsys):
     write("loop.yaml", """
         version: 1
@@ -719,6 +747,22 @@ def test_a_follow_up_can_start_at_several_nodes(repo, capsys):
     assert run.output() == {"both": "L1R1"}
 
 
+def test_an_entry_that_only_a_route_leads_from_isnt_certain_before_another_entry(repo):
+    found = problems("""
+        version: 1
+        name: race
+        start: {input: {}}
+        follow_up: {to: [a, b]}
+        nodes:
+          a: {needs: [start], env: {B: "{{ b.stdout }}"}, command: "echo {% if follow_up %}{{ follow_up.number }}{% endif %}"}
+          b: {needs: [start], command: "true", routes: [{to: a, max: 1}, {to: end}]}
+        end: {output: {}}
+    """)
+    # Both entries start at once in a follow-up: a doesn't need b, so b may not have run when a starts
+    assert any(p.startswith("warning: nodes.a.env.B: reads `b.stdout`, but `b` might not have run yet in a follow-up")
+               for p in found), found
+
+
 def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
     workflow = spec.parse(dedent("""
         version: 1
@@ -736,7 +780,8 @@ def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
              "outputs": {"start": {}, "plan": {"exit_code": 0}, "a": {"exit_code": 0}, "b": [{"exit_code": 0}], "join": {}},
              "errors": {"b": [{"index": 1, "item": 2, "error": "exited with code 1"}]}, "taken": {"join:0": 1},
              "history": {"a": [{}, {}]}, "pending": [], "active": {}, "output": {"done": True},
-             "sessions": {"a": {"harness": "codex", "model": None, "id": "s1", "cost_usd": 0.0, "streak": 2}},
+             "sessions": {"a": {"harness": "codex", "model": None, "id": "s1", "cost_usd": 0.0, "streak": 2},
+                          "sub": {"sessions": {"inner": {"harness": "codex", "model": None, "id": "s2", "cost_usd": 0.0, "streak": 2}}}},
              "usage": {"cost_usd": 1.5, "tokens": 300}, "follow_up": {"request": "more", "number": 1, "limits": {}, "pending": True}}
     events = []
     progress = state.Progress(saved, workflow, scheduler.Topology.of(workflow), events.append)
@@ -744,6 +789,7 @@ def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
     taken = progress.update()
     assert (taken["pending"], set(taken["outputs"]), taken["errors"]) == (["a", "b"], {"start", "plan"}, {})
     assert (taken["taken"], taken["sessions"]["a"]["streak"], taken["history"]) == ({}, 0, {"a": [{}, {}]})
+    assert taken["sessions"]["sub"] == {"sessions": {"inner": {**saved["sessions"]["sub"]["sessions"]["inner"], "streak": 0}}}
     assert (taken["status"], taken["output"]) == ("running", None)
     assert taken["follow_up"] == {"request": "more", "number": 1, "limits": {},
                                   "from": {"cost_usd": 1.5, "tokens": 300, "elapsed_s": 42.0}}

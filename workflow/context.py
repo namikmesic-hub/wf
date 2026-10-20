@@ -10,17 +10,17 @@ which is why it can hold things like asyncio.Semaphore.
 State (state.py) is the opposite: plain data that LangGraph saves after every
 step, so it survives the process.
 
-A sub-workflow (a workflow node) runs with a child context: its own workflow, topology,
-folder and `repo` workspace, and the path of node ids leading to it (`prefix`, which names
-its worktree branches). Everything the spec says belongs to the whole run is the top-level
-context's, reached through `root`: the clock, the usage counters and the limits (a
-sub-workflow's own `limits` are ignored, and `limits` is the file's, with any `--limit` the
-run was given on top: limits.py). In a follow-up (`wf continue`), the limits count from
-`budget_from`. The root also has the agent cap and the attempts waiting for it, the open
-harnesses, the agent sessions that `wf steer` can reach (steer.py), the git lock, the
-checkpointer and the trace file. `trace` is the trace as this workflow writes it (trace.Scope):
-a sub-workflow's ids start with the attempt that runs it (`trace_parent`). The models that
-`wf retry` gives (overrides.py) are for the run's own nodes, not a sub-workflow's.
+A sub-workflow (a workflow node) runs with a child context. That context has its own workflow,
+topology, folder and `repo` workspace, and the path of node ids that leads to it (`prefix`). The
+path names its worktree branches. The parts that the spec gives the whole run are the top-level
+context's, which `root` reaches. These are the clock, the usage counters and the limits. A
+sub-workflow's own `limits` don't count: `limits` is the file's, with the run's `--limit` values on
+top (limits.py). In a follow-up (`wf continue`), the limits count from `budget_from`. The root also
+has the agent cap, the attempts that wait for it, the open harnesses, and the sessions that
+`wf steer` can reach (steer.py). It also has the git lock, the checkpointer and the trace file.
+`trace` is the trace as this workflow writes it (trace.Scope). A sub-workflow's ids start with the
+attempt that runs it (`trace_parent`). The models that `wf retry` gives (overrides.py) are for the
+run's own nodes, not a sub-workflow's.
 """
 
 import asyncio
@@ -218,8 +218,8 @@ class RunContext:
     # ---------- a stream that starts ----------
 
     def resume(self, values: dict) -> None:
-        """Before a stream: the clock, the usage and a follow-up's start as the saved state has them, so a
-        job that runs again before the first `schedule` step sees the run's limits as that step does."""
+        """Before a stream, set the clock, the usage and a follow-up's start as the saved state has them.
+        Then a job that runs again before the first `schedule` step sees the limits as that step does."""
         self.restart_clock(values.get("elapsed_s", 0.0))
         root = self.root
         root.usage = dict(values.get("usage") or {"cost_usd": 0.0, "tokens": 0})

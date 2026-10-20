@@ -82,15 +82,15 @@ records it, so later passes and `wf retry` keep using it, and no other node
 or run can take it over. An item's `branch` renders on every pass, and must
 name the branch its index already has.
 
-Workflow nodes (_workflow) run their sub-workflow with the same graph, as a
-separate LangGraph thread in the run's checkpoints: one thread per attempt.
-So a sub-workflow that fails is just this job failing (retry, on_item_error
-and `wf retry` all work as for any node), and a retry starts a fresh thread.
-The sub-workflow runs in a fresh contextvars.Context, so LangGraph doesn't
-take it for part of the parent's graph. When it pauses for a person, this job
-relays the questions with its own interrupt(); when the run continues, the
-answers go back down with Command(resume=...). Its progress events are passed
-up with the path in front: build[2]/implement.
+Workflow nodes (_workflow) run their sub-workflow with the same graph, as a separate LangGraph
+thread in the run's checkpoints: one thread per attempt. So a sub-workflow that fails is just this
+job failing: retry, on_item_error and `wf retry` all work as for any node. A retry starts a fresh
+thread. A new thread gets the sessions that the sub-workflow ended the node's last pass with, so
+a `session: continue` node in it continues its session. The sub-workflow runs in a fresh
+contextvars.Context, so LangGraph doesn't take it for part of the parent's graph. When it pauses
+for a person, this job relays the questions with its own interrupt(). When the run continues, the
+answers go back down with Command(resume=...). Its progress events are passed up with the path in
+front: build[2]/implement.
 """
 
 import asyncio
@@ -157,7 +157,7 @@ async def run_job(job: Job, ctx: RunContext, emit: Callable[[dict], None]) -> Fi
         elif node.kind == "human":
             output, attempts = _human(job, ctx, folder, variables), job["attempt"]
         else:
-            output, attempts = await _workflow(job, ctx, folder, variables, workspace, emit, usage)
+            output, attempts = await _workflow(job, ctx, folder, variables, workspace, emit, usage, extra)
     except GraphBubbleUp:
         ctx.trace.job_end(job, None)
         raise  # interrupt(): LangGraph pauses the run here
@@ -765,7 +765,8 @@ def _human(job: Job, ctx: RunContext, folder: Path, variables: dict) -> dict:
 # ---------- workflow nodes ----------
 
 
-async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, workspace: dict, emit, usage: Usage) -> tuple[dict, int]:
+async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, workspace: dict, emit, usage: Usage,
+                    extra: dict) -> tuple[dict, int]:
     from .graph import build  # graph.py imports this module
 
     node_id, wf = job["node"], ctx.workflow
@@ -800,12 +801,16 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
         # early (a question or a crash reruns the job before it reports anything)
         credited_file = child.run.dir / "credited.json"
         credited = json.loads(credited_file.read_text(encoding="utf-8")) if credited_file.exists() else {}
-        state = await _run_sub(build(child.saver), child, thread, {"input": inputs}, relay, label)
+        sessions = (job.get("session") or {}).get("sessions")  # those of the node's last pass, for session: continue
+        state = await _run_sub(build(child.saver), child, thread, {"input": inputs, **({"sessions": sessions} if sessions else {})},
+                               relay, label)
         values = state.values
         spent = values.get("usage") or {}
         usage.add(Usage(spent.get("tokens", 0) - credited.get("tokens", 0),
                         spent.get("cost_usd", 0.0) - credited.get("cost_usd", 0.0)))
         if values.get("status") == "succeeded":
+            if values.get("sessions"):
+                extra["session"] = {"sessions": values["sessions"]}  # for the node's next pass
             return values["output"]
         if values.get("status") == "limit":
             child.run.dir.mkdir(parents=True, exist_ok=True)

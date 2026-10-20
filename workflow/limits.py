@@ -15,7 +15,7 @@ run then carries on where it stopped: a step the limit kept from retrying gets
 its retry, and a sub-workflow the limit stopped continues its own steps.
 
 A follow-up (`wf continue <run-id> <request> --limit ...`) has a budget of its
-own: the file's limits, with its own --limit values on top, count only what
+own. The file's limits, with its own --limit values on top, count only what
 the run spends after the follow-up began (since(), spent()).
 
 This module is plain functions: parse() reads `--limit` arguments, effective()
@@ -67,8 +67,8 @@ def effective(file_limits: Limits, overrides: dict[str, Any]) -> Limits:
 
 
 def since(used: dict, elapsed_s: float, start: dict | None) -> tuple[dict, float]:
-    """What counts against the limits: the usage and running time after `start`, the run's totals
-    when its latest follow-up began (`wf continue`), or all of them before any follow-up."""
+    """What counts against the limits: the usage and running time after `start`. That is the run's
+    totals when its latest follow-up began (`wf continue`), or None before any follow-up."""
     if not start:
         return used, elapsed_s
     return ({"cost_usd": used.get("cost_usd", 0.0) - start["cost_usd"], "tokens": used.get("tokens", 0) - start["tokens"]},

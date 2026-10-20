@@ -32,7 +32,7 @@ step then weighs its mean time per pass in them. A step that none of them ran
 weighs the mean of the other steps. Each loop counts as many times as they
 went back on average. `left` is then in seconds: the time left.
 
-A follow-up (`wf continue`) starts a new lap from the nodes it names: the
+A follow-up (`wf continue`) starts a new lap from the nodes it names. The
 nodes those can lead to are ahead again, and each loop counts from zero.
 
 A step in progress counts in part: the share of its items that finished, or

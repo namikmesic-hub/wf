@@ -282,7 +282,7 @@ nodes:
   The other nodes keep their outputs, and `history` keeps every pass.
 - Each worktree of the run comes back on its branch.
   When a node that the follow-up reaches works in `repo`, the checkout must be on the run's branch.
-  A `session: continue` node continues its last session, but a node in a sub-workflow starts fresh.
+  A `session: continue` node continues its last session, also inside a sub-workflow.
 - Each route counts from zero again, so a fix loop gets its full `max` in each follow-up.
 - The limits count only the follow-up: the file's, with the `--limit` values of `wf continue` on top.
 - Only a run that succeeded takes a follow-up, and only when the workflow file had `follow_up` when the run started.

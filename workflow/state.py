@@ -13,10 +13,10 @@ replaces the old one) is right. `inbox` is different: in one step, every
 those lists instead of keeping only the last one. `schedule` reads the inbox
 and empties it by returning Overwrite([]), which bypasses the reducer.
 
-Progress is a working copy of RunState with the operations `schedule` needs: record() a finished
-job, starts_now() for the nodes whose needs are settled, retry() what failed, and follow_up() for a
-request from `wf continue`. It uses the pure rules in scheduler.py and evaluates `when` and `for_each`
-with templates.py. It does no I/O itself, so it's easy to follow (and to test) without LangGraph.
+Progress is a working copy of RunState with the operations that `schedule` needs. Its record() takes
+in a finished job, and its starts_now() starts the nodes whose needs are settled. Its retry() reruns
+what failed, and follow_up() takes in a request from `wf continue`. It uses the rules in scheduler.py, and
+evaluates `when` and `for_each` with templates.py. It does no I/O, so it's easy to test without LangGraph.
 Progress events go to `emit`. The run's trace (trace.Scope, when given) gets each pass, each route
 decision, and each `for_each` and `when` with what it read.
 """
@@ -41,7 +41,7 @@ class Job(TypedDict):
     item: Any
     attempt: int  # the number of its first attempt (after `wf retry`, numbering continues)
     vars: dict  # template variables, as they were when the node started
-    session: NotRequired[dict | None]  # session: continue: the session of the node's last pass
+    session: NotRequired[dict | None]  # the session of the node's last pass, or a workflow node's {sessions} of it
 
 
 class Finished(TypedDict):
@@ -57,7 +57,7 @@ class Finished(TypedDict):
     workspace: dict | None
     usage: dict  # {"cost_usd": float, "tokens": int}
     stopped: NotRequired[str]  # "limit": a limit stopped the job (a retry didn't start, or a sub-workflow paused)
-    session: NotRequired[dict]  # the agent session this pass ended in {harness, model, id, cost_usd, streak}
+    session: NotRequired[dict]  # the agent session this pass ended in {harness, model, id, cost_usd, streak}, or {sessions}
 
 
 class RunState(TypedDict, total=False):
@@ -217,8 +217,7 @@ class Progress:
         for node in self.topo.reachable(targets):
             self.s["outputs"].pop(node, None)
             self.s["errors"].pop(node, None)
-        for session in self.s["sessions"].values():
-            session["streak"] = 0  # the two continued passes in a row count from here
+        _fresh_streaks(self.s["sessions"])  # the two continued passes in a row count from here
         self.emit({"event": "follow_up", "number": given["number"], "to": targets})
         self._make_pending(targets)
 
@@ -307,7 +306,8 @@ class Progress:
     def _job(self, node: str, active: dict, index: int | None, item: Any, attempt: int = 1) -> Job:
         job = Job(node=node, pass_no=active["pass"], index=index, item=item, attempt=attempt, vars=active["vars"])
         spec_node = self.wf.nodes[node]
-        if spec_node.kind == "agent" and spec_node.for_each is None and self.wf.setting(node, "session") == "continue":
+        continues = spec_node.kind == "workflow" or (spec_node.kind == "agent" and self.wf.setting(node, "session") == "continue")
+        if continues and spec_node.for_each is None:  # a workflow node passes its sub-workflow's sessions on
             job["session"] = self.s["sessions"].get(node)
         return job
 
@@ -385,3 +385,12 @@ class Progress:
 def follow_up_variable(given: dict | None) -> dict | None:
     """The `follow_up` template variable: the latest request and its number, or none before the first one."""
     return {"request": given["request"], "number": given["number"]} if given else None
+
+
+def _fresh_streaks(sessions: dict) -> None:
+    """Count the continued passes in a row from zero again, also for the sessions of sub-workflows."""
+    for session in sessions.values():
+        if "sessions" in session:
+            _fresh_streaks(session["sessions"])
+        else:
+            session["streak"] = 0

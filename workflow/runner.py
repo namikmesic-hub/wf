@@ -681,14 +681,14 @@ def _parse(raw: str, field: dict):
 
 def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, as_json: bool = False,
               limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
-    """`wf continue`: give a run that succeeded a follow-up request, and drive it again from the nodes that its
+    """`wf continue`: give a run that succeeded a follow-up request. Then drive it again from the nodes that its
     workflow's `follow_up` names. `limit_pairs` (--limit) give the follow-up a budget of its own. With `detach`,
     check and prepare everything here, then let a background `wf retry` drive it.
 
     The run's lock is taken before anything is checked, and nothing changes until every check passed. Then the
     worktrees come back, status.json says the follow-up runs, and one write of the checkpoints holds the
-    request (graph.follow_up). From there the run is driven as `wf retry` drives it, so a `wf retry` after a
-    crash takes the follow-up in, or finds the run as it was."""
+    request (graph.follow_up). From there, `wf retry` drives the run as it drives any run. So after a crash,
+    `wf retry` takes the follow-up in, or finds the run as it was."""
     name = "wf continue"
     try:
         run = runs.find(Path.cwd(), run_id, runs_dir)
@@ -783,8 +783,8 @@ def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapsho
 
 
 def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | None:
-    """Why the follow-up can't work in the run's `repo` workspace, or None: a node that the follow-up can
-    reach works there, and that checkout is on another branch now than the one the run worked on."""
+    """Why the follow-up can't work in the run's `repo` workspace, or None. It can't when a node that the
+    follow-up can reach works there, and that checkout is now on another branch than the run's."""
     kinds = set()
     for node in scheduler.Topology.of(workflow).reachable(workflow.follow_up.targets):
         seen = set()
@@ -800,8 +800,8 @@ def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | N
 
 
 def _restore_worktrees(run: runs.Run, values: dict, home: dict, remake: bool) -> None:
-    """Bring back each worktree that the run had when it succeeded, on its branch, and as an empty folder each
-    temp folder that a node shares. A dry run deleted its branches too, so with `remake` a branch that is gone
+    """Bring back each worktree that the run had when it succeeded, on its branch. Make each temp folder that a
+    node shares again, empty. A dry run deleted its branches too, so with `remake` a branch that is gone
     starts again where the run left it. Raises WorkspaceError, after the worktrees go again."""
     own, temp = workspaces.root() / run.id, workspaces.temp_root(run.id).resolve()
     try:

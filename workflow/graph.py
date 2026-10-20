@@ -25,10 +25,10 @@ four nodes, and the workflow's own graph lives in the state:
   stopped: see nodes._run_sub.)
 - finish computes end.output.
 
-`wf continue` gives a run that reached END a follow-up request: it writes the
+`wf continue` gives a run that reached END a follow-up request. It writes the
 request into the state as an input of the graph, so the run's next step is
-schedule again. schedule takes it in (state.Progress.follow_up) and starts the
-nodes that the workflow's `follow_up` names.
+schedule again. That step takes it in (state.Progress.follow_up), and starts
+the nodes that the workflow's `follow_up` names.
 
 LangGraph runs in steps ("supersteps"): every task started in a step finishes
 before the next step begins. So schedule runs once per step, after all of that
@@ -151,8 +151,8 @@ async def finish(state: RunState, runtime: Runtime[RunContext]) -> dict:
 
 
 async def follow_up(compiled, config: dict, given: dict) -> None:
-    """Give a run that reached END a follow-up request ({request, number, limits, pending}), as an input of
-    its graph, in one write: its next step is schedule."""
+    """Give a run that reached END a follow-up request ({request, number, limits, pending}) in one write.
+    The request is an input of the graph, so the next step is schedule."""
     await compiled.aupdate_state(config, {"follow_up": given}, as_node=GRAPH_START)
 
 

@@ -1,7 +1,7 @@
 """Diagram: a workflow as a Mermaid flowchart, for `wf graph`, and as rows of boxes, for `wf ui`.
 
-Solid arrows are `needs` edges; dotted arrows are routes, labelled with their
-`when` and `max`, and the way in of a `follow_up` request. Shapes show the kind of node:
+Solid arrows are `needs` edges. Dotted arrows are routes, labelled with their `when` and `max`,
+and the way in of a `follow_up` request. Shapes show the kind of node:
 
     ("agent")   [/"command"/]   {{"human"}}   [["workflow"]]
 

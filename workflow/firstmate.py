@@ -32,9 +32,9 @@ first mate answers a waiting run itself, with `wf answer` (see the wf skill in
 integrations/firstmate/).
 
 `wf continue` gives a run that succeeded a follow-up: a new pass of the same
-run folder. The first mate registers it as a new source, and each state of
-the follow-up carries its number (`follow_up`), so that pass reports and
-retires as a run does.
+run folder. The first mate registers it as a new source. Each state of the
+follow-up carries its number (`follow_up`), so that pass reports and retires
+as a run does.
 """
 
 import json
