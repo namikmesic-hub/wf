@@ -7,6 +7,8 @@ route counters and a budget of its own.
 
 import io
 import json
+import random
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -632,8 +634,11 @@ def test_a_template_reads_follow_up_only_in_a_workflow_that_has_it_and_checks_it
 
 
 def test_a_template_that_reads_a_node_a_follow_up_clears_gets_a_warning(repo):
-    found = problems(REVIEW.replace("follow_up: {to: implement}", "follow_up: {to: review}"))
+    at_review = REVIEW.replace("follow_up: {to: implement}", "follow_up: {to: review}")
     why = "might not have run yet in a follow-up, which clears the outputs of the nodes that `follow_up.to` can lead to"
+    # The route back to implement has no `when`, so the follow-up takes it once, and tests runs again before the end
+    assert [p.split(":", 2)[1].strip() for p in problems(at_review) if why in p] == ["nodes.review.command"]
+    found = problems(at_review.replace("{to: implement, max: 1}", '{when: "review.exit_code != 0", to: implement, max: 1}'))
     assert [p.split(":", 2)[1].strip() for p in found if why in p] == ["nodes.review.command", "end.output.passed.value"]
 
 
@@ -844,6 +849,90 @@ def test_a_node_that_an_entry_leads_to_isnt_run_before_a_join_that_the_scheduler
                          "error": None, "attempts": 1, "workspace": None, "usage": {}})
     (join,) = progress.starts_now(0.0)
     assert join["node"] == "join" and join["vars"]["x"] is None
+
+
+def test_a_node_that_a_join_waits_for_runs_first_when_both_become_pending_together(repo, capsys):
+    write("siblings.yaml", """
+        version: 1
+        name: siblings
+        start: {input: {}}
+        follow_up: {to: a}
+        nodes:
+          a: {needs: [start], command: "echo A{% if follow_up %}{{ follow_up.number }}{% endif %}"}
+          x: {needs: [a, c], command: "echo X"}
+          join: {needs: [a, x], command: "echo {{ x.stdout | trim | quote }}", routes: [{to: c, max: 1}, {to: end}]}
+          c: {needs: [start], command: "echo C"}
+        end: {output: {said: {type: string, value: "{{ join.stdout | trim }}"}}}
+    """)
+    # a makes x and join pending at once, in file order. Both wait, so the scheduler starts x, the first
+    assert [str(p) for p in validate.check("siblings.yaml").problems] == []
+    assert cli.main(["run", "siblings.yaml"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "more"]) == 0
+    assert run.output() == {"said": "X"}
+
+
+def test_each_read_that_validate_doesnt_warn_about_finds_an_output_however_a_follow_up_runs(repo, monkeypatch):
+    rng = random.Random(20261020)
+    monkeypatch.setattr(state.templates, "watched", lambda evaluate, when, variables: (rng.random() < 0.5, set()))
+    monkeypatch.setattr(state.Progress, "_for_each", lambda self, node, pass_no, expression, variables: [0] * rng.randint(0, 1))
+    checked = 0
+    while checked < 150:
+        text = random_workflow(rng)
+        write("check.yaml", text)
+        found = validate.check("check.yaml").problems
+        if any(p.level == "error" for p in found):
+            continue
+        warned = {(m[1], m[2]) for p in found if (m := re.match(r"nodes\.(\w+)\.command: reads `(\w+)\.stdout`", f"{p.where}: {p.message}"))}
+        workflow = spec.load("check.yaml")
+        progress = state.Progress({}, workflow, scheduler.Topology.of(workflow), lambda event: None)
+        progress.begin({}, {"id": "x", "dir": "x", "base": None, "branch": None, "repo": "."})
+        drive(progress, rng)
+        for number in (1, 2):  # a run that succeeded, and its follow-ups
+            progress.s["status"], progress.s["follow_up"] = "succeeded", {"request": "more", "number": number, "limits": {}, "pending": True}
+            progress.follow_up(0.0)
+            for job in drive(progress, rng):
+                unread = [t for t in workflow.nodes if t != job["node"] and (job["node"], t) not in warned and job["vars"][t] is None]
+                assert not unread, (text, job["node"], unread)
+        checked += 1
+
+
+def random_workflow(rng: random.Random) -> str:
+    """A workflow of a few nodes with random needs, routes and lists, each command reading every other node."""
+    names = [f"n{i}" for i in range(rng.randint(3, 6))]
+    routed = {n for n in names if rng.random() < 0.35}
+    lines = []
+    for name in rng.sample(names, len(names)):
+        others = [n for n in names if n != name and n not in routed]  # a node with routes can't be needed
+        needs = rng.sample(others, k=min(len(others), rng.choice([0, 1, 1, 2])))
+        reads = " ".join(f"{{{{ {n}.stdout | quote }}}}" for n in names if n != name)
+        node = f"needs: [{', '.join(needs or ['start'])}], command: \"echo {reads}\""
+        if rng.random() < 0.2:
+            node += ", for_each: '[0]'"
+        if name in routed:
+            routes = [f"{{to: {rng.choice([n for n in names if n != name] + ['end'])}, "
+                      + rng.choice(["max: 1}", "when: 'true'}"]) for _ in range(rng.choice([1, 2]))]
+            node += f", routes: [{', '.join(routes)}, {{to: {rng.choice(names + ['end'])}}}]"
+        lines.append(f"  {name}: {{{node}}}")
+    return ("version: 1\nname: random\nstart: {input: {}}\n"
+            f"follow_up: {{to: [{', '.join(rng.sample(names, rng.choice([1, 2])))}]}}\nnodes:\n" + "\n".join(lines) + "\nend: {output: {}}\n")
+
+
+def drive(progress: state.Progress, rng: random.Random) -> list[dict]:
+    """Run the pass as graph.schedule does: each step records its jobs' results in order. A job fails at
+    random, and `wf retry` runs it again before the new jobs. Returns the jobs that started."""
+    started = jobs = progress.starts_now(0.0)
+    for _ in range(200):  # a loop without max may go on for long
+        if not jobs:
+            break
+        for job in jobs:
+            ok = rng.random() < 0.8
+            progress.record({"node": job["node"], "pass_no": job["pass_no"], "index": job["index"], "ok": ok,
+                             "output": {"stdout": ""} if ok else None, "error": None if ok else "failed", "attempts": 1,
+                             "workspace": None, "usage": {}})
+        jobs = (progress.retry() if progress.stopped else []) + progress.starts_now(0.0)
+        started = started + jobs
+    return started
 
 
 def following_up() -> state.Progress:

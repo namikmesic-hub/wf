@@ -29,7 +29,7 @@ import itertools
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from . import harnesses, schemas, spec, templates
+from . import harnesses, scheduler, schemas, spec, templates
 from .scheduler import END, START, Topology
 from .schemas import ANY, EACH, NoField
 from .spec import HARNESSES, NODE_ID, RESERVED, Problem, SpecError, Workflow
@@ -911,13 +911,13 @@ class _Order:
                     todo.append(prev)
         return seen
 
-    def _certain(self, known: set[str], excluding: str | None, among: set[str] | None = None) -> set[str]:
-        """`known` plus every node of `among` they're certain to make pending (a needs edge, or all of a node's routes)."""
+    def _certain(self, known: set[str], excluding: str | None) -> set[str]:
+        """`known` plus every node they're certain to make pending (a needs edge, or all of a node's routes)."""
         done, changed = set(known), True
         while changed:
             changed = False
             for node in self.topo.order:
-                if node in done or node == excluding or (among is not None and node not in among):
+                if node in done or node == excluding:
                     continue
                 by_needs = any(need in done for need in self.topo.needs[node])
                 by_routes = any(s in done and all(node in r.targets for r in self.topo.routes[s]) for s in self.route_sources[node])
@@ -1070,7 +1070,8 @@ class _FollowUps:
                 checker.error("follow_up.to", f"unknown node `{target}`{_hint(target, checker.nodes)}")
         if not all(t in checker.nodes for t in targets):
             return
-        self.order = _FollowUpOrder(checker.topo, targets, frozenset(order.at_end()))
+        lists = frozenset(n for n, node in checker.wf.nodes.items() if node.for_each is not None)
+        self.order = _FollowUpOrder(checker.topo, targets, frozenset(order.at_end()), lists)
         if not any(_reads_follow_up(checker.wf, node) for node in self.order.ahead):
             checker.warn("follow_up", "no node that a follow-up runs again reads `follow_up`, so its request reaches "
                                       "no node; put {{ follow_up.request }} in the instruction of a node that "
@@ -1109,50 +1110,146 @@ def _reads_follow_up(workflow: Workflow, node_id: str) -> bool:
 class _FollowUpOrder(_Order):
     """_Order for a follow-up, which starts at the nodes in `entry` instead of at start. The nodes they can
     lead to (`ahead`) run again from none. Of the others, only `kept`, the nodes certain to have run by the
-    end of the run, count as finished. The entry nodes all start pending, so each one runs. See first()
-    for when a node finishes before another starts."""
+    end of the run, count as finished. Which nodes of `ahead` have finished at a point comes from stepping
+    the scheduler through the follow-up (_follow_up_steps). The nodes in `lists` have `for_each`."""
 
-    def __init__(self, topo: Topology, entry: tuple[str, ...], kept: frozenset[str]):
+    def __init__(self, topo: Topology, entry: tuple[str, ...], kept: frozenset[str], lists: frozenset[str]):
         super().__init__(topo)
         self.entry, self.ahead = set(entry), topo.reachable(entry)
         self.kept = kept - self.ahead
-        self.position = {n: i for i, n in enumerate(topo.order)}
         triggers = {n: (set(topo.needs[n]) | set(self.route_sources[n])) & self.ahead for n in topo.order}
         for node in self.entry:
             triggers[node].add(START)
         triggers[END] = {n for n in self.ahead
                          if any(END in r.targets for r in topo.routes[n]) or not (topo.routes[n] or topo.dependents.get(n))}
         self.dominators = _dominators([START, *topo.order, END], triggers, self.ahead | {START, END})
-        # node -> the nodes it waits for while they're pending or running: they lead to a need (scheduler.settled)
-        self.waits = {n: {o for o in self.ahead - {n} if (set(topo.needs[n]) - {START}) & topo.reachable([o], avoiding=n)}
-                      for n in self.ahead}
-        self.stuck = _stuck(self.waits)
+        self.stepped = _follow_up_steps(topo, entry, lists)  # None: too many ways to step through
 
     def before(self, node: str) -> set[str]:
         if node not in self._before:
-            earlier = {other for other in self.waits.get(node, ()) if self.first(other, node)}
-            known = (self.dominators[node] - {node, START}) | (self.entry & earlier)  # a follow-up's start ended long ago
-            self._before[node] = self._certain(known, excluding=node, among=earlier) | self.kept
+            if self.stepped is None:
+                found = self.dominators[node] - {node, START}  # a follow-up's start ended long ago
+            else:
+                found = self.stepped.started.get(node, frozenset(self.topo.order))  # a node that never starts reads nothing
+            self._before[node] = set(found) | self.kept
         return self._before[node]
 
-    def first(self, other: str, node: str) -> bool:
-        """Does `other`, once it is pending, finish before `node` starts? `node` must wait for it. When every
-        pending node waits, the first one starts (scheduler.starts). That starts `node` before `other` only
-        when both are `stuck` and `node` is pending first. The entries are pending first, in file order."""
-        if other not in self.waits.get(node, ()):
-            return False
-        if node not in self.stuck or other not in self.stuck:
-            return True
-        return other in self.entry and (node not in self.entry or self.position[other] < self.position[node])
-
     def at_end(self) -> set[str]:
-        return self._certain((self.dominators[END] - {END, START}) | self.entry, excluding=None) | self.kept
+        if self.stepped is None:
+            return self._certain((self.dominators[END] - {END, START}) | self.entry, excluding=None) | self.kept
+        return set(self.stepped.ended) | self.kept
 
 
-def _stuck(waits: dict[str, set[str]]) -> set[str]:
-    """The nodes that can be pending while every pending node waits (scheduler.starts). Each of them waits
-    for another one, so their waits lead into a cycle. `waits`: node -> the nodes it waits for."""
-    stuck = set(waits)
-    while free := {n for n in stuck if not waits[n] & stuck}:
-        stuck -= free
-    return stuck
+@dataclass(frozen=True)
+class _Stepped:
+    started: dict[str, frozenset[str]]  # node -> the nodes that finished in the follow-up before each of its starts
+    ended: frozenset[str]  # the nodes that finished in the follow-up before each end of it
+
+
+_STEPS_MOST = 100_000
+
+
+class _TooMany(Exception):
+    """Stepping through the follow-up doesn't end: empty lists lead to each other without end."""
+
+
+def _follow_up_steps(topo: Topology, entry: tuple[str, ...], lists: frozenset[str]) -> _Stepped | None:
+    """Step the scheduler through a follow-up in each way it can go, as graph.schedule and state.Progress do.
+    None when that takes more than _STEPS_MOST steps, as with more than about ten nodes that run at once.
+
+    A step records the results of the jobs that the step before started, in their order. Then it starts
+    what can start (Progress.starts_now). A job can also fail or stop at a limit. Then `wf retry` runs it
+    again, before the new jobs (Progress.retry). So each step finishes some of the running nodes, and the
+    others go on. A route can be taken while its `max` isn't used up. A `for_each` list can be empty, and
+    then its node finishes as it starts.
+
+    A state is (pending, running, taken), as the scheduler sees it. The nodes that finished on every way to
+    a state are found again for each new way, until they don't change."""
+    first = (tuple(scheduler.add_pending(topo, [], entry)), (), frozenset())
+    ways: dict[tuple, list] = {}  # state -> its steps: what finished and started in order, and the state after
+    finished = {first: frozenset()}  # state -> the nodes that finished on every way to it
+    todo, count = [first], 0
+    try:
+        while todo:
+            state = todo.pop()
+            if state not in ways:
+                ways[state] = list(_steps(topo, lists, *state))
+                count += len(ways[state])
+                if count > _STEPS_MOST:
+                    return None
+            for events, after in ways[state]:
+                new = finished[state] | {node for kind, node in events if kind == "finished"}
+                if after not in finished or not finished[after] <= new:
+                    finished[after] = new if after not in finished else finished[after] & new
+                    todo.append(after)
+    except _TooMany:
+        return None
+    started: dict[str, frozenset[str]] = {}
+    ended = None
+    for state, steps in ways.items():
+        if not state[0] and not state[1]:
+            ended = finished[state] if ended is None else ended & finished[state]
+        for events, _ in steps:
+            done = set(finished[state])
+            for kind, node in events:
+                if kind == "finished":
+                    done.add(node)
+                else:
+                    started[node] = started[node] & done if node in started else frozenset(done)
+    return _Stepped(started, ended or frozenset())
+
+
+def _steps(topo: Topology, lists: frozenset[str], pending: tuple, running: tuple, taken: frozenset):
+    """Each way one step can go: [("finished" or "started", node), ...] in order, and the state after."""
+    if not pending and not running:
+        return
+    finishing = [()] if not running else [
+        done for size in range(1, len(running) + 1) for done in itertools.combinations(running, size)]
+    for done in finishing:
+        going_on = [n for n in running if n not in done]
+        for events, now_pending, now_taken in _finishing(topo, list(pending), dict(taken), done):
+            yield from _starting(topo, lists, now_pending, going_on, now_taken, events, [])
+
+
+def _finishing(topo: Topology, pending: list[str], taken: dict, nodes: tuple, events: tuple = ()):
+    """Each way `nodes` can finish in turn (Progress.record): what happened, the pending nodes, the routes taken."""
+    if not nodes:
+        yield list(events), pending, taken
+        return
+    for now_pending, now_taken in _finish(topo, nodes[0], pending, taken):
+        yield from _finishing(topo, now_pending, now_taken, nodes[1:], (*events, ("finished", nodes[0])))
+
+
+def _finish(topo: Topology, node: str, pending: list[str], taken: dict):
+    """Each way `node` can finish (Progress._complete): with each route it can take, when it has routes."""
+    routes = topo.routes.get(node)
+    if not routes:
+        yield scheduler.add_pending(topo, pending, scheduler.triggered(topo, node, None)), taken
+        return
+    for index, route in enumerate(routes):
+        count = taken.get((node, index), 0)
+        if scheduler.used_up(route, count):
+            continue
+        yield (scheduler.add_pending(topo, pending, scheduler.triggered(topo, node, index)),
+               {**taken, (node, index): count + 1} if route.max is not None else taken)
+        if route.when is None:  # the routes after it are never checked
+            return
+
+
+def _starting(topo: Topology, lists: frozenset[str], pending: list[str], running: list[str], taken: dict,
+              events: list, ready: list[str]):
+    """Progress.starts_now: start the nodes that scheduler.starts gives, and ask again until it gives none."""
+    if len(events) > 50 * len(topo.order):
+        raise _TooMany
+    if not ready:
+        ready = scheduler.starts(topo, pending, running)
+        if not ready:
+            yield events, (tuple(pending), tuple(running), frozenset(taken.items()))
+            return
+    node, rest = ready[0], ready[1:]
+    pending = [n for n in pending if n != node]
+    events = [*events, ("started", node)]
+    yield from _starting(topo, lists, pending, [*running, node], taken, events, rest)
+    if node in lists:  # an empty list: the node finishes as it starts
+        for now_pending, now_taken in _finish(topo, node, pending, taken):
+            yield from _starting(topo, lists, now_pending, running, now_taken, [*events, ("finished", node)], rest)
