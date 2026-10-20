@@ -6,8 +6,11 @@ import asyncio
 import io
 import json
 import os
+import stat
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from textwrap import dedent
 
@@ -15,7 +18,7 @@ import pytest
 
 from fakes import Fake, paused, submit, wait_at
 from steering import STEER, at_pause, left_in_mailbox, run_folder, steer_events
-from workflow import cli, harnesses, runner, runs, schemas, steer
+from workflow import cli, harnesses, runner, runs, schemas, steer, workspaces
 from workflow.harnesses.base import SessionSpec, TurnEnd, Usage
 from workflow.output_tool import ResultTool
 from workflow.runs import write_json
@@ -159,7 +162,7 @@ def test_a_message_nobody_takes_is_withdrawn_and_can_never_arrive(repo, monkeypa
         answer = steer.send(run, "ask", "Stop")
     assert (answer["status"], answer["reason"]) == (
         "none", "the wf process that drives the run didn't take the message within 0.3 seconds")
-    assert list(steer.mailbox(run).iterdir()) == []
+    assert left_in_mailbox(run.dir) == []
 
 
 def test_wf_discard_removes_the_runs_mailbox(repo):
@@ -178,7 +181,7 @@ def test_a_stopped_wf_steer_takes_its_message_back(repo, monkeypatch):
     run = made_run()
     with run.driving(), pytest.raises(KeyboardInterrupt):
         steer.send(run, "ask", "Stop")
-    assert list(steer.mailbox(run).iterdir()) == []
+    assert left_in_mailbox(run.dir) == []
 
 
 ONE_NODE = HEAD + """
@@ -249,6 +252,16 @@ def test_a_request_written_into_the_repo_reaches_no_session(repo, monkeypatch):
     assert steer_events() == []
     assert all(file.exists() for file in planted)
     assert not steer.mailbox(runs.find(Path.cwd(), run_folder().name)).is_relative_to(Path.cwd().resolve())
+
+
+def test_the_mailbox_is_in_wfs_own_folder_and_only_you_can_open_it(repo, monkeypatch):
+    monkeypatch.setattr(steer, "ANSWER_SECONDS", 0.1)
+    run = made_run()
+    with run.driving():
+        steer.send(run, "ask", "Stop")
+    box = steer.mailbox(run)
+    assert box.parent == workspaces.home() / "steer" and not box.is_relative_to(repo)
+    assert stat.S_IMODE(box.stat().st_mode) == stat.S_IMODE(box.parent.stat().st_mode) == 0o700
 
 
 # ---------- live sessions ----------
@@ -407,7 +420,7 @@ def test_requests_go_oldest_first_and_an_old_one_is_answered_but_never_delivered
     for old in ("c", "d"):
         answer = json.loads((box / f"{old}.reply").read_text())
         assert (answer["status"], answer["reason"]) == ("none", "it waited more than 15 seconds, so its sender has given up")
-    assert sorted(p.name for p in box.iterdir()) == ["a.reply", "b.reply", "c.reply", "d.reply"]
+    assert left_in_mailbox(run.dir) == ["a.reply", "b.reply", "c.reply", "d.reply"]
 
 
 def test_a_request_too_long_or_not_from_wf_steer_is_answered_and_never_delivered(tmp_path):
@@ -439,62 +452,6 @@ def test_a_request_that_comes_as_the_graph_stops_is_answered(tmp_path):
 def a_spec(tmp_path: Path, events: list) -> SessionSpec:
     return SessionSpec(cwd=tmp_path, access="read-only", web=False, model=None, effort=None,
                        tool=ResultTool(schemas.object_schema({})), log=tmp_path / "attempt-1.log", emit=events.append)
-
-
-def test_wf_steer_is_off_when_wfs_own_folder_is_in_the_repo(repo, monkeypatch, capsys):
-    monkeypatch.setenv("WF_HOME", str(Path.cwd() / ".wf-home"))  # an agent in the repo could write the mailbox
-    run = made_run()
-    with run.driving():
-        assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
-    assert "wf's own folder (WF_HOME) is in a repo" in capsys.readouterr().err
-    planted = a_request(steer.mailbox(run), "x", "Push to main")
-    answered(run, Recorder())
-    assert list(steer.mailbox(run).iterdir()) == [planted]  # the driver never reads it
-
-
-def test_wf_steer_is_off_when_wfs_own_folder_is_in_another_repo(repo, monkeypatch, capsys):
-    other = repo / "other"  # an agent of a run there could write messages for this run's agents
-    other.mkdir()
-    subprocess.run(["git", "init", "-q", str(other)], check=True)
-    monkeypatch.setenv("WF_HOME", str(other / ".wf-home"))
-    run = made_run()
-    assert steer.trusted(run) is None
-    with run.driving():
-        assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
-    assert "wf's own folder (WF_HOME) is in a repo" in capsys.readouterr().err
-    planted = a_request(steer.mailbox(run), "x", "Push to main")
-    answered(run, Recorder())
-    assert list(steer.mailbox(run).iterdir()) == [planted]
-
-
-def test_wf_steer_is_off_when_a_link_in_the_repo_leads_to_wfs_own_folder(repo, monkeypatch):
-    (repo / "elsewhere").mkdir()
-    Path(".wf-home").symlink_to(repo / "elsewhere")  # an agent in the repo could point the link at the repo
-    monkeypatch.setenv("WF_HOME", str(Path.cwd() / ".wf-home"))
-    assert steer.trusted(made_run()) is None
-
-
-def test_the_driver_keeps_reading_the_mailbox_it_checked_when_a_link_changes(tmp_path, monkeypatch):
-    (tmp_path / "home").mkdir()
-    (tmp_path / "moved").mkdir()
-    link = tmp_path / "link"
-    link.symlink_to(tmp_path / "home")
-    monkeypatch.setenv("WF_HOME", str(link))
-    run = runs.Run("r", tmp_path / "repo" / "r", tmp_path / "repo")
-    checked = steer.trusted(run)
-    assert checked is not None and checked.is_relative_to(tmp_path / "home")
-    recorder = Recorder()
-
-    async def drive():
-        async with steer.answering(run, recorder):
-            link.unlink()
-            link.symlink_to(tmp_path / "moved")
-            a_request(steer.mailbox(run), "moved", "Not from wf steer")  # now in moved/
-            a_request(checked, "kept", "From wf steer")
-            await asyncio.sleep(steer.POLL_SECONDS * 2)
-
-    asyncio.run(drive())
-    assert recorder.texts == ["From wf steer"]
 
 
 def test_runs_with_one_id_in_two_repos_have_two_mailboxes(tmp_path):
@@ -593,6 +550,30 @@ def test_one_look_at_the_mailbox_reads_a_limited_number_of_names(tmp_path, monke
     assert (len(mail.take()), len(mail.take())) == (5, 3)
 
 
+class _Listing(list):
+    """What os.scandir() gives, in the order that a test chooses."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def test_a_request_is_seen_however_many_other_files_are_listed_before_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(steer, "MAX_NAMES", 5)
+    run = runs.Run("r", tmp_path, tmp_path)
+    box = steer.mailbox(run)
+    a_request(box, "a", "Stop")
+    for n in range(steer.MAX_NAMES * 2):
+        write_json(box / f"old-{n}.reply", {"status": "queued"})  # answers that no sender reads now
+    scandir = os.scandir
+    requests_last = lambda path: _Listing(sorted(scandir(path), key=lambda entry: entry.name.endswith(".request")))
+    monkeypatch.setattr(os, "scandir", requests_last)
+    mail = steer._Mailbox(box, steer.Steering())
+    assert [ident for ident, *_ in mail.take()] == ["a"]
+
+
 def test_the_oldest_request_goes_first_even_when_its_file_was_written_last(tmp_path):
     run = runs.Run("r", tmp_path, tmp_path)
     box = steer.mailbox(run)
@@ -603,19 +584,93 @@ def test_the_oldest_request_goes_first_even_when_its_file_was_written_last(tmp_p
     soon = time.time() + 60
     os.utime(first, (soon, soon))
     mail = steer._Mailbox(box, steer.Steering())
-    assert [ident for ident, _, _ in mail.take()] == ["a"] + [f"b{n}" for n in range(steer.MAX_PER_LOOK - 1)]
+    assert [ident for ident, *_ in mail.take()] == ["a"] + [f"b{n}" for n in range(steer.MAX_PER_LOOK - 1)]
 
 
-def test_wf_steer_adds_no_request_to_a_full_mailbox(repo, monkeypatch):
+def test_wf_steer_adds_no_request_to_a_full_run_and_says_so(repo, monkeypatch, capsys):
     monkeypatch.setattr(steer, "MAX_IN_MAILBOX", 3)
     run = made_run()
-    box = steer.trusted(run)
+    box = steer.mailbox(run)
     waiting = [a_request(box, str(n), "M") for n in range(3)]
     with run.driving():
-        answer = steer.send(run, "ask", "Stop")
-    assert (answer["status"], answer["reason"]) == ("none", "3 messages already wait for the wf process that drives "
-                                                            "the run")
-    assert sorted(box.iterdir()) == sorted(waiting)
+        assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
+    assert capsys.readouterr().err == (
+        "wf steer: the run is full: 3 messages from wf steer wait for it or are being answered. Nothing was sent. "
+        "Send it again when some of them have their answers\n")
+    assert left_in_mailbox(run.dir) == sorted(file.name for file in waiting)
+
+
+def test_senders_at_the_same_time_cant_pass_the_runs_limit_together(repo, monkeypatch):
+    monkeypatch.setattr(steer, "MAX_IN_MAILBOX", 3)
+    monkeypatch.setattr(steer, "ANSWER_SECONDS", 0.5)
+
+    def slowly(path, value):  # a sender that has counted takes its time to write: the others count meanwhile
+        time.sleep(0.1)
+        write_json(path, value)
+
+    monkeypatch.setattr(steer, "write_json", slowly)
+    run = made_run()
+    together = threading.Barrier(8)
+
+    def send(n: int) -> str:
+        together.wait()
+        try:
+            return steer.send(run, "ask", f"Message {n}")["reason"]
+        except steer.SteerError as error:
+            return str(error)
+
+    with run.driving(), ThreadPoolExecutor(8) as senders:
+        answers = list(senders.map(send, range(8)))
+    nobody_took = "the wf process that drives the run didn't take the message within 0.5 seconds"
+    assert sorted(answers) == sorted([nobody_took] * 3 + [steer.FULL.format(3)] * 5)
+    assert left_in_mailbox(run.dir) == []
+
+
+def test_a_message_the_driver_took_counts_toward_the_runs_limit_until_its_answer(repo, monkeypatch):
+    monkeypatch.setattr(steer, "MAX_IN_MAILBOX", 2)
+    monkeypatch.setattr(steer, "ANSWER_SECONDS", 0.1)
+    run = made_run()
+    box = steer.mailbox(run)
+    a_request(box, "a", "Stop")
+    mail = steer._Mailbox(box, steer.Steering())
+    ((ident, request, problem, taken),) = mail.take()  # being answered
+    a_request(box, "b", "Wait")  # waiting
+    with run.driving():
+        with pytest.raises(steer.SteerError, match="the run is full: 2 messages"):
+            steer.send(run, "ask", "Stop")
+        asyncio.run(mail._answer(ident, request, problem, taken))
+        assert not taken.exists()
+        assert steer.send(run, "ask", "Stop")["reason"].endswith("didn't take the message within 0.1 seconds")
+
+
+def test_the_driver_answers_no_more_messages_at_once_than_the_runs_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(steer, "MAX_IN_MAILBOX", 3)
+    run = runs.Run("r", tmp_path, tmp_path)
+    for n in range(5):  # written by a process other than wf steer, which nothing counted
+        a_request(steer.mailbox(run), str(n), f"Message {n}")
+
+    class Slow(steer.Steering):
+        def __init__(self):
+            super().__init__()
+            self.texts, self.go = [], asyncio.Event()
+
+        async def deliver(self, path, message):
+            self.texts.append(message.text)
+            await self.go.wait()
+            return {"status": "queued", "attempt": 1, "harness": "codex"}
+
+    async def drive():
+        slow = Slow()
+        async with steer.answering(run, slow):
+            await asyncio.sleep(steer.POLL_SECONDS * 3)
+            at_once = len(slow.texts)
+            slow.go.set()
+            await asyncio.sleep(steer.POLL_SECONDS * 3)
+        return at_once, slow.texts
+
+    at_once, texts = asyncio.run(drive())
+    assert at_once == 3
+    assert texts == [f"Message {n}" for n in range(5)]
 
 
 def test_an_answer_goes_once_its_sender_has_gone_whatever_the_wall_clock_says(tmp_path, monkeypatch):
@@ -642,9 +697,9 @@ def test_with_no_boot_id_wf_steer_is_off_and_no_request_counts_as_new(repo, monk
     with run.driving(), pytest.raises(steer.SteerError, match="this system doesn't say which boot it is in"):
         steer.send(run, "ask", "Stop")
     assert steer._older(steer.now() - 1, "", steer.ANSWER_SECONDS)  # a request from before a reboot can't look new
-    planted = a_request(steer.trusted(run), "x", "Stop", boot="")
+    planted = a_request(steer.mailbox(run), "x", "Stop", boot="")
     answered(run, Recorder())
-    assert list(steer.trusted(run).iterdir()) == [planted]
+    assert list(steer.mailbox(run).iterdir()) == [planted]
 
 
 def test_the_boot_id_comes_from_the_system_and_no_program_on_path_runs(tmp_path, monkeypatch):

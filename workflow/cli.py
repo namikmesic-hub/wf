@@ -180,7 +180,12 @@ def main(argv: list[str] | None = None) -> int:
     page.add_argument("--runs-dir", **runs_dir)
     page.set_defaults(handler=_ui)
 
-    steering = commands.add_parser("steer", help="send a message into the live agent session of a running node")
+    steering = commands.add_parser(
+        "steer", help="send a message into the live agent session of a running node",
+        description="Send a message into the live agent session of a running node. wf steer trusts your user "
+                    "account, as every wf command does: any process that runs as you can steer a run. That includes "
+                    "an agent that can run commands as you: on Claude Code and Cursor with edit or full access, and "
+                    "on Codex with full access.")
     steering.add_argument("run_id", metavar="run-id")
     steering.add_argument("node", help="an agent node, as events name it: implement, or build[1]/implement in a sub-workflow")
     steering.add_argument("message", nargs="?", help="what to tell the agent (or use --file)")

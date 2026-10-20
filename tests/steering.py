@@ -62,7 +62,8 @@ def steer_lines(node: str = "ask", attempt: int = 1) -> list[dict]:
     return [line for line in map(json.loads, log.read_text().splitlines()) if line["kind"] == "steer"]
 
 
-def left_in_mailbox() -> list[str]:
-    """Files left in the run's mailbox (steer.mailbox): none, once every message has its answer."""
-    folder = workspaces.mailbox(run_folder())
-    return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+def left_in_mailbox(run_dir: Path | None = None) -> list[str]:
+    """Files left in the run's mailbox (steer.mailbox), but its lock: none, once every message has
+    its answer. The run in the repo, unless `run_dir` names another."""
+    folder = workspaces.mailbox(run_dir or run_folder())
+    return sorted(p.name for p in folder.iterdir() if p.name != "lock") if folder.is_dir() else []

@@ -33,29 +33,29 @@ a Steering (RunContext.steering), by the path that events and dry-run scripts
 use: implement, review[2], build[1]/implement.
 
 The way in is files, as between all wf processes (status.json, the run's lock,
-the agent slots). They are in ~/.wf/steer/<run-id>-<hash> (mailbox()), not in
-the run folder. A run folder in the repo is inside the workspace of a `repo`
-agent. An agent that writes only in its workspace mustn't be able to send
-messages to the others. So `wf steer` is off (trusted()) when the mailbox is in
-the run's repo or in any git work tree, where the agents of some run work. That
-is so for the path as WF_HOME names it, and for the path that its links resolve
-to. Both processes then use the resolved path, so a link that changes later
-can't move the mailbox. An agent whose commands run as you without a sandbox
-can run `wf steer` itself, as it can run any command of yours.
+the agent slots). They are in ~/.wf/steer/<run-id>-<hash> (mailbox()), outside
+the run folder and every repo, in a folder that only you can open. `wf steer`
+trusts your user account, as every wf command does: any process that runs as
+you can steer a run. That includes an agent that can run commands as you: on
+Claude Code and Cursor with edit or full access, and on Codex with full access.
 
 `wf steer` (send) writes <sent>-<id>.request there, with the time it sent the
-message in the name. It adds none when MAX_IN_MAILBOX requests wait already.
-While the graph streams, the driver (answering) looks every POLL_SECONDS. It
-reads at most MAX_NAMES names, and takes the MAX_PER_LOOK oldest requests by
-renaming them. It hands each message to its session, and answers in <id>.reply.
+message in the name. A run takes at most MAX_IN_MAILBOX messages at once: those
+that wait in its mailbox, and those that the driver has taken and not answered
+yet. `wf steer` counts them and adds its own while it holds the mailbox's lock,
+so senders at the same time can't pass the limit together. When the run is full,
+it adds none. While the graph streams, the driver (answering) looks every
+POLL_SECONDS. Under the same lock, it reads at most MAX_NAMES names of requests,
+and takes the MAX_PER_LOOK oldest by renaming them to .taken. It hands each
+message to its session, answers in <id>.reply, and then removes the .taken file.
 It removes its answers after 2 * ANSWER_SECONDS, when their senders have gone.
 `wf steer` withdraws a request that nobody took within ANSWER_SECONDS, or when
-it's stopped: it deletes the file. The rename and the delete can't both
-succeed, so a message is taken once or never. The driver answers `none` to a
-request older than ANSWER_SECONDS, because its sender has given up. Both
-processes tell time by CLOCK_MONOTONIC, which a change of the wall clock leaves
-alone. They add the boot it counts from, and a time from another boot is old.
-On a system that doesn't say which boot it is in, `wf steer` is off.
+it's stopped: it deletes the file. The rename and the delete can't both succeed,
+so a message is taken once or never. The driver answers `none` to a request
+older than ANSWER_SECONDS, because its sender has given up. Both processes tell
+time by CLOCK_MONOTONIC, which a change of the wall clock leaves alone. They add
+the boot it counts from, and a time from another boot is old. On a system that
+doesn't say which boot it is in, `wf steer` is off.
 
 Run events can only come from the job that runs the node (LangGraph's stream
 writer reads the job's context). So the attempt starts a task of its own that
@@ -67,6 +67,7 @@ import asyncio
 import collections
 import contextlib
 import ctypes
+import fcntl
 import functools
 import heapq
 import itertools
@@ -90,22 +91,23 @@ HANDOVER_SECONDS = 12.0  # the longest a harness takes a message: Codex waits up
 MAX_CHARACTERS = 100_000  # in one message
 MAX_WAITING = 10  # messages that one session has not taken yet
 MAX_PER_LOOK = 10  # requests the driver takes in one look at the mailbox: the rest wait for the next
-MAX_IN_MAILBOX = 100  # requests that wait in a run's mailbox: wf steer adds no more
-MAX_NAMES = 1_000  # names the driver reads in one look at the mailbox
+MAX_IN_MAILBOX = 100  # messages in a run's mailbox: waiting for the driver, or taken and not answered yet
+MAX_NAMES = 1_000  # names of requests the driver reads in one look at the mailbox
 PART = re.compile(r"([a-z][a-z0-9_]*)(?:\[(\d+)\])?")  # a node id (spec.NODE_ID), and an item's index
 REQUEST = re.compile(r"(\d+\.\d+)-(.+)\.request")  # <sent>-<id>.request, as wf steer names a request
 NOT_RUNNING = {"waiting": "the run is waiting for a person", "limit": "the run is paused at a limit",
                "failed": "the run failed", "succeeded": "the run succeeded"}
 STOPPED = "the run paused or ended before a session took the message"
 CUT_OFF = "the attempt ended while its harness took the message, so wf can't tell whether the agent read it"
-EXPOSED = ("wf's own folder (WF_HOME) is in a repo, where an agent could write messages for the others, "
-           "so wf steer is off. Move WF_HOME out of every repo")
+FULL = ("the run is full: {} messages from wf steer wait for it or are being answered. Nothing was sent. "
+        "Send it again when some of them have their answers")
 NO_BOOT = ("this system doesn't say which boot it is in, so wf can't tell how old a message is, "
            "and wf steer is off")
 
 
 class SteerError(Exception):
-    """The message can't go: the node isn't an agent node of the run, or the driver never answered."""
+    """The message can't go: the node isn't an agent node of the run, the run is full, or the driver
+    never answered."""
 
 
 def mailbox(run: Run) -> Path:
@@ -113,18 +115,21 @@ def mailbox(run: Run) -> Path:
     return workspaces.mailbox(run.dir)
 
 
-def trusted(run: Run) -> Path | None:
-    """The run's mailbox, resolved, or None when an agent could write in it: when it is in the
-    run's repo or in a git work tree, as WF_HOME names it or as its links resolve. Use the path
-    that this returns, so that a link that changes later can't move the mailbox."""
-    named = Path(os.path.abspath(mailbox(run)))
-    resolved = named.resolve()
-    repos = {Path(os.path.abspath(run.repo)), Path(run.repo).resolve()}
-    for path in (named, resolved):
-        if any(path.is_relative_to(repo) for repo in repos) or any(
-                os.path.lexists(folder / ".git") for folder in (path, *path.parents)):
-            return None
-    return resolved
+@contextmanager
+def _locked(folder: Path, wait: bool = True) -> Iterator[bool]:
+    """The mailbox's lock: `wf steer` holds it while it counts the messages and adds its own, and the
+    driver while it takes requests. Yields False when `wait` is off and another process holds it.
+    The operating system releases it when its process dies."""
+    fd = os.open(folder / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)  # closing releases the lock
 
 
 def now() -> float:
@@ -221,8 +226,8 @@ def _load(path: Path) -> spec.Workflow:
 def send(run: Run, path: str, text: str) -> dict:
     """Hand a message for the session at `path` to the process that drives the run, and wait for its
     answer. The answer: {id, status: delivered | queued | unconfirmed | none, reason (for none and
-    unconfirmed), attempt and harness (for all but none)}. Raises SteerError when the mailbox isn't
-    safe to use, or the driver took the message but never answered."""
+    unconfirmed), attempt and harness (for all but none)}. Raises SteerError when the system doesn't
+    name its boot, the run is full, or the driver took the message but never answered."""
     ident = str(uuid.uuid4())
     status = run.status().get("status")
     if status != "running":
@@ -230,18 +235,17 @@ def send(run: Run, path: str, text: str) -> dict:
         return {"id": ident, "status": "none", "reason": f"{why}, so no agent works in it"}
     if not run.driven():
         return {"id": ident, "status": "none", "reason": "no wf process drives the run (it crashed or was killed)"}
-    folder = trusted(run)
-    if folder is None:
-        raise SteerError(EXPOSED)
     if not boot():
         raise SteerError(NO_BOOT)
-    folder.mkdir(parents=True, exist_ok=True)
-    if sum(name.endswith(".request") for name in _names(folder)) >= MAX_IN_MAILBOX:
-        return {"id": ident, "status": "none", "reason": f"{MAX_IN_MAILBOX} messages already wait for the wf "
-                                                         "process that drives the run"}
-    sent = now()
-    request, reply = folder / f"{sent:.6f}-{ident}.request", folder / f"{ident}.reply"
-    write_json(request, {"path": path, "text": text, "boot": boot()})
+    folder = mailbox(run)
+    folder.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder.mkdir(mode=0o700, exist_ok=True)
+    with _locked(folder):
+        if len(_names(folder, ".request")) + len(_names(folder, ".taken")) >= MAX_IN_MAILBOX:
+            raise SteerError(FULL.format(MAX_IN_MAILBOX))
+        sent = now()
+        request, reply = folder / f"{sent:.6f}-{ident}.request", folder / f"{ident}.reply"
+        write_json(request, {"path": path, "text": text, "boot": boot()})
     try:
         answer = _await_answer(reply)
     except BaseException:  # stopped (Ctrl-C): a request that nobody took yet goes with it
@@ -421,14 +425,13 @@ class Live:
 
 @asynccontextmanager
 async def answering(run: Run, steering: Steering) -> AsyncIterator[None]:
-    """While the graph streams: take the run's `wf steer` requests, and answer them. Not when an
-    agent could write in the mailbox (trusted), or the system doesn't name its boot: `wf steer`
-    refuses then, and what is in the mailbox didn't come from it."""
-    folder = trusted(run)
-    if folder is None or not boot():
+    """While the graph streams: take the run's `wf steer` requests, and answer them. Not when the
+    system doesn't name its boot: `wf steer` refuses then, and what is in the mailbox didn't come
+    from it."""
+    if not boot():
         yield
         return
-    box = _Mailbox(folder, steering)
+    box = _Mailbox(mailbox(run), steering)
     box.tidy_up()
     task = asyncio.create_task(box.serve())
     try:
@@ -442,14 +445,14 @@ async def answering(run: Run, steering: Steering) -> AsyncIterator[None]:
 class _Mailbox:
     def __init__(self, folder: Path, steering: Steering):
         self.folder, self.steering = folder, steering
-        self.answering: set[asyncio.Task] = set()
+        self.answering: set[asyncio.Task] = set()  # one for each taken request: at most MAX_IN_MAILBOX
         self.answers: collections.deque[tuple[float, Path]] = collections.deque()  # (written, file), oldest first
 
     async def serve(self) -> None:
         try:
             while True:
-                for ident, request, problem in self.take():
-                    task = asyncio.create_task(self._answer(ident, request, problem))
+                for ident, request, problem, claimed in self.take(MAX_IN_MAILBOX - len(self.answering)):
+                    task = asyncio.create_task(self._answer(ident, request, problem, claimed))
                     self.answering.add(task)
                     task.add_done_callback(self.answering.discard)
                 self.forget_answers()
@@ -459,56 +462,60 @@ class _Mailbox:
                 task.cancel()
             await asyncio.gather(*self.answering, return_exceptions=True)
 
-    async def _answer(self, ident: str, request: dict, problem: str | None) -> None:
+    async def _answer(self, ident: str, request: dict, problem: str | None, claimed: Path) -> None:
         answer = {"status": "none", "reason": problem or STOPPED}
         try:
             if problem is None:
                 answer = await self.steering.deliver(request["path"], Message(ident, request["text"]))
         finally:
             self.reply(ident, answer)
+            claimed.unlink(missing_ok=True)  # answered: it no longer counts toward MAX_IN_MAILBOX
 
     def tidy_up(self) -> None:
-        """Remove the requests that an earlier driver of the run took, and never read: it died. Its
-        answers go after 2 * ANSWER_SECONDS from now, as this driver's own do."""
-        for name in _names(self.folder):
-            if name.endswith(".taken"):
-                (self.folder / name).unlink(missing_ok=True)
-            elif name.endswith(".reply"):
-                self.answers.append((now(), self.folder / name))
+        """Remove the requests that an earlier driver of the run took, and never answered: it died.
+        Its answers go after 2 * ANSWER_SECONDS from now, as this driver's own do."""
+        for name in _names(self.folder, ".taken"):
+            (self.folder / name).unlink(missing_ok=True)
+        for name in _names(self.folder, ".reply"):
+            self.answers.append((now(), self.folder / name))
 
-    def take(self) -> list[tuple[str, dict, str | None]]:
-        """At most MAX_PER_LOOK requests that nobody has taken yet, taken now, oldest first: (id,
-        request, why it can't go, or None)."""
+    def take(self, room: int = MAX_IN_MAILBOX) -> list[tuple[str, dict, str | None, Path]]:
+        """At most MAX_PER_LOOK requests that nobody has taken yet, and no more than `room`, taken now,
+        oldest first: (id, request, why it can't go or None, the taken file). Nothing while a `wf steer`
+        holds the mailbox's lock: the requests wait for the next look."""
         taken = []
-        for ident, sent, claimed in self._claim(MAX_PER_LOOK):
+        for ident, sent, claimed in self._claim(min(MAX_PER_LOOK, room), wait=False):
             try:
                 small = claimed.stat().st_size <= 8 * MAX_CHARACTERS
                 request = json.loads(claimed.read_text(encoding="utf-8")) if small else None
             except (OSError, ValueError):
                 request = {}
-            claimed.unlink(missing_ok=True)
-            taken.append((ident, request if isinstance(request, dict) else {}, _problem(request, sent)))
+            taken.append((ident, request if isinstance(request, dict) else {}, _problem(request, sent), claimed))
         return taken
 
     def refuse_the_rest(self) -> None:
         """Answer the requests that came as the graph stopped: no session takes them now."""
-        for ident, _, claimed in self._claim(MAX_NAMES):
-            claimed.unlink(missing_ok=True)
+        for ident, _, claimed in self._claim(MAX_NAMES, wait=True):
             self.reply(ident, {"status": "none", "reason": STOPPED})
+            claimed.unlink(missing_ok=True)
 
-    def _claim(self, most: int) -> list[tuple[str, float | None, Path]]:
-        """The `most` oldest requests, taken by renaming them: (id, when wf steer sent it, the renamed
-        file). A request whose name doesn't say when it was sent goes first, to be refused."""
-        requests = (name for name in _names(self.folder) if name.endswith(".request"))
+    def _claim(self, most: int, wait: bool) -> list[tuple[str, float | None, Path]]:
+        """The `most` oldest requests, taken by renaming them under the mailbox's lock: (id, when wf
+        steer sent it, the renamed file). A request whose name doesn't say when it was sent goes
+        first, to be refused."""
+        if most <= 0 or not self.folder.is_dir():
+            return []
         claimed = []
-        for name in heapq.nsmallest(most, requests, key=lambda name: _sent(name)[0] or 0.0):
-            file = self.folder / name
-            try:
-                file.rename(file.with_suffix(".taken"))
-            except OSError:  # withdrawn
-                continue
-            sent, ident = _sent(name)
-            claimed.append((ident, sent, file.with_suffix(".taken")))
+        with _locked(self.folder, wait) as locked:
+            requests = _names(self.folder, ".request") if locked else []
+            for name in heapq.nsmallest(most, requests, key=lambda name: _sent(name)[0] or 0.0):
+                file = self.folder / name
+                try:
+                    file.rename(file.with_suffix(".taken"))
+                except OSError:  # withdrawn
+                    continue
+                sent, ident = _sent(name)
+                claimed.append((ident, sent, file.with_suffix(".taken")))
         return claimed
 
     def reply(self, ident: str, answer: dict) -> None:
@@ -523,11 +530,12 @@ class _Mailbox:
             self.answers.popleft()[1].unlink(missing_ok=True)
 
 
-def _names(folder: Path) -> list[str]:
-    """At most MAX_NAMES names in the mailbox, in the order that the system lists them."""
+def _names(folder: Path, suffix: str) -> list[str]:
+    """At most MAX_NAMES names in the mailbox that end with `suffix`, in the order that the system
+    lists them. Other names don't count toward the limit, so they can't hide one of these."""
     try:
         with os.scandir(folder) as entries:
-            return [entry.name for entry in itertools.islice(entries, MAX_NAMES)]
+            return list(itertools.islice((entry.name for entry in entries if entry.name.endswith(suffix)), MAX_NAMES))
     except OSError:
         return []
 

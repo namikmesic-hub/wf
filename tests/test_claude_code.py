@@ -14,7 +14,7 @@ import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, ToolResultBlock, ToolUseBlock, UserMessage
 from fake_claude import FakeClaude
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
-from workflow import cli, runner, schemas
+from workflow import cli, runner, schemas, steer
 from workflow.harnesses.base import SessionSpec, Unavailable
 from workflow.harnesses.claude_code import GIT, REPLAY, TOOL, ClaudeCode, ClaudeSession, options
 from workflow.output_tool import FINISH, ResultTool, REMINDER
@@ -382,4 +382,41 @@ def test_a_result_that_ends_the_attempt_doesnt_wait_for_a_write_that_stalls(tmp_
         return status
 
     assert asyncio.run(drive()) == expected
+    assert session._held == []
+
+
+@pytest.mark.parametrize("write_takes", [0.05, 60])  # ends during the teardown, or is cut off by it
+def test_a_message_claude_code_read_stays_delivered_when_the_result_comes_during_its_write(tmp_path, monkeypatch,
+                                                                                           write_takes):
+    monkeypatch.setattr(steer, "HANDOVER_SECONDS", 0.2)
+    events = []
+    session = ClaudeSession(spec(tmp_path))
+    session.spec.emit = events.append
+    session._working = session._repeats = True
+    stream = session._client = _Stream(session)
+
+    async def read_then_submit(prompt):  # Claude Code reads it, the agent submits, and the write goes on
+        async for message in prompt:
+            stream.out.put_nowait(UserMessage(content="Stop", uuid=message["uuid"]))
+            stream.out.put_nowait(AssistantMessage(content=[ToolUseBlock(id="call-1", name=TOOL, input={"summary": "hi"})],
+                                                   model="fake"))
+            stream.out.put_nowait(UserMessage(content=[ToolResultBlock(tool_use_id="call-1", content="ok", is_error=False)]))
+            stream.out.put_nowait(_result())
+            await asyncio.sleep(write_takes)
+
+    stream.query = read_then_submit
+
+    async def drive():
+        live = steer.Live(session.spec, 1, "claude-code", session)
+        live.start()
+        reading = asyncio.get_running_loop().create_task(session._read("the prompt"))
+        answer = asyncio.get_running_loop().create_task(live.take(steer.Message("id-1", "Stop")))
+        assert await asyncio.wait_for(reading, 2) == ("done", "")  # the result ends the turn before the write
+        await live.stop()
+        live.end()
+        return await answer
+
+    answer = asyncio.run(drive())
+    assert answer == {"status": "delivered", "attempt": 1, "harness": "claude-code"}
+    assert [(e["id"], e["status"]) for e in events if e["event"] == "steer"] == [("id-1", "delivered")]
     assert session._held == []

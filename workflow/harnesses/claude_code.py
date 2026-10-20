@@ -74,9 +74,9 @@ adapter reads on to that message's turn. But if the agent already submitted
 its result, the session closes, and the message is dropped. A result that ends
 the attempt (the agent submitted, or the turn failed) ends the turn at once,
 also while a message is still being written: steer.py then cuts off that
-write, and the message is unconfirmed. Until Claude Code
-has repeated a message in this session, steer() takes none, and the runner
-sends it as the next turn.
+write, and the message is unconfirmed. A message that Claude Code repeated
+before the cut stays delivered. Until Claude Code has repeated a message in
+this session, steer() takes none, and the runner sends it as the next turn.
 """
 
 import asyncio
@@ -264,12 +264,13 @@ class ClaudeSession:
         try:
             await self._say(text, ident)
         except BaseException as error:
-            if ident not in self._held:  # read already, so the write got through
-                if isinstance(error, Exception):
-                    return "delivered"
-            else:
+            if ident in self._held:  # not read: the write failed, or was cut off
                 self._held.remove(ident)
-            raise
+                raise
+            if isinstance(error, asyncio.CancelledError):  # cut off after Claude Code read it: still delivered
+                asyncio.current_task().cancel()  # and the task still stops, at its next wait
+            elif not isinstance(error, Exception):
+                raise
         finally:
             self._writing.discard(ident)
             if not self._writing:

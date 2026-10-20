@@ -130,6 +130,9 @@ wf steer <run-id> <node> --item <index> --file <message.md>
 `--item` names the item of a `for_each` node.
 `--file` takes a long message from a file, and `--file -` from stdin.
 
+`wf steer` trusts your user account, as every wf command does: any process that runs as you can steer a run.
+That includes an agent that can run commands as you: on Claude Code and Cursor with `edit` or `full` access, and on Codex with `full` access.
+
 `wf steer` says what became of the message:
 
 `delivered`
@@ -151,6 +154,11 @@ no live session
 : Exit code 1, and nothing was sent.
   The reason says why: the node has no agent session open now, or the run isn't running.
   A message has at most 100,000 characters, and at most 10 can wait for one session.
+
+the run is full
+: Exit code 1, and nothing was sent.
+  100 messages from `wf steer` wait for the run or are being answered.
+  Send the message again when some of them have their answers.
 
 A Claude Code agent can take a message that comes mid-turn for tool output, and ignore it.
 Read the attempt's log (`attempt-<n>.log`) to see whether the agent acted on the message.
