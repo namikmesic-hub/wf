@@ -120,7 +120,7 @@ def earlier(run: Run, name: str) -> list[Run]:
     return found
 
 
-_LEARNT: dict[tuple, Earlier] = {}  # finished runs don't change, so their numbers are kept
+_LEARNT: dict[tuple, Earlier] = {}  # by the size of each run's events: a run that `wf continue` gives a follow-up grows
 _LEARNT_MOST = 32
 _LEARNING = threading.Lock()  # wf ui asks from several threads
 
@@ -128,7 +128,7 @@ _LEARNING = threading.Lock()  # wf ui asks from several threads
 def learn(workflow: spec.Workflow, runs: list[Run]) -> Earlier:
     """What earlier runs say about each step's time and each route's use, from `wf report`. The
     numbers belong to this version of the workflow, with its nodes and routes."""
-    key = (hashlib.sha256(workflow.model_dump_json().encode()).hexdigest(), tuple(str(r.dir) for r in runs))
+    key = (hashlib.sha256(workflow.model_dump_json().encode()).hexdigest(), tuple((str(r.dir), _size(r)) for r in runs))
     with _LEARNING:
         if key in _LEARNT:
             return _LEARNT[key]
@@ -186,6 +186,7 @@ class Tracker:
             targets = [t for t in event.get("to") or [] if t in topo.needs]
             found.pending, found.taken, found.back = set(targets), {}, {}
             found.done -= topo.reachable(targets)
+            found.ran -= topo.reachable(targets)  # in this lap they haven't run yet, so a node it skips is skipped
             return
         if not isinstance(node, str):  # run-level events
             return
@@ -511,3 +512,11 @@ def duration(seconds: float) -> str:
         return f"{round(seconds / 60)} min"
     hours, minutes = divmod(round(seconds / 60), 60)
     return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+
+
+def _size(run: Run) -> int:
+    """The size of a run's events.jsonl, which grows while it runs, and again in a follow-up."""
+    try:
+        return (run.dir / "events.jsonl").stat().st_size
+    except OSError:
+        return 0

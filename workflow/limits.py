@@ -77,7 +77,7 @@ def since(used: dict, elapsed_s: float, start: dict | None) -> tuple[dict, float
 
 def spent(values: dict) -> tuple[dict, float]:
     """since(), for a run's saved state: what counts against its limits."""
-    return since(values.get("usage") or {}, values.get("elapsed_s", 0.0), values.get("budget_from"))
+    return since(values.get("usage") or {}, values.get("elapsed_s", 0.0), (values.get("follow_up") or {}).get("from"))
 
 
 def check(limits: Limits, used: dict, elapsed_s: float) -> tuple[str, str] | None:

@@ -6,9 +6,8 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
       workflow/                     copies of the workflow files as they were run
       input.json
       run.json                      the workflow's name and `repo` workspace, for starting it later,
-                                    the --limit and --model values that `wf retry` keeps (keep()),
-                                    and the number of the latest follow-up (keep_follow_up())
-      branches.json                 the branches `branch` named, by node path, and where the run left them
+                                    and the --limit and --model values that `wf retry` keeps (keep())
+      branches.json, worktrees.json the branches `branch` named, and where the run left them and its worktrees
       output.json                   the end output, once the run succeeds
       status.json                   running | waiting | succeeded | failed | limit, with a sequence
                                     number that goes up on every change (while running, also the
@@ -119,39 +118,21 @@ class Run:
         except (OSError, ValueError):  # missing or damaged: the run is still listable
             return {}
 
-    def limits(self) -> dict:
-        """The limits given with --limit for this run (limits.py), by name; None removes one."""
-        return self.info().get("limits") or {}
+    def limits(self, follow_up: int = 0) -> dict:
+        """The --limit values (limits.py) of the run's pass `follow_up`, 0 before `wf continue`. None removes one."""
+        return _given(self.info(), follow_up)
 
     def overrides(self) -> dict[str, dict]:
         """The models given with --model, --harness and --effort (overrides.py), by node or item."""
         return self.info().get("overrides") or {}
 
-    def keep(self, limits: dict, overrides: dict[str, dict]) -> None:
-        """Keep new --limit values and overrides for the rest of the run, in one write of run.json. Each
-        replaces an earlier one with its name or target (call it holding the run's lock)."""
-        info = self.info()
+    def keep(self, limits: dict, overrides: dict[str, dict], follow_up: int = 0) -> None:
+        """Keep new --limit values for the rest of the run's pass `follow_up`, and overrides for the rest of the
+        run, in one write of run.json. Each replaces an earlier one with its name or target (hold the run's lock)."""
+        info = {**self.info(), "limits": self.limits(follow_up), "limits_for": follow_up}  # not an earlier pass's
         for name, new in (("limits", limits), ("overrides", overrides)):
             if new:
                 info[name] = {**(info.get(name) or {}), **new}
-        write_json(self.dir / "run.json", info)
-
-    def follow_up(self) -> int:
-        """The number of the run's latest follow-up (`wf continue`), or 0 before the first."""
-        number = self.info().get("follow_up")
-        return number if isinstance(number, int) else 0
-
-    def keep_follow_up(self, number: int, limits: dict) -> dict:
-        """Keep the number of a new follow-up and its own --limit values in one write of run.json. Those
-        limits replace the ones earlier passes were given. Returns run.json as it was, for rewrite_info()
-        (call it holding the run's lock)."""
-        before = self.info()
-        info = {k: v for k, v in before.items() if k != "limits"}
-        write_json(self.dir / "run.json", {**info, "follow_up": number, **({"limits": limits} if limits else {})})
-        return before
-
-    def rewrite_info(self, info: dict) -> None:
-        """Write run.json as `info` again, e.g. as keep_follow_up() found it."""
         write_json(self.dir / "run.json", info)
 
     def branches(self) -> dict[str, str]:
@@ -205,8 +186,8 @@ class Run:
     def set_status(self, status: str, **details: Any) -> None:
         """Record the run's state. `seq` goes up by one on every call, so a watcher can tell a
         new state from one it has already seen, even when the status word is the same."""
-        seq = self.status().get("seq", 0) + 1
-        write_json(self.dir / "status.json", {"status": status, "seq": seq, "run": self.id, "updated": now(), **details})
+        seq = (before := self.status()).get("seq", 0) + 1  # its follow-up number stays, unless `details` gives one
+        write_json(self.dir / "status.json", {"status": status, "seq": seq, "run": self.id, "updated": now(), **_kept(before, details)})
 
     @contextmanager
     def driving(self) -> Iterator["Lock"]:
@@ -301,6 +282,21 @@ class Run:
             return json.loads((self.dir / "output.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+
+    def leave_worktrees(self, worktrees: dict[str, tuple[str | None, str]]) -> None:
+        """Before the run's worktrees (workspaces.run_worktrees) go: record the named branches (leave_branches),
+        and each worktree's branch and commit in worktrees.json, so that `wf continue` brings them back."""
+        self.leave_branches(worktrees)
+        write_json(self.dir / "worktrees.json", {path: {"branch": branch, "commit": commit}
+                                                 for path, (branch, commit) in worktrees.items()})
+
+    def left_worktrees(self) -> dict[str, dict]:
+        """worktrees.json: the worktrees the run had when it last succeeded, by node path ({} before)."""
+        try:
+            found = json.loads((self.dir / "worktrees.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return found if isinstance(found, dict) else {}
 
 
 def read_events(path: Path, offset: int = 0) -> tuple[list[dict], int]:
@@ -522,3 +518,15 @@ def write_json(path: Path, value: Any) -> None:
 
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _given(info: dict, follow_up: int) -> dict:
+    """run.json's --limit values, if they belong to the run's pass `follow_up`."""
+    return (info.get("limits") or {}) if info.get("limits_for", 0) == follow_up else {}
+
+
+def _kept(before: dict, details: dict) -> dict:
+    """A new state's details: those given, and the number of the run's follow-up from the state `before`,
+    unless they give it. A number of None means the run has had no follow-up."""
+    merged = {**({"follow_up": before["follow_up"]} if "follow_up" in before else {}), **details}
+    return {k: v for k, v in merged.items() if not (k == "follow_up" and not v)}

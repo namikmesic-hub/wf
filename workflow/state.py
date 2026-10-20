@@ -13,14 +13,12 @@ replaces the old one) is right. `inbox` is different: in one step, every
 those lists instead of keeping only the last one. `schedule` reads the inbox
 and empties it by returning Overwrite([]), which bypasses the reducer.
 
-Progress is a working copy of RunState with the operations `schedule` needs:
-record() a finished job, starts_now() for the nodes whose needs are settled,
-retry() what failed, follow_up() for a request that `wf continue` gives a run
-that succeeded. It uses the pure rules in scheduler.py and evaluates `when`
-and `for_each` with templates.py. It does no I/O itself, so it's easy to follow
-(and to test) without LangGraph. Progress events go to `emit`. The run's trace
-(trace.Scope, when given) gets each pass, each route decision, and each
-`for_each` and `when` with what it read.
+Progress is a working copy of RunState with the operations `schedule` needs: record() a finished
+job, starts_now() for the nodes whose needs are settled, retry() what failed, and follow_up() for a
+request from `wf continue`. It uses the pure rules in scheduler.py and evaluates `when` and `for_each`
+with templates.py. It does no I/O itself, so it's easy to follow (and to test) without LangGraph.
+Progress events go to `emit`. The run's trace (trace.Scope, when given) gets each pass, each route
+decision, and each `for_each` and `when` with what it read.
 """
 
 import copy
@@ -82,17 +80,8 @@ class RunState(TypedDict, total=False):
     limit_name: str | None  # ...and its name (limits.py)
     retry: bool  # set when `wf retry` continues a failed run
     output: dict | None  # the end output, once the run succeeded
-    follow_up_request: str | None  # a request from `wf continue` that schedule takes in at its next step
-    follow_ups: list[str]  # every follow-up request the run took in, oldest first
-    budget_from: dict  # {"cost_usd", "tokens", "elapsed_s"} when the latest follow-up began: limits count from here
+    follow_up: dict  # the latest request from `wf continue`: {request, number, limits, and pending or from}
     inbox: Annotated[list[Finished], operator.add]  # results of the last step's jobs
-
-
-def follow_up_variable(requests: list[str]) -> dict | None:
-    """The `follow_up` template variable: none until `wf continue` gives the run a request."""
-    if not requests:
-        return None
-    return {"request": requests[-1], "number": len(requests), "requests": list(requests)}
 
 
 def _key(index: int | None) -> str:
@@ -139,8 +128,7 @@ class Progress:
             "workspace": {n: s["workspaces"].get(n) for n in nodes},
             "errors": {n: s["errors"].get(n, []) for n in nodes},
             "run": {k: run.get(k) for k in ("id", "dir", "cost_usd", "tokens", "elapsed_s", "base")},
-            "session": {"continued": False},
-            "follow_up": follow_up_variable(s.get("follow_ups") or []),
+            "session": {"continued": False}, "follow_up": follow_up_variable(s.get("follow_up")),
         }
 
     # ---------- changing ----------
@@ -188,26 +176,6 @@ class Progress:
                     break
         return jobs
 
-    def follow_up(self, request: str, elapsed_s: float) -> None:
-        """`wf continue` on a run that succeeded: a new pass of the run, from the nodes that the
-        workflow's `follow_up` names. Every node they can lead to reads none until it runs again,
-        and the others keep their outputs. Routes count from zero again, limits count from here,
-        and the next pass of a `session: continue` node continues its last session."""
-        targets = list(self.wf.follow_up.targets)
-        self.s["follow_ups"] = [*self.s.get("follow_ups", []), request]
-        self.s["follow_up_request"] = None
-        self.s["status"], self.s["failure"], self.s["output"] = "running", None, None
-        self.s["taken"] = {}
-        self.s["budget_from"] = {"cost_usd": self.s["usage"]["cost_usd"], "tokens": self.s["usage"]["tokens"],
-                                 "elapsed_s": elapsed_s}
-        for node in self.topo.reachable(targets):
-            self.s["outputs"].pop(node, None)
-            self.s["errors"].pop(node, None)
-        for session in self.s["sessions"].values():
-            session["streak"] = 0  # the two continued passes in a row count from here
-        self.emit({"event": "follow_up", "number": len(self.s["follow_ups"]), "to": targets, "request": request})
-        self._make_pending(targets)
-
     def stop_for_limit(self, reason: str, name: str | None = None) -> None:
         """A limit was reached: nothing new starts, and the run pauses with status `limit`
         until `wf retry` continues it (retry() then reruns what the limit stopped)."""
@@ -234,6 +202,25 @@ class Progress:
             elif active["waiting"] == 0:
                 self._complete(node)  # it failed after its jobs finished, e.g. in a `when`
         return jobs
+
+    def follow_up(self, elapsed_s: float) -> None:
+        """Take in the request that `wf continue` gave a run that succeeded: a new pass of the run, from the
+        nodes that the workflow's `follow_up` names. Every node they can lead to reads none until it runs
+        again, and the others keep their outputs. Routes count from zero again, the limits count from
+        `from`, and the next pass of a `session: continue` node continues its last session."""
+        targets, given = list(self.wf.follow_up.targets), self.s["follow_up"]
+        usage = self.s["usage"]
+        self.s["follow_up"] = {**{k: v for k, v in given.items() if k != "pending"},
+                               "from": {"cost_usd": usage["cost_usd"], "tokens": usage["tokens"], "elapsed_s": elapsed_s}}
+        self.s["status"], self.s["failure"], self.s["output"] = "running", None, None
+        self.s["taken"] = {}
+        for node in self.topo.reachable(targets):
+            self.s["outputs"].pop(node, None)
+            self.s["errors"].pop(node, None)
+        for session in self.s["sessions"].values():
+            session["streak"] = 0  # the two continued passes in a row count from here
+        self.emit({"event": "follow_up", "number": given["number"], "to": targets})
+        self._make_pending(targets)
 
     # ---------- inside ----------
 
@@ -393,3 +380,8 @@ class Progress:
         if route_event:
             self.emit(route_event)
         self._make_pending(scheduler.triggered(self.topo, node, route))
+
+
+def follow_up_variable(given: dict | None) -> dict | None:
+    """The `follow_up` template variable: the latest request and its number, or none before the first one."""
+    return {"request": given["request"], "number": given["number"]} if given else None

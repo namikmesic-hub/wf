@@ -15,7 +15,8 @@ from textwrap import dedent
 import pytest
 
 from fakes import Fake, submit
-from workflow import cli, firstmate, harnesses, progress, report, runner, runs, spec, trace_view, validate, workspaces
+from workflow import cli, firstmate, harnesses, operate, progress, report, runner, runs, scheduler, spec, state, trace_view, validate, workspaces
+from workflow.context import RunContext
 
 
 @pytest.fixture
@@ -92,7 +93,7 @@ def test_a_follow_up_runs_again_from_its_node_on_the_same_branch_with_the_reques
 
     assert cli.main(["continue", run.id, "add a flag"]) == 0
     out = capsys.readouterr().out
-    assert f"Continuing run {run.id} with follow-up 1" in out and "↪ follow-up 1 → work: add a flag" in out
+    assert f"Continuing run {run.id} with follow-up 1" in out and "↪ follow-up 1 → work\n" in out
     # The nodes the request leads to read none until they run again, and the others keep their output
     assert run.output() == {"notes": "hello (check is none)\nadd a flag (check is none)\n", "said": "1 planned\n"}
     assert git("log", "--format=%s", branch).splitlines() == ["add a flag (check is none)", "hello (check is none)", "first"]
@@ -100,7 +101,7 @@ def test_a_follow_up_runs_again_from_its_node_on_the_same_branch_with_the_reques
     assert sorted(p.name for p in (run.dir / "nodes" / "work").iterdir()) == ["1", "2"]
     assert sorted(p.name for p in (run.dir / "nodes" / "plan").iterdir()) == ["1"]
     (given,) = [e for e in events(run) if e["event"] == "follow_up"]
-    assert (given["number"], given["to"], given["request"]) == (1, ["work"], "add a flag")
+    assert given | {"time": None} == {"time": None, "event": "follow_up", "number": 1, "to": ["work"]}  # no request text
     state = status(capsys, run)
     assert (state["status"], state["follow_up"], state["output"]["said"]) == ("succeeded", 1, "1 planned\n")
     assert state["progress"]["percent"] == 100
@@ -115,7 +116,7 @@ def test_each_follow_up_has_its_number_and_wf_list_says_it(repo, capsys):
     capsys.readouterr()
     assert cli.main(["list"]) == 0
     assert capsys.readouterr().out.strip() == f"{run.id} [flow]: succeeded (follow-up 2)"
-    assert runs.Run.at(run.dir).follow_up() == 2
+    assert run.status()["follow_up"] == 2
 
 
 def test_the_trace_shows_each_follow_up_as_a_new_pass_of_the_run(repo, capsys):
@@ -129,6 +130,7 @@ def test_the_trace_shows_each_follow_up_as_a_new_pass_of_the_run(repo, capsys):
         ("plan", 1), ("work", 1), ("check", 1), ("work", 2), ("check", 2)}
     reads = [read for r in records if r["kind"] == "render" and r.get("pass") == 2 for read in r["reads"]]
     assert {"path": "follow_up.request", "value": "add a flag"} in reads
+    assert {"path": "follow_up", "value": {"request": "add a flag", "number": 1}} in reads  # the latest request only
     text = trace_view.text(run, records, None)
     assert 'run continued: flow, follow-up 1: "add a flag"' in text
 
@@ -183,35 +185,70 @@ def test_routes_count_from_zero_again_in_a_follow_up(repo, capsys):
     assert len(list((run.dir / "nodes" / "work").iterdir())) == 4
 
 
-def test_a_follow_up_has_a_budget_of_its_own_from_the_command_line(repo, monkeypatch, capsys):
-    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}, tokens=100) for n in range(1, 4)])
+SPEND = """
+version: 1
+name: spend
+defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+LIMITS
+start: {input: {}}
+follow_up: {to: work}
+nodes:
+  work: {needs: [start], instruction: "{{ follow_up.request if follow_up else 'start' }}"}
+end: {output: {}}
+"""
+
+
+def spending(monkeypatch, *tokens: int, cost: float = 0.01) -> None:
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}, tokens=t, cost=cost) for n, t in enumerate(tokens)])
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
-    write("spend.yaml", """
-        version: 1
-        name: spend
-        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
-        limits: {tokens: 150}
-        start: {input: {}}
-        follow_up: {to: work}
-        nodes:
-          work: {needs: [start], instruction: "{{ follow_up.request if follow_up else 'start' }}"}
-        end: {output: {}}
-    """)
+
+
+def test_a_follow_up_has_a_budget_of_its_own_from_the_command_line(repo, monkeypatch, capsys):
+    spending(monkeypatch, 100, 100, 100)
+    write("spend.yaml", SPEND.replace("LIMITS", "limits: {tokens: 150}"))
     assert cli.main(["run", "spend.yaml"]) == 0
     run = only_run()
     # 200 tokens in the whole run, but the file's limit counts only the 100 of the follow-up
     assert cli.main(["continue", run.id, "more"]) == 0
-    assert "limits" not in run.info()
 
     capsys.readouterr()
     assert cli.main(["continue", run.id, "and more", "--limit", "tokens=50"]) == 1
     captured = capsys.readouterr()
     assert "Limits for this follow-up: no cost limit, tokens 50, no duration limit" in captured.out
     assert "used 100 tokens, limit 50" in captured.err
-    assert run.info()["limits"] == {"tokens": 50}
     assert status(capsys, run)["status"] == "limit"
-    assert cli.main(["retry", run.id, "--limit", "tokens=none"]) == 0
+    # 300 tokens in the whole run: a retry with room for the follow-up's own 100 continues it
+    assert cli.main(["retry", run.id, "--limit", "tokens=150"]) == 0
     assert status(capsys, run)["follow_up"] == 2
+    assert (run.info()["limits"], run.info()["limits_for"]) == ({"tokens": 150}, 2)
+
+
+def test_limits_that_earlier_passes_got_dont_apply_to_a_follow_up(repo, monkeypatch, capsys):
+    spending(monkeypatch, 100, 300)
+    write("spend.yaml", SPEND.replace("LIMITS", ""))
+    assert cli.main(["run", "spend.yaml", "--limit", "tokens=200"]) == 0
+    assert cli.main(["continue", only_run().id, "more"]) == 0  # its 300 tokens pass the 200 that `wf run` gave
+
+
+def test_a_follow_up_counts_cost_and_time_from_its_start(repo, monkeypatch, capsys):
+    spending(monkeypatch, 100, 100, cost=1.0)
+    write("spend.yaml", SPEND.replace("LIMITS", "limits: {cost_usd: 1.5}"))
+    assert cli.main(["run", "spend.yaml"]) == 0
+    assert cli.main(["continue", only_run().id, "more"]) == 0  # $2 in the run, $1 in the follow-up
+
+    write("slow.yaml", """
+        version: 1
+        name: slow
+        limits: {duration: 2s}
+        start: {input: {}}
+        follow_up: {to: wait}
+        nodes:
+          wait: {needs: [start], command: "sleep 1.2  # {% if follow_up %}{{ follow_up.number }}{% endif %}"}
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "slow.yaml"]) == 0
+    (slow,) = [r for r in runs.all_runs(Path.cwd()) if r.info()["workflow"] == "slow"]
+    assert cli.main(["continue", slow.id, "more"]) == 0  # 2.4 seconds in the run, 1.2 in the follow-up
 
 
 def test_a_dry_run_takes_the_next_entries_of_its_script_and_makes_its_branches_again(repo, capsys):
@@ -240,7 +277,7 @@ def test_a_dry_run_takes_the_next_entries_of_its_script_and_makes_its_branches_a
     run = only_run()
     assert not workspaces.branch_exists(Path.cwd(), f"wf/{run.id}/work")  # a dry run that succeeds deletes them
     assert cli.main(["continue", run.id, "more"]) == 0
-    assert run.output() == {"seen": "two\n"}  # its branch started again from the base: only the new file
+    assert run.output() == {"seen": "one\ntwo\n"}  # its branch started again where the run left it
 
 
 # ---------- what wf continue refuses ----------
@@ -315,7 +352,7 @@ def test_a_branch_that_is_gone_or_checked_out_elsewhere_changes_nothing(repo, ca
     git("checkout", "-q", branch)  # you look at the result in your own checkout
     assert cli.main(["continue", run.id, "more"]) == 1
     error = capsys.readouterr().err
-    assert "can't bring back a worktree of the run, so the run stays as it was: `work` worked in" in error
+    assert "can't bring back the run's workspaces, so the run stays as it was: `work` worked in" in error
     assert not (workspaces.root() / run.id).exists()
     assert run.status()["status"] == "succeeded" and "follow_up" not in run.info()
 
@@ -332,14 +369,14 @@ def test_a_follow_up_that_cant_be_written_into_the_checkpoints_changes_nothing(r
     before = run.info()
     give = runner._give
 
-    async def broken(ctx, request):
+    async def broken(ctx, given):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(runner, "_give", broken)
     assert cli.main(["continue", run.id, "more", "--limit", "tokens=50"]) == 1
     assert capsys.readouterr().err == (f"wf continue: can't give run {run.id} the follow-up, so the run stays as it was: "
                                        "No space left on device\n")
-    assert run.info() == before and run.status()["status"] == "succeeded"
+    assert run.info() == before and run.status()["status"] == "succeeded" and "follow_up" not in run.status()
     assert not (workspaces.root() / run.id).exists()
     monkeypatch.setattr(runner, "_give", give)
     assert cli.main(["continue", run.id, "more"]) == 0
@@ -349,16 +386,37 @@ def test_a_follow_up_that_cant_be_written_into_the_checkpoints_changes_nothing(r
 def test_a_follow_up_that_never_started_is_taken_in_by_wf_retry(repo, monkeypatch, capsys):
     run = ran(capsys)
     drive = runner._retry
-    monkeypatch.setattr(runner, "_retry", lambda *args: 0)  # as if wf stopped after it kept the request
+    monkeypatch.setattr(runner, "_retry", lambda *args: 0)  # as if wf stopped after it wrote the request
     assert cli.main(["continue", run.id, "more"]) == 0
     monkeypatch.setattr(runner, "_retry", drive)
+    # Its state says the follow-up runs, never that it succeeded with the old output
+    state = operate.state(run)
+    assert (state["status"], state["follow_up"], "output" in state) == ("running", 1, False)
+    assert firstmate.invoke({"operation": "result.terminal", "input": {"content": json.dumps(state)}})["result"] == {"value": False}
     capsys.readouterr()
     assert cli.main(["continue", run.id, "other"]) == 1
-    assert capsys.readouterr().err == (f"wf continue: run {run.id} has a follow-up that hasn't started yet: "
-                                       f"start it with wf retry {run.id}\n")
+    assert capsys.readouterr().err == (f"wf continue: run {run.id} stopped before it ended: "
+                                       f"continue it with wf retry {run.id}\n")
     assert cli.main(["retry", run.id]) == 0
     assert run.output()["notes"].splitlines()[-1] == "more (check is none)"
     assert [r["action"] for r in trace_view.records(run) if r["kind"] == "run"] == ["started", "continued"]
+
+
+def test_a_follow_up_that_stopped_before_its_request_was_written_leaves_the_run_as_it_was(repo, capsys):
+    run = ran(capsys)
+    run.set_status("running", follow_up=1)  # as wf continue leaves it when it is killed before its checkpoint write
+    assert cli.main(["retry", run.id]) == 0
+    assert run.status()["status"] == "succeeded" and "follow_up" not in run.status()
+    assert cli.main(["continue", run.id, "more"]) == 0
+    assert run.status()["follow_up"] == 1
+
+
+def test_a_run_whose_end_isnt_in_its_checkpoints_is_refused(repo, capsys):
+    run = ran(capsys)
+    run.checkpoints.unlink()
+    assert cli.main(["continue", run.id, "more"]) == 1
+    assert capsys.readouterr().err == (f"wf continue: run {run.id} has no checkpoint of its end to continue from: "
+                                       f"wf retry {run.id} says where it stands\n")
 
 
 @pytest.mark.parametrize("args, stdin, error", [
@@ -501,13 +559,27 @@ def test_follow_up_names_nodes_of_the_workflow(repo, before, after, problem):
 
 def test_a_template_reads_follow_up_only_in_a_workflow_that_has_it_and_checks_it_first(repo):
     without = problems(REVIEW.replace("follow_up: {to: implement}\n", ""))
-    assert any("reads `follow_up`, but the workflow has no `follow_up` key, so it is always none" in p for p in without)
+    assert "nodes.implement.command: unknown name `follow_up`" in without
     unguarded = problems(REVIEW.replace("{% if follow_up %}{{ follow_up.request | quote }}{% endif %}", "{{ follow_up.request | quote }}"))
     assert unguarded == ["warning: nodes.implement.command: reads `follow_up.request`, but `follow_up` is none until "
-                         "`wf continue` gives the run a request; check first with {% if follow_up %}...{% endif %}"]
+                         "`wf continue` gives the run a request; check first with {% if follow_up %}...{% endif %}, "
+                         "or in a single value `follow_up.request if follow_up else none`"]
     unread = problems(REVIEW.replace("{% if follow_up %}{{ follow_up.request | quote }}{% endif %}", "x"))
-    assert unread == ["warning: follow_up: no template reads `follow_up`, so a follow-up request reaches no node; put "
-                      "{{ follow_up.request }} in the instruction of a node it starts, inside {% if follow_up %}...{% endif %}"]
+    assert unread == ["warning: follow_up: no node that a follow-up runs again reads `follow_up`, so its request reaches "
+                      "no node; put {{ follow_up.request }} in the instruction of a node that `follow_up.to` starts, inside "
+                      "{% if follow_up %}...{% endif %}"]
+    # A node that a follow-up doesn't run again never gets the request
+    before = problems("""
+        version: 1
+        name: before
+        start: {input: {}}
+        follow_up: {to: work}
+        nodes:
+          plan: {needs: [start], command: "echo {% if follow_up %}{{ follow_up.request | quote }}{% endif %}"}
+          work: {needs: [plan], command: "true"}
+        end: {output: {}}
+    """)
+    assert any("no node that a follow-up runs again reads `follow_up`" in p for p in before)
     unquoted = problems(REVIEW.replace("{{ follow_up.request | quote }}", "{{ follow_up.request }}"))
     assert any("puts output from `follow_up` into the shell unquoted" in p for p in unquoted)
 
@@ -516,3 +588,233 @@ def test_a_template_that_reads_a_node_a_follow_up_clears_gets_a_warning(repo):
     found = problems(REVIEW.replace("follow_up: {to: implement}", "follow_up: {to: review}"))
     why = "might not have run yet in a follow-up, which clears the outputs of the nodes that `follow_up.to` can lead to"
     assert [p.split(":", 2)[1].strip() for p in found if why in p] == ["nodes.review.command", "end.output.passed.value"]
+
+
+# ---------- the workspaces that come back ----------
+
+
+SHARE = """
+version: 1
+name: share
+start: {input: {}}
+follow_up: {to: publish}
+nodes:
+  build:
+    needs: [start]
+    workspace: new
+    command: echo built > out && git add out && git -c user.email=t@t -c user.name=t commit -qm built
+  scratch: {needs: [build], workspace: temp, command: "echo note > note"}
+  publish:
+    needs: [scratch]
+    workspace: build
+    env: {SCRATCH: "{{ workspace.scratch.path }}", BUILD: "{{ workspace.build.path }}"}
+    command: 'cat out && test -d "$BUILD" && echo {% if follow_up %}{{ follow_up.request | quote }}{% endif %}'
+  reuse: {needs: [publish], workspace: scratch, command: "ls -A | wc -l"}
+end:
+  output:
+    said: {type: string, value: "{{ publish.stdout }}"}
+    files: {type: string, value: "{{ reuse.stdout | trim }}"}
+"""
+
+
+def test_a_follow_up_finds_the_workspaces_of_nodes_it_doesnt_run_again(repo, capsys):
+    write("share.yaml", SHARE)
+    assert cli.main(["run", "share.yaml"]) == 0
+    run = only_run()
+    assert run.output() == {"said": "built\n\n", "files": "1"}
+    assert cli.main(["continue", run.id, "again"]) == 0
+    # publish works in build's worktree and reads its path, though build doesn't run again,
+    # and the temp folder that reuse shares with scratch comes back empty
+    assert run.output() == {"said": "built\nagain\n", "files": "0"}
+
+
+def test_a_workspace_that_cant_come_back_changes_nothing(repo, capsys):
+    write("share.yaml", SHARE)
+    assert cli.main(["run", "share.yaml"]) == 0
+    run = only_run()
+    workspaces.temp_root(run.id).parent.mkdir(parents=True, exist_ok=True)
+    workspaces.temp_root(run.id).write_text("not a folder")
+    capsys.readouterr()
+    assert cli.main(["continue", run.id, "again"]) == 1
+    assert capsys.readouterr().err.startswith("wf continue: can't bring back the run's workspaces, so the run stays as it "
+                                              f"was: can't make {workspaces.temp_root(run.id)}/scratch/1: ")
+    assert run.status()["status"] == "succeeded" and not (workspaces.root() / run.id).exists()
+
+
+def test_a_sub_workflows_worktree_comes_back_on_its_branch_and_a_gone_one_is_refused(repo, capsys):
+    write("parent.yaml", """
+        version: 1
+        name: parent
+        start: {input: {}}
+        follow_up: {to: build}
+        nodes:
+          build: {needs: [start], workflow: child.yaml, with: {note: "{{ follow_up.request if follow_up else 'first' }}"}}
+        end: {output: {}}
+    """)
+    write("child.yaml", """
+        version: 1
+        name: child
+        start: {input: {note: {type: string}}}
+        nodes:
+          make:
+            needs: [start]
+            workspace: new
+            branch: feature-pr
+            env: {NOTE: "{{ start.note }}"}
+            command: echo "$NOTE" >> notes && git add notes && git -c user.email=t@t -c user.name=t commit -qm "$NOTE"
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "parent.yaml"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "second"]) == 0
+    assert git("log", "--format=%s", "feature-pr").splitlines() == ["second", "first", "first"]
+    git("branch", "-q", "-D", "feature-pr")
+    capsys.readouterr()
+    assert cli.main(["continue", run.id, "third"]) == 1
+    assert "`build/make` worked in" in (error := capsys.readouterr().err) and "its branch `feature-pr` is gone" in error
+
+
+def test_a_follow_up_that_works_in_your_checkout_needs_the_branch_the_run_worked_on(repo, capsys):
+    write("here.yaml", """
+        version: 1
+        name: here
+        start: {input: {}}
+        follow_up: {to: look}
+        nodes:
+          look: {needs: [start], command: "git rev-parse --abbrev-ref HEAD  # {% if follow_up %}{{ follow_up.number }}{% endif %}"}
+        end: {output: {branch: {type: string, value: "{{ look.stdout | trim }}"}}}
+    """)
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    assert cli.main(["run", "here.yaml"]) == 0
+    run = only_run()
+    git("checkout", "-q", "-b", "other")
+    capsys.readouterr()
+    assert cli.main(["continue", run.id, "more"]) == 1
+    assert capsys.readouterr().err == (f"wf continue: run {run.id} worked on branch `{branch}` in {Path.cwd().resolve()}, "
+                                       f"and that checkout is on `other` now: check out `{branch}` there first\n")
+    git("checkout", "-q", branch)
+    assert cli.main(["continue", run.id, "more"]) == 0
+    assert run.output() == {"branch": branch}
+
+
+# ---------- entries, state, limits and the trace ----------
+
+
+def test_a_follow_up_can_start_at_several_nodes(repo, capsys):
+    write("two.yaml", """
+        version: 1
+        name: two
+        start: {input: {}}
+        follow_up: {to: [left, right]}
+        nodes:
+          left: {needs: [start], command: "echo L{% if follow_up %}{{ follow_up.number }}{% endif %}"}
+          right: {needs: [start], command: "echo R{% if follow_up %}{{ follow_up.number }}{% endif %}"}
+          join: {needs: [left, right], env: {BOTH: "{{ left.stdout | trim }}{{ right.stdout | trim }}"}, command: 'echo "$BOTH"'}
+        end: {output: {both: {type: string, value: "{{ join.stdout | trim }}"}}}
+    """)
+    assert [str(p) for p in validate.check("two.yaml").problems] == []  # both entries run before the join, also in a follow-up
+    assert cli.main(["run", "two.yaml"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "more"]) == 0
+    assert run.output() == {"both": "L1R1"}
+
+
+def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
+    workflow = spec.parse(dedent("""
+        version: 1
+        name: two
+        start: {input: {}}
+        follow_up: {to: [a, b]}
+        nodes:
+          plan: {needs: [start], command: "true"}
+          a: {needs: [plan], command: "true"}
+          b: {needs: [plan], for_each: "[1, 2]", on_item_error: continue, command: "true"}
+          join: {needs: [a, b], command: "true", routes: [{to: a, max: 1}, {to: end}]}
+        end: {output: {}}
+    """).lstrip())
+    saved = {"run": {"id": "x", "dir": "x", "base": None, "branch": None, "repo": "."}, "status": "succeeded", "failure": None,
+             "outputs": {"start": {}, "plan": {"exit_code": 0}, "a": {"exit_code": 0}, "b": [{"exit_code": 0}], "join": {}},
+             "errors": {"b": [{"index": 1, "item": 2, "error": "exited with code 1"}]}, "taken": {"join:0": 1},
+             "history": {"a": [{}, {}]}, "pending": [], "active": {}, "output": {"done": True},
+             "sessions": {"a": {"harness": "codex", "model": None, "id": "s1", "cost_usd": 0.0, "streak": 2}},
+             "usage": {"cost_usd": 1.5, "tokens": 300}, "follow_up": {"request": "more", "number": 1, "limits": {}, "pending": True}}
+    events = []
+    progress = state.Progress(saved, workflow, scheduler.Topology.of(workflow), events.append)
+    progress.follow_up(42.0)
+    taken = progress.update()
+    assert (taken["pending"], set(taken["outputs"]), taken["errors"]) == (["a", "b"], {"start", "plan"}, {})
+    assert (taken["taken"], taken["sessions"]["a"]["streak"], taken["history"]) == ({}, 0, {"a": [{}, {}]})
+    assert (taken["status"], taken["output"]) == ("running", None)
+    assert taken["follow_up"] == {"request": "more", "number": 1, "limits": {},
+                                  "from": {"cost_usd": 1.5, "tokens": 300, "elapsed_s": 42.0}}
+    assert events == [{"event": "follow_up", "number": 1, "to": ["a", "b"]}]
+    assert progress.vars()["follow_up"] == {"request": "more", "number": 1}
+
+
+def test_a_job_that_runs_again_before_the_first_step_counts_only_the_follow_ups_time():
+    workflow = spec.parse("version: 1\nname: t\nlimits: {duration: 1m}\nstart: {input: {}}\nnodes:\n"
+                          "  a: {needs: [start], command: 'true'}\nend: {output: {}}\n")
+    ctx = RunContext(workflow, runs.Run("t", Path("."), Path(".")), home={})
+    used = {"cost_usd": 0.0, "tokens": 0}
+    ctx.resume({"elapsed_s": 125.0, "usage": used, "follow_up": {"from": {**used, "elapsed_s": 120.0}}})
+    assert ctx.limit_check() is None  # 5 seconds of the follow-up, not the run's 125
+    ctx.resume({"elapsed_s": 125.0, "usage": used})
+    assert ctx.limit_check()[0] == "duration"
+
+
+def test_a_secret_request_stays_out_of_the_trace_and_the_events(repo, capsys):
+    write("secret.yaml", """
+        version: 1
+        name: secret
+        start: {input: {}}
+        follow_up: {to: use}
+        nodes:
+          use:
+            needs: [start]
+            env: {TOKEN: "{{ follow_up.request if follow_up else 'none' }}"}
+            secret_env: [TOKEN]
+            command: 'test -n "$TOKEN"'
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "secret.yaml"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "SECRET-FOLLOWUP-TOKEN"]) == 0
+    assert "SECRET-FOLLOWUP-TOKEN" not in capsys.readouterr().out
+    for name in ("trace.jsonl", "events.jsonl", "status.json", "run.json"):
+        assert "SECRET-FOLLOWUP-TOKEN" not in (run.dir / name).read_text()
+    (continued,) = [r for r in trace_view.records(run) if r.get("action") == "continued"]
+    assert continued["request"] == "[secret]"
+
+
+def test_wf_status_says_a_node_that_a_follow_up_skips_is_skipped():
+    workflow = spec.parse(dedent("""
+        version: 1
+        name: skip
+        start: {input: {}}
+        follow_up: {to: check}
+        nodes:
+          check: {needs: [start], command: "true", routes: [{when: "check.exit_code != 0", to: fix}, {to: ship}]}
+          fix: {command: "true", routes: [{to: ship}]}
+          ship: {command: "true"}
+        end: {output: {}}
+    """).lstrip())
+    at = "2026-10-20T10:00:00+00:00"
+
+    def lap(node: str, number: int, to: str | None = None, index: int = 0) -> list[dict]:
+        found = [{"time": at, "event": kind, "node": node, "pass": number} for kind in ("node_started", "node_finished")]
+        return found + ([{"time": at, "event": "route", "node": node, "route": index, "to": [to], "taken": 1}] if to else [])
+
+    events = [*lap("check", 1, "fix"), *lap("fix", 1, "ship"), *lap("ship", 1),
+              {"time": at, "event": "follow_up", "number": 1, "to": ["check"]}, *lap("check", 2, "ship", 1),
+              {"time": at, "event": "node_started", "node": "ship", "pass": 2}]
+    found = progress.estimate(workflow, events, "running")
+    assert {n: i["state"] for n, i in found["nodes"].items()} == {"check": "done", "fix": "skipped", "ship": "running"}
+
+
+def test_what_earlier_runs_teach_is_learnt_again_once_a_follow_up_adds_to_them(repo, capsys):
+    run = ran(capsys)
+    workflow = spec.load(run.workflow_file)
+    first = progress.learn(workflow, [run])
+    assert progress.learn(workflow, [run]) is first  # kept while the run doesn't change
+    assert cli.main(["continue", run.id, "more"]) == 0
+    assert progress.learn(workflow, [run]) is not first

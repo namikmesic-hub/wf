@@ -20,10 +20,7 @@ as a JSON Schema; schemas.field_at() walks the path through it.
 certain to have finished before a node starts: its dominators (nodes on every
 path of "this finishing made that pending" that leads to it), plus nodes those
 make certain and that must finish before it can start. A template that reads
-any other node without `{% if node %}` gets a warning. A workflow with
-`follow_up` has a second _Order, for a follow-up (`wf continue`): it starts at
-the nodes `follow_up` names, and clears the outputs of the nodes they can lead
-to, so a node must be certain in both.
+any other node without `{% if node %}` gets a warning.
 """
 
 import difflib
@@ -49,9 +46,6 @@ _RUN = schemas.object_schema({
     "tokens": {"type": "integer"}, "elapsed_s": {"type": "number"}, "base": {"type": ["string", "null"]},
 })
 _SESSION = schemas.object_schema({"continued": {"type": "boolean"}})
-_FOLLOW_UP = schemas.object_schema({
-    "request": {"type": "string"}, "number": {"type": "integer"}, "requests": {"type": "array", "items": {"type": "string"}},
-})
 _JINJA_GLOBALS = frozenset({"range", "dict", "lipsum", "cycler", "joiner", "namespace"})
 _SAFE_IN_SHELL = frozenset({"integer", "number", "boolean", "null"})  # can't carry shell syntax
 
@@ -114,7 +108,6 @@ class _Checker:
         self.harnesses: set[str] = set()
         self.cost_refs: list[str] = []  # where templates read run.cost_usd
         self.token_refs: list[str] = []  # where templates read run.tokens
-        self.follow_up_refs: list[str] = []  # where templates read follow_up
         self.end_fields: dict[str, dict] = {}
         self.branches: list[_Branch] = []
         self._warned: set = set()
@@ -134,13 +127,11 @@ class _Checker:
         self.topo = self._edges()
         self._reachable()
         self._routes_and_loops()
-        entry = self._follow_up()
         self._schemas()
         self.roots = self._roots()  # without sub-workflow outputs yet; enough to follow tainted data
         self._sub_workflows()
         self.roots = self._roots()
-        self.order = _Order(self.topo)
-        self.follow_up_order = _Order(self.topo, entry, frozenset(self.order.at_end())) if entry else None
+        self.order, self.follow_ups = (order := _Order(self.topo)), _FollowUps(self, order)
         if self.wf.defaults.tools is not None:  # once, whether or not an agent node inherits them
             self._tool_list("defaults.tools", self.wf.defaults.tools)
         self._secret_env()
@@ -150,10 +141,6 @@ class _Checker:
         self._end()
         self._concurrent_edits()
         self._usage()
-        if entry and not self.follow_up_refs:
-            self.warn("follow_up", "no template reads `follow_up`, so a follow-up request reaches no node; "
-                                   "put {{ follow_up.request }} in the instruction of a node it starts, inside "
-                                   "{% if follow_up %}...{% endif %}")
         end_schema = {
             "type": "object", "properties": self.end_fields,
             "required": list(self.end_fields), "additionalProperties": False,
@@ -242,18 +229,6 @@ class _Checker:
             if closing:  # cycles made only of needs were reported in _edges
                 self.error(f"nodes.{closing[0]}.routes", f"loop {' → '.join(cycle)} has no route with `max`, so it could run forever")
 
-    def _follow_up(self) -> tuple[str, ...]:
-        """The nodes a follow-up starts at, once `follow_up.to` names only nodes that exist (else none)."""
-        if self.wf.follow_up is None:
-            return ()
-        targets = self.wf.follow_up.targets
-        for target in targets:
-            if target in (START, END):
-                self.error("follow_up.to", f"a follow-up starts at nodes of the workflow, not at `{target}`")
-            elif target not in self.nodes:
-                self.error("follow_up.to", f"unknown node `{target}`{_hint(target, self.nodes)}")
-        return targets if all(t in self.nodes for t in targets) else ()
-
     # ---------- 2. schemas ----------
 
     def _schemas(self) -> None:
@@ -298,8 +273,7 @@ class _Checker:
             "workspace": fields({n: per_pass(n, _WORKSPACE) for n in self.nodes}),
             "errors": fields({n: {"type": "array", "items": _ERROR_ITEM} for n in self.nodes}),
             "run": _RUN,
-            "session": _SESSION,
-            "follow_up": _FOLLOW_UP,
+            "session": _SESSION, **({"follow_up": _FOLLOW_UP} if self.wf.follow_up else {}),
         }
 
     # ---------- 3. sub-workflows ----------
@@ -408,10 +382,6 @@ class _Checker:
         elif name == "session" and context == "end":
             self.error(where, "`session` isn't available in end.output, only while a node renders")
             return
-        elif name == "follow_up" and self.wf.follow_up is None:
-            self.error(where, "reads `follow_up`, but the workflow has no `follow_up` key, so it is always none; "
-                              "add `follow_up: {to: <node>}` to name the node that takes a follow-up request")
-            return
         elif name in self.roots:
             schema = self.roots[name]
         elif name in _JINJA_GLOBALS:
@@ -419,8 +389,6 @@ class _Checker:
         else:
             self.error(where, f"unknown name `{name}`{_hint(name, self.roots)}")
             return
-        if name == "follow_up":
-            self._follow_up_read(where, ref)
         if ref.path is None:
             return
         try:
@@ -434,16 +402,9 @@ class _Checker:
             self.token_refs.append(where)
         self._might_not_have_run(where, ref, node_id, context)
 
-    def _follow_up_read(self, where: str, ref: Ref) -> None:
-        self.follow_up_refs.append(where)
-        if ref.path and "follow_up" not in ref.guarded and (where, "follow_up") not in self._warned:
-            self._warned.add((where, "follow_up"))
-            self.warn(where, f"reads `{_dotted('follow_up', ref.path)}`, but `follow_up` is none until `wf continue` "
-                             "gives the run a request; check first with {% if follow_up %}...{% endif %}")
-
     def _might_not_have_run(self, where: str, ref: Ref, node_id: str | None, context: str) -> None:
         name, path = ref.name, ref.path
-        if name in self.nodes:
+        if name in self.nodes or name == "follow_up":  # follow_up is none before `wf continue`, as a node that hasn't run
             target, reads_field = name, bool(path)
         elif name == "workspace" and path and path[0] in self.nodes:
             target, reads_field = path[0], len(path) > 1
@@ -453,24 +414,16 @@ class _Checker:
             return
         if not reads_field:
             return  # reading a node that hasn't run just gives none
-        ran, why = self._ran(self.order, node_id, context), ""
-        again = self.follow_up_order  # a follow-up clears outputs, but not workspaces
-        if (target in ran and again and name in self.nodes and (context == "end" or node_id in again.ahead)
-                and target not in self._ran(again, node_id, context)):
-            ran, why = set(), " in a follow-up, which clears the outputs of the nodes that `follow_up.to` can lead to"
+        ran = self.order.at_end() if context == "end" else self.order.before(node_id) | ({node_id} if context == "when" else set())
+        cleared = target in ran and self.follow_ups.clears(name, target, node_id, context)  # outputs, not workspaces
+        why = " in a follow-up, which clears the outputs of the nodes that `follow_up.to` can lead to" if cleared else ""
+        ran = set() if cleared else ran
         if target in ran or target in ref.guarded or f"workspace.{target}" in ref.guarded or (where, target) in self._warned:
             return
         self._warned.add((where, target))
-        self.warn(where, f"reads `{_dotted(name, path)}`, but `{target}` might not have run yet{why}; check first with "
+        self.warn(where, f"reads `{_dotted(name, path)}`, but {_not_yet(target)}{why}; check first with "
                          f"{{% if {target} %}}...{{% endif %}}, or in a single value `{_dotted(name, path)} if {target} else none`"
                          + (" (fails the run if it hasn't)" if context == "end" else ""))
-
-    @staticmethod
-    def _ran(order: "_Order", node_id: str | None, context: str) -> set[str]:
-        """The nodes certain to have finished where a template of `node_id` reads them."""
-        if context == "end":
-            return order.at_end()
-        return order.before(node_id) | ({node_id} if context == "when" else set())
 
     def _for_each(self, node_id: str) -> None:
         expression = self.nodes[node_id].for_each
@@ -917,17 +870,10 @@ class _Checker:
 
 
 class _Order:
-    """Which nodes are certain to have finished at a given point of a run.
+    """Which nodes are certain to have finished at a given point of a run."""
 
-    With `entry`, of a follow-up that starts at those nodes instead of at start: the nodes they can
-    lead to (`ahead`) run again from none, and of the others only `kept`, the nodes certain to have
-    run by the end of the run, count as finished."""
-
-    def __init__(self, topo: Topology, entry: tuple[str, ...] = (), kept: frozenset[str] = frozenset()):
+    def __init__(self, topo: Topology):
         self.topo = topo
-        self.ahead = topo.reachable(entry) if entry else set(topo.order)
-        self.kept = kept - self.ahead
-        self.root = {START} if entry else set()  # a follow-up's start finished long ago: it makes nothing pending
         self.route_sources: dict[str, list[str]] = {n: [] for n in topo.order}
         for source in topo.order:
             for route in topo.routes[source]:
@@ -938,10 +884,7 @@ class _Order:
         triggers = {n: set(topo.needs[n]) | set(self.route_sources[n]) for n in topo.order}
         triggers[END] = {n for n in topo.order
                          if any(END in r.targets for r in topo.routes[n]) or not (topo.routes[n] or topo.dependents.get(n))}
-        if entry:  # only the nodes ahead finish in a follow-up, and its start makes the entry nodes pending
-            triggers = {n: (found & self.ahead) | ({START} if n in entry else set()) for n, found in triggers.items()}
-        reached = self.ahead | {START, END} if entry else topo.reachable([START]) | {END}
-        self.dominators = _dominators([START, *topo.order, END], triggers, reached)
+        self.dominators = _dominators([START, *topo.order, END], triggers, topo.reachable([START]) | {END})
         self.predecessors: dict[str, set[str]] = {n: set() for n in (START, *topo.order)}
         for node, successors in topo.successors.items():
             for nxt in successors:
@@ -951,13 +894,13 @@ class _Order:
     def before(self, node: str) -> set[str]:
         """Nodes certain to have finished before `node` starts."""
         if node not in self._before:
-            known = self.dominators[node] - {node} - self.root
-            self._before[node] = known | (self._ancestors(node) & self._certain(known, excluding=node)) | self.kept
+            known = self.dominators[node] - {node}
+            self._before[node] = known | (self._ancestors(node) & self._certain(known, excluding=node))
         return self._before[node]
 
     def at_end(self) -> set[str]:
         """Nodes certain to have run by the time end.output is computed."""
-        return self._certain(self.dominators[END] - {END} - self.root, excluding=None) | self.kept
+        return self._certain(self.dominators[END] - {END}, excluding=None)
 
     def _ancestors(self, node: str) -> set[str]:
         seen, todo = set(), [node]
@@ -974,7 +917,7 @@ class _Order:
         while changed:
             changed = False
             for node in self.topo.order:
-                if node in done or node == excluding or node not in self.ahead:
+                if node in done or node == excluding:
                     continue
                 by_needs = any(need in done for need in self.topo.needs[node])
                 by_routes = any(s in done and all(node in r.targets for r in self.topo.routes[s]) for s in self.route_sources[node])
@@ -1095,3 +1038,96 @@ def _kinds(kinds: set[str], article: bool = False) -> str:
     names = sorted(k for k in kinds if not (k == "number" and "integer" in kinds))
     text = " or ".join(names) or "nothing"
     return f"{'an' if text[0] in 'aeiou' else 'a'} {text}" if article else text
+
+
+# ---------- follow-ups ----------
+
+
+_FOLLOW_UP = schemas.object_schema({"request": {"type": "string"}, "number": {"type": "integer"}})
+
+
+def _not_yet(target: str) -> str:
+    """Why a template may find `target` none, for a warning."""
+    if target == "follow_up":
+        return "`follow_up` is none until `wf continue` gives the run a request"
+    return f"`{target}` might not have run yet"
+
+
+class _FollowUps:
+    """The checks of a workflow's `follow_up` (`wf continue`): it names nodes of the workflow, a template of a
+    node that a follow-up runs again reads `follow_up`, and a template doesn't read an output that a
+    follow-up clears before it. `order` is the follow-up's _FollowUpOrder, or None without a good `follow_up`."""
+
+    def __init__(self, checker: "_Checker", order: _Order):
+        self.checker, self.order = checker, None
+        if checker.wf.follow_up is None:
+            return
+        targets = checker.wf.follow_up.targets
+        for target in targets:
+            if target in (START, END):
+                checker.error("follow_up.to", f"a follow-up starts at nodes of the workflow, not at `{target}`")
+            elif target not in checker.nodes:
+                checker.error("follow_up.to", f"unknown node `{target}`{_hint(target, checker.nodes)}")
+        if not all(t in checker.nodes for t in targets):
+            return
+        self.order = _FollowUpOrder(checker.topo, targets, frozenset(order.at_end()))
+        if not any(_reads_follow_up(checker.wf, node) for node in self.order.ahead):
+            checker.warn("follow_up", "no node that a follow-up runs again reads `follow_up`, so its request reaches "
+                                      "no node; put {{ follow_up.request }} in the instruction of a node that "
+                                      "`follow_up.to` starts, inside {% if follow_up %}...{% endif %}")
+
+    def clears(self, name: str, target: str, node_id: str | None, context: str) -> bool:
+        """Can a follow-up clear the output of `target` before the template of `node_id` reads it?"""
+        order = self.order
+        if order is None or name not in self.checker.nodes or (context != "end" and node_id not in order.ahead):
+            return False
+        ran = order.at_end() if context == "end" else order.before(node_id) | ({node_id} if context == "when" else set())
+        return target not in ran
+
+
+def _reads_follow_up(workflow: Workflow, node_id: str) -> bool:
+    """Does a template or expression of the node read `follow_up`?"""
+    node = workflow.nodes[node_id]
+    texts = [(text, False) for text in (getattr(node, "instruction", None), getattr(node, "command", None),
+                                        getattr(node, "human", None), node.base, node.branch) if isinstance(text, str)]
+    texts += [(text, False) for text in workflow.setting(node_id, "env").values()] if node.kind == "command" else []
+    texts += [(text, False) for text in node.with_.values() if isinstance(text, str)] if node.kind == "workflow" else []
+    for name in ("harness", "model", "effort"):  # a string, a list of harnesses, or a map by harness
+        value = getattr(node, name, None)
+        texts += [(text, False) for text in (value.values() if isinstance(value, dict) else [value]) if isinstance(text, str)]
+    texts += [(node.for_each, True)] if node.for_each is not None else []
+    texts += [(route.when, True) for route in node.routes if route.when is not None]
+    for text, expression in texts:
+        try:
+            if any(ref.name == "follow_up" for ref in templates.references(text, expression=expression)):
+                return True
+        except TemplateError:
+            continue  # reported where the node is checked
+    return False
+
+
+class _FollowUpOrder(_Order):
+    """_Order for a follow-up, which starts at the nodes in `entry` instead of at start. The nodes they can
+    lead to (`ahead`) run again from none. Of the others, only `kept`, the nodes certain to have run by the
+    end of the run, count as finished. The entry nodes are certain to run, as start's nodes are in a run."""
+
+    def __init__(self, topo: Topology, entry: tuple[str, ...], kept: frozenset[str]):
+        super().__init__(topo)
+        self.entry, self.ahead = set(entry), topo.reachable(entry)
+        self.kept = kept - self.ahead
+        triggers = {n: (set(topo.needs[n]) | set(self.route_sources[n])) & self.ahead for n in topo.order}
+        for node in self.entry:
+            triggers[node].add(START)
+        triggers[END] = {n for n in self.ahead
+                         if any(END in r.targets for r in topo.routes[n]) or not (topo.routes[n] or topo.dependents.get(n))}
+        self.dominators = _dominators([START, *topo.order, END], triggers, self.ahead | {START, END})
+
+    def before(self, node: str) -> set[str]:
+        if node not in self._before:
+            known = self.dominators[node] - {node, START}  # a follow-up's start ended long ago
+            certain = self._certain(known | self.entry, excluding=node)
+            self._before[node] = known | (self._ancestors(node) & certain) | self.kept
+        return self._before[node]
+
+    def at_end(self) -> set[str]:
+        return self._certain((self.dominators[END] - {END, START}) | self.entry, excluding=None) | self.kept

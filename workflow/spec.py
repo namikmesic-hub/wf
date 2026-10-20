@@ -287,16 +287,6 @@ class End(_Model):
     output: dict[str, Annotated[str | dict, PlainValidator(_end_value)]] = {}
 
 
-class FollowUp(_Model):
-    """Where `wf continue` sends a follow-up request: the nodes that become pending."""
-
-    to: NameOrList
-
-    @property
-    def targets(self) -> tuple[str, ...]:
-        return (self.to,) if isinstance(self.to, str) else tuple(self.to)
-
-
 # Built-in defaults, used when neither the node nor `defaults` sets a field
 _BUILTIN = {
     "max_parallel": 4,
@@ -311,6 +301,16 @@ _BUILTIN = {
 }
 _TIMEOUT = {"agent": "60m", "command": "60m"}  # human and workflow nodes have none
 _RETRY = {"agent": 1}  # others: 0
+
+
+class FollowUp(_Model):
+    """Where `wf continue` sends a follow-up request: the nodes that become pending."""
+
+    to: NameOrList
+
+    @property
+    def targets(self) -> tuple[str, ...]:
+        return (self.to,) if isinstance(self.to, str) else tuple(self.to)
 
 
 class Workflow(_Model):

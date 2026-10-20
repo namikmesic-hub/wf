@@ -5,11 +5,9 @@
     wf validate <file>               check a file and every sub-workflow it uses
     wf graph <file>                  print the workflow as a Mermaid diagram
     wf run <file> [name=value ...]   validate, then run it (runner.py)
-    wf retry <run-id>                continue a failed or paused run from its last checkpoint
-                                     (with --model NODE=MODEL, another model for a node or for one
-                                     item NODE[INDEX]: overrides.py)
-    wf continue <run-id> <request>   give a run that succeeded a follow-up request: it runs again
-                                     from the node its workflow's `follow_up` names
+    wf retry <run-id>                continue a failed or paused run from its last checkpoint (--model
+                                     NODE=MODEL or NODE[INDEX]=MODEL: another model, overrides.py)
+    wf continue <run-id> <request>   give a run that succeeded a follow-up request (runner.py)
 
 Tools that agent nodes can use (`tools: [slack, ...]`; workflow/tools/):
     wf tools list                    each tool, how it signs in, and whether it's set up
@@ -142,24 +140,6 @@ def main(argv: list[str] | None = None) -> int:
         a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits, a.runs_dir,
         {"model": a.models or [], "harness": a.harnesses or [], "effort": a.efforts or []}))
 
-    following = commands.add_parser(
-        "continue", help="give a run that succeeded a follow-up request, and run it again from its follow-up node",
-        description="Give a run that succeeded a follow-up request. The run goes on from the node that its "
-                    "workflow's `follow_up` names, on the same branches, with each `session: continue` node's "
-                    "last session, fresh route counters, and a budget of its own. A run that runs, waits or failed "
-                    "is refused: wf retry and wf answer continue those.")
-    following.add_argument("run_id", metavar="run-id")
-    following.add_argument("message", nargs="?", metavar="request", help="what the run should do now (or use --file)")
-    following.add_argument("--file", type=Path, metavar="FILE", help="read the request from FILE (- for stdin)")
-    following.add_argument("--no-input", **no_input)
-    following.add_argument("--detach", action="store_true", help="continue in the background")
-    following.add_argument("--json", action="store_true", help="with --detach: print the run id and follow-up number as JSON")
-    following.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE",
-                           help="a limit for this follow-up instead of the file's, counted from its start: cost_usd=20, "
-                                "tokens=5000000, duration=2h, or NAME=none for no limit (repeat for several)")
-    following.add_argument("--runs-dir", **runs_dir)
-    following.set_defaults(handler=_continue)
-
     answer = commands.add_parser("answer", help="answer the questions a run waits on, and continue it")
     answer.add_argument("run_id", metavar="run-id")
     answer.add_argument("answers", type=Path, metavar="answers.json", help="{question key: answers}, keys from wf status")
@@ -167,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     answer.add_argument("--json", action="store_true")
     answer.add_argument("--runs-dir", **runs_dir)
     answer.set_defaults(handler=lambda a: runner.retry(a.run_id, True, a.answers, a.detach, a.json, runs_dir=a.runs_dir))
-
+    _continue_command(commands, no_input, runs_dir)
     wait = commands.add_parser("wait", help="block until a run needs attention; print its state as JSON")
     wait.add_argument("run_id", metavar="run-id")
     wait.add_argument("--timeout", type=float, default=3600, help="seconds (default 3600); exit code 3 if nothing happened")
@@ -498,15 +478,6 @@ def _message(args, what: str = "message") -> str:
     return text
 
 
-def _continue(args) -> int:
-    try:
-        request = _message(args, "request")
-    except ValueError as error:
-        print(f"wf continue: {error}", file=sys.stderr)
-        return 1
-    return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir)
-
-
 def _list(args) -> int:
     states = [operate.state(run) for run in reversed(runs.all_runs(Path.cwd(), args.runs_dir))]
     if args.json:
@@ -531,9 +502,7 @@ def _describe(current: dict) -> str:
         detail = "running, waiting for an agent slot: " + ", ".join(w["node"] for w in current["agents_waiting"])
     else:
         detail = status
-    if current.get("follow_up"):
-        detail += f" (follow-up {current['follow_up']})"
-    return f"{run_id} [{current.get('workflow')}]: {detail}"
+    return f"{run_id} [{current.get('workflow')}]: {detail}" + (f" (follow-up {n})" if (n := current.get("follow_up")) else "")
 
 
 def _chosen(args, dry_runs: bool | None) -> list[runs.Run] | None:
@@ -702,6 +671,38 @@ def _graph(args) -> int:
         return 1
     sys.stdout.write(diagram.mermaid(workflow))
     return 0
+
+
+# ---------- wf continue ----------
+
+
+def _continue_command(commands, no_input: dict, runs_dir: dict) -> None:
+    following = commands.add_parser(
+        "continue", help="give a run that succeeded a follow-up request, and run it again from its follow-up node",
+        description="Give a run that succeeded a follow-up request. The run goes on from the node that its "
+                    "workflow's `follow_up` names, on the same branches, with each `session: continue` node's "
+                    "last session, fresh route counters, and a budget of its own. A run that runs, waits or failed "
+                    "is refused: wf retry and wf answer continue those.")
+    following.add_argument("run_id", metavar="run-id")
+    following.add_argument("message", nargs="?", metavar="request", help="what the run should do now (or use --file)")
+    following.add_argument("--file", type=Path, metavar="FILE", help="read the request from FILE (- for stdin)")
+    following.add_argument("--no-input", **no_input)
+    following.add_argument("--detach", action="store_true", help="continue in the background")
+    following.add_argument("--json", action="store_true", help="with --detach: print the run id and follow-up number as JSON")
+    following.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE",
+                           help="a limit for this follow-up instead of the file's, counted from its start: cost_usd=20, "
+                                "tokens=5000000, duration=2h, or NAME=none for no limit (repeat for several)")
+    following.add_argument("--runs-dir", **runs_dir)
+    following.set_defaults(handler=_continue)
+
+
+def _continue(args) -> int:
+    try:
+        request = _message(args, "request")
+    except ValueError as error:
+        print(f"wf continue: {error}", file=sys.stderr)
+        return 1
+    return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir)
 
 
 if __name__ == "__main__":  # `python -m workflow.cli`, as detached runs start it

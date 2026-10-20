@@ -72,12 +72,12 @@ async def schedule(state: RunState, runtime: Runtime[RunContext]) -> Command:
     ctx.trace.know(progress.vars)  # the secret values the run holds now, also after `wf retry`
 
     elapsed = ctx.elapsed()
-    if state.get("follow_up_request") is not None:  # `wf continue`: a new pass of a run that succeeded
-        progress.follow_up(state["follow_up_request"], elapsed)
+    if (state.get("follow_up") or {}).get("pending"):  # `wf continue`: a new pass of a run that succeeded
+        progress.follow_up(elapsed)
     progress.s["elapsed_s"] = elapsed
     if not ctx.nested:  # execute tasks check limits against this (a sub-workflow adds to it)
         ctx.usage = dict(progress.s["usage"])
-        ctx.budget_from = progress.s.get("budget_from")
+        ctx.budget_from = (progress.s.get("follow_up") or {}).get("from")
     name, reason = ctx.limit_check() or (None, None)  # e.g. ("tokens", "used 5,000 tokens, limit 1,000")
     jobs = []
     if state.get("retry"):  # `wf retry` on a failed or paused run, unless a limit is still reached
@@ -150,9 +150,10 @@ async def finish(state: RunState, runtime: Runtime[RunContext]) -> dict:
     return {"status": "succeeded", "output": output}
 
 
-async def follow_up(compiled, config: dict, request: str) -> None:
-    """Give a run that reached END a follow-up request, as an input of its graph: its next step is schedule."""
-    await compiled.aupdate_state(config, {"follow_up_request": request}, as_node=GRAPH_START)
+async def follow_up(compiled, config: dict, given: dict) -> None:
+    """Give a run that reached END a follow-up request ({request, number, limits, pending}), as an input of
+    its graph, in one write: its next step is schedule."""
+    await compiled.aupdate_state(config, {"follow_up": given}, as_node=GRAPH_START)
 
 
 def variables(state: dict | None, ctx: RunContext) -> dict:

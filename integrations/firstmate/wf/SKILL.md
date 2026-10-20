@@ -145,6 +145,7 @@ Each wake then carries `follow_up`, and you handle its states as for any run.
 `wf continue` takes only a run that succeeded.
 It refuses a run that runs, waits, failed, stopped or is at a limit, and names the command for it: `wf answer` or `wf retry`.
 It also refuses a run whose workflow file had no `follow_up` when the run started, and a run whose branch is gone.
+When a node of the follow-up works in the project folder itself, the folder must be on the branch that the run worked on.
 Then take the request to the captain.
 
 ## Steering an agent while it works

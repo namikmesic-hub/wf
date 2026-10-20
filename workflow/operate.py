@@ -8,15 +8,12 @@ answers its questions and retries it, all through commands with JSON output:
     wf wait <run-id> [--consumer NAME]   block until the run needs attention, print its state
     wf answer <run-id> <answers.json>    answer the questions a run is waiting on, and continue
     wf retry <run-id> --detach           continue in the background
-    wf continue <run-id> <request> --detach --json   give a run that succeeded a follow-up
     wf status <run-id> --json            the state right now
     wf list --json                       every run in this repo
 
 A run "needs attention" when it's waiting for a person, failed, hit a limit,
 succeeded, or stopped: status.json says running but no process holds the run's
 lock any more (the process crashed or was killed). `wf retry` picks it up.
-After `wf continue`, the state says which follow-up the run is on (`follow_up`),
-and each of its states is new to `wait`, as its sequence number goes on.
 
 `wait --consumer NAME` remembers which state it last reported to NAME (by the
 status sequence number, in the run folder), so a watcher that polls in a loop
@@ -76,8 +73,6 @@ def state(run: Run) -> dict:
     info = run.info()  # read once: wait() calls this five times a second
     current["workflow"] = info.get("workflow")
     current["dry_run"] = bool(info.get("dry_run"))
-    if isinstance(info.get("follow_up"), int) and info["follow_up"] > 0:  # the run's pass: `wf continue` gave it
-        current["follow_up"] = info["follow_up"]
     return current
 
 
