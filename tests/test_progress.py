@@ -284,6 +284,31 @@ def test_a_loop_that_a_needs_edge_closes_counts_its_lap_when_it_goes_back():
     assert percents(workflow, events) == [0, 0, 17, 17, 17, 33, 33]
 
 
+def test_a_needs_edge_loop_counts_no_lap_before_its_first_step_ran(repo):
+    Path("entry.yaml").write_text(dedent("""
+        version: 1
+        name: entry
+        start: {input: {}}
+        nodes:
+          a:
+            needs: [start, b]
+            command: "true"
+            routes: [{when: "a.exit_code == 0", to: b, max: 2}, {to: end}]
+          b: {needs: [start], command: "true"}
+        end: {output: {}}
+    """).lstrip())
+    assert cli.main(["run", "entry.yaml"]) == 0
+    workflow, events = spec.load(Path("entry.yaml")), report.events(Run.at(newest()))
+    (loop,) = Shape(workflow).loops
+    assert (loop.last, loop.first, loop.route, loop.max) == ("b", "a", None, 2)
+    ends = [n for n, e in enumerate(events) if e.get("event") == "node_finished"]
+    assert [events[n]["node"] for n in ends] == ["b", "a", "b", "a", "b", "a"]  # start leads into b: b runs first
+    laps = [progress.estimate(workflow, events[:n + 1], "running")["loops"][0]["taken"] for n in ends if events[n]["node"] == "b"]
+    assert laps == [0, 1, 2]  # never more than the loop's max
+    found = percents(workflow, events)
+    assert found == sorted(found)
+
+
 @pytest.mark.parametrize("first, second", [("a", "b"), ("b", "a")])
 def test_open_steps_with_as_much_left_are_told_apart_by_the_least_done_not_by_chance(tmp_path, first, second):
     steps = {"a": '{needs: [start], for_each: "[1, 2, 3, 4]", command: "true"}',
