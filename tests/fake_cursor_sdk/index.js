@@ -11,6 +11,11 @@
 //   {"call": {"name": "shell", "args": {...}, "late_args": {...}, "result": ..., "status": "completed"}}
 //                                                     one of Cursor's own tools
 //   {"mcp": {"server": "github", "tool": "create_issue", "args": {...}}}  another MCP server's tool
+//   {"thinking": ["Let me ", "look."], "thinking_ms": 1200}  a block of thinking: a message for each
+//                                                     piece, then one with the time, as the SDK sends
+//                                                     them. Without "thinking_ms" the block doesn't end
+//   {"request": "req-x"}                              a request message, which the real SDK writes only
+//                                                     to the agent's store
 //   {"usage": {"inputTokens": 1, ...}}                a usage message, whose totalTokens the fake adds up
 //   {"error": {"name": "RateLimitError", "message": "...", "isRetryable": false}}  the stream throws it
 //   {"run_error": {"message": "...", "code": "..."}}  the run ends with status "error"
@@ -18,7 +23,8 @@
 //   {"hang": true, "usage": {...}}                    the same, and report that usage as it ends
 //   {"pause": "p"}                                    write p.paused next to the log, wait for p.go
 //   {"exit": true} | {"child": true} | {"unhandled": true} | {"sleep": 100}
-// Without "usage": false each turn ends with a usage message of USAGE.
+// Without "usage": false each turn ends with a usage message of USAGE. The run of the nth send has
+// the requestId req-<n>, as the real SDK's local run has its own.
 // FAKE_CURSOR_SDK_LOG names a JSON lines file: every call the host makes, with the options it
 // gave (functions as names), each custom tool's answer, and the environment the host runs in.
 
@@ -175,7 +181,7 @@ function nextTurn() {
   const counter = `${LOG}.turn`;
   const index = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
   writeFileSync(counter, String(index + 1));
-  return (SCENARIO.turns ?? [])[index] ?? [];
+  return [index + 1, (SCENARIO.turns ?? [])[index] ?? []];
 }
 
 class FakeAgent {
@@ -187,7 +193,8 @@ class FakeAgent {
 
   async send(text, sendOptions = {}) {
     log("send", { agentId: this.agentId, text, options: plain(sendOptions) });
-    return new FakeRun(this, nextTurn(), sendOptions);
+    const [number, actions] = nextTurn();
+    return new FakeRun(this, actions, sendOptions, `req-${number}`);
   }
 
   close() {
@@ -203,8 +210,9 @@ class FakeAgent {
 let calls = 0;
 
 class FakeRun {
-  constructor(agent, actions, sendOptions) {
+  constructor(agent, actions, sendOptions, requestId) {
     this.id = `run-${Math.random().toString(36).slice(2, 8)}`;
+    this.requestId = requestId;
     this.agentId = agent.agentId;
     this.agent = agent;
     this.tools = sendOptions.local?.customTools ?? agent.options.local?.customTools ?? {};
@@ -259,6 +267,11 @@ class FakeRun {
       await new Promise((resolve) => setTimeout(resolve, 200));
       if (!this.cancelled) this.push({ type: "tool_call", call_id: id, name: "mcp", status: "completed", args, result: { content: [] } });
     }
+    if ("thinking" in action) {
+      for (const text of action.thinking) this.push({ type: "thinking", text });
+      if ("thinking_ms" in action) this.push({ type: "thinking", text: "", thinking_duration_ms: action.thinking_ms });
+    }
+    if ("request" in action) this.push({ type: "request", request_id: action.request });
     if ("usage" in action && !("hang" in action)) this.push({ type: "usage", usage: action.usage });
     if ("error" in action) throw made(action.error);
     if ("run_error" in action) {
@@ -316,7 +329,7 @@ class FakeRun {
 
   async wait() {
     await this.done;
-    return { id: this.id, status: this.status, ...(this.error ? { error: this.error } : {}) };
+    return { id: this.id, requestId: this.requestId, status: this.status, ...(this.error ? { error: this.error } : {}) };
   }
 
   async cancel() {

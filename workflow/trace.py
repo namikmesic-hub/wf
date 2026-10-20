@@ -17,6 +17,9 @@ It is in the top-level run folder, and sub-workflows write to it too:
                                                    how its session starts (fresh, fork or load)
     turn           a message goes to the agent     `sends` (instruction, reminder or steer), the full text
     message        the agent writes text           the text
+    thinking       a block of thinking ends        how long it took (none: the turn ended first), and
+                                                   its text. Only Cursor's SDK reports it
+    request        the runtime names a request     its id. Only Cursor's SDK reports it
     tool_call      the agent calls a tool          the tool and its arguments
     tool_result    the tool answers                the answer, and if it is an error
     submit_result  the agent calls submit_result   the arguments, and the problems or "accepted"
@@ -38,7 +41,8 @@ Every record has `time`, `kind` and `id`. A record about a node also has `node`,
     build#1[3]                 item 3 of build's pass 1
     review#2.a1                attempt 1 of that pass
     review#2.a1.t2             its turn 2: the first reminder
-    review#2.a1.t2.c4          the 4th tool call of that turn (.s1 a submit_result call, .m1 a message)
+    review#2.a1.t2.c4          the 4th tool call of that turn (.s1 a submit_result call, .m1 a message,
+                               .k1 a block of thinking, .r1 a request)
     end                        the end outputs
     build#1[3].a1/implement#2  a pass in the sub-workflow that attempt 1 of build[3] runs
 
@@ -561,6 +565,12 @@ class Attempt:
         size = len(json.dumps(result, default=str)) if characters is None else characters
         answer = {"result": result} if kept else {"kept": False, "characters": size}
         self._write("tool_result", ours, ours.rsplit(".", 1)[0], is_error=is_error, **answer)
+
+    def thinking(self, text: str, duration_ms: int | None) -> None:
+        self._write("thinking", self._next("k"), self._turn_id(), duration_ms=duration_ms, text=text)
+
+    def request(self, request_id: str) -> None:
+        self._write("request", self._next("r"), self._turn_id(), request_id=request_id)
 
     # ----- output_tool.ResultTool -----
 

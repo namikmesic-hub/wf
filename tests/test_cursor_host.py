@@ -65,8 +65,10 @@ def test_the_schema_refuses_a_frame_that_breaks_the_protocol(frame):
 @needs_node
 def test_every_frame_of_a_run_meets_the_schema(repo, monkeypatch, cursor_host):
     frames = []
-    use(monkeypatch, repo, cursor_host, [{"text": "Looking."}, {"tool": {"name": "git", "arguments": {"args": ["status"]}}},
-                                         {"tool": {"name": "read_file", "arguments": {"path": "flow.yaml"}}}],
+    use(monkeypatch, repo, cursor_host, [{"thinking": ["Hm."], "thinking_ms": 20}, {"text": "Looking."},
+                                         {"tool": {"name": "git", "arguments": {"args": ["status"]}}},
+                                         {"tool": {"name": "read_file", "arguments": {"path": "flow.yaml"}}},
+                                         {"request": "req-from-the-stream"}, {"thinking": ["Cut off"]}],
         [{"tool": {"name": "submit_result", "arguments": {"summary": "hi"}}}])
     monkeypatch.setattr(remote.RemoteHarness, "tap", staticmethod(lambda way, frame: frames.append((way, frame))))
     Path("flow.yaml").write_text("""
@@ -85,6 +87,7 @@ end: {output: {out: "{{ ask.summary }}"}}
         "session.open", "turn.start", "usage.read", "session.close"}
     events = [frame for way, frame in frames if frame["t"] == "ev"]
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))  # numbered, in order
+    assert {"turn.thinking", "turn.request"} <= {e["kind"] for e in events}
     assert all(e["session"].startswith("ses_") for e in events)
     after = [frame for way, frame in frames if frame["t"] not in ("hello", "welcome")
              and not (frame["t"] == "req" and frame["op"] == "session.open")]

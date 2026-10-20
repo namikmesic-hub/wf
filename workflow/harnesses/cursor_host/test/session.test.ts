@@ -69,6 +69,40 @@ test("a second turn.start fails even before the first turn begins", () => {
   assert.throws(() => made.startTurn({ text: "two" }), /a turn of this session is still running/);
 });
 
+// One turn on a run that streams these messages, and the events it gave, after turn.started.
+async function turnOf(messages: Array<Record<string, unknown>>, requestId?: string): Promise<Array<[unknown, unknown]>> {
+  const { inside, frames } = session();
+  const run = {
+    requestId, status: "running", cancel: async () => undefined,
+    async *stream() { yield* messages; },
+    wait: async () => ({ id: "run-1", requestId, status: "finished" }),
+  };
+  inside.agent = { send: async () => run };
+  const [, begin] = (inside as unknown as CursorSession).startTurn({ text: "go" });
+  begin();
+  while (!frames.some((frame) => frame.kind === "turn.ended")) await new Promise((resolve) => setImmediate(resolve));
+  return frames.filter((frame) => !["turn.started", "turn.ended"].includes(String(frame.kind))).map((frame) => [frame.kind, frame.data]);
+}
+
+test("the pieces of a block of thinking become one event, with the time that the block took", async () => {
+  const events = await turnOf([
+    { type: "thinking", text: "Let me " }, { type: "thinking", text: "look." },
+    { type: "thinking", text: "", thinking_duration_ms: 1234.4 },
+    { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } },
+    { type: "thinking", text: "Cut off" },
+  ]);
+  assert.deepEqual(events, [
+    ["turn.thinking", { text: "Let me look.", duration_ms: 1234 }],
+    ["turn.text", { text: "Done." }],
+    ["turn.thinking", { text: "Cut off", duration_ms: null }], // the turn ended before the block did
+  ]);
+});
+
+test("a turn names each request id once, from the run and from the stream", async () => {
+  const events = await turnOf([{ type: "request", request_id: "req-a" }, { type: "request", request_id: "req-b" }], "req-a");
+  assert.deepEqual(events, [["turn.request", { request_id: "req-a" }], ["turn.request", { request_id: "req-b" }]]);
+});
+
 test("a late answer to a message comes as a steer.status event", async () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {

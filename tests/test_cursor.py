@@ -245,6 +245,34 @@ def test_progress_the_transcript_and_the_trace_show_text_and_tool_calls(repo, mo
     assert [r["text"] for r in trace if r["kind"] == "message"] == ["Looking."]
 
 
+def test_the_trace_has_cursors_thinking_with_its_time_and_the_id_of_each_request(repo, monkeypatch, cursor_host, capsys):
+    use(monkeypatch, repo, cursor_host, [
+        {"thinking": ["Let me ", "look."], "thinking_ms": 1234},
+        {"text": "Looking."},
+        {"request": "req-1"},  # the run's own id again
+        {"request": "req-from-the-stream"},
+        {"thinking": ["Half a thought"]},  # the turn ends before the block does
+    ], [GOOD])
+    assert run() == 0
+    trace = [json.loads(line) for line in (run_folder() / "trace.jsonl").read_text().splitlines()]
+    noted = [(r["kind"], r["id"], r["parent"], r.get("duration_ms"), r.get("text"), r.get("request_id"))
+             for r in trace if r["kind"] in ("thinking", "request", "message")]
+    assert noted == [
+        ("request", "ask#1.a1.t1.r1", "ask#1.a1.t1", None, None, "req-1"),
+        ("thinking", "ask#1.a1.t1.k1", "ask#1.a1.t1", 1234, "Let me look.", None),
+        ("message", "ask#1.a1.t1.m1", "ask#1.a1.t1", None, "Looking.", None),
+        ("request", "ask#1.a1.t1.r2", "ask#1.a1.t1", None, None, "req-from-the-stream"),
+        ("thinking", "ask#1.a1.t1.k2", "ask#1.a1.t1", None, "Half a thought", None),
+        ("request", "ask#1.a1.t2.r1", "ask#1.a1.t2", None, None, "req-2"),  # the reminder's own request
+    ]
+    capsys.readouterr()
+    assert cli.main(["trace", run_folder().name]) == 0
+    shown = capsys.readouterr().out
+    assert 'ask#1.a1.t1.k1 thinks for 1,234 ms: "Let me look."' in shown
+    assert 'ask#1.a1.t1.k2 thinks: "Half a thought"' in shown
+    assert "ask#1.a1.t1.r1 request req-1" in shown
+
+
 def test_with_no_api_key_sessions_run_through_cursor_agents_acp_and_one_warning_says_how_to_add_one(
         repo, monkeypatch, cursor_host, capsys):
     from fakes import Fake, submit
@@ -889,6 +917,34 @@ end:
     assert {e["tool"] for e in log if e["kind"] == "tool"} <= {"git", "read_file", "search_files", "find_files", "list_dir",
                                                                 "submit_result"}
     assert Path("notes.txt").read_text() == "The secret word is: quince\n"  # and changed nothing
+
+
+@pytest.mark.harness
+def test_a_real_cursor_turn_gives_the_trace_its_request_id_and_the_time_of_its_thinking(tmp_path, monkeypatch, capsys, live_key):
+    real_repo(tmp_path, monkeypatch)
+    Path("flow.yaml").write_text("""
+version: 1
+name: real
+defaults: {harness: cursor, harnesses: {cursor: {model: composer-2.5}}}
+start: {input: {}}
+nodes:
+  count:
+    needs: [start]
+    instruction: How many prime numbers are there below 30? Work it out, then submit the number as your summary.
+end: {output: {summary: "{{ count.summary }}"}}
+""")
+    assert cli.main(["run", "flow.yaml"]) == 0, capsys.readouterr()
+    assert "10" in output()["summary"]
+    trace = [json.loads(line) for line in (run_folder() / "trace.jsonl").read_text().splitlines()]
+    turns = [r["id"] for r in trace if r["kind"] == "turn"]
+    requests = [r for r in trace if r["kind"] == "request"]
+    assert sorted(r["parent"] for r in requests) == sorted(turns)  # one for each turn
+    ids = [r["request_id"] for r in requests]
+    assert all(isinstance(i, str) and i for i in ids) and len(set(ids)) == len(ids)
+    thinking = [r for r in trace if r["kind"] == "thinking"]
+    assert thinking, "Cursor reported no thinking for the turn"
+    assert all(r["parent"] in turns and isinstance(r["duration_ms"], int) and r["duration_ms"] >= 0 and isinstance(r["text"], str)
+               for r in thinking)
 
 
 @pytest.mark.harness

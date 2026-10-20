@@ -240,6 +240,11 @@ def _lines(run: Run, record: dict) -> list[str]:
         return [f"{pad}    {label} ended: {record.get('status')}{spent}" + (f": {record['message']}" if record.get("message") else "")]
     if kind == "message":
         return [f"{pad}      {label} says {_short(record.get('text'))}"]
+    if kind == "thinking":
+        took = f" for {record['duration_ms']:,} ms" if isinstance(record.get("duration_ms"), int) else ""
+        return [f"{pad}      {label} thinks{took}: {_short(record.get('text'))}"]
+    if kind == "request":
+        return [f"{pad}      {label} request {record.get('request_id')}"]
     if kind == "tool_call":
         return [f"{pad}      {label} {record.get('tool')} {_short(record.get('arguments'))}"]
     if kind == "tool_result":
