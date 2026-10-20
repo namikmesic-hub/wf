@@ -255,8 +255,8 @@ the same `~/.wf` (spec: "Agent slots"):
 through the instruction (`history.<node>`, a reviewer's output). `continue`:
 later passes fork the previous session and `session.continued` is true, so the
 instruction can send only the new feedback; it falls back to fresh when the
-harness or model changes or two passes in a row already continued. The items of
-a `for_each` node, an agent or a workflow node, always start fresh.
+harness or model changes or two passes in a row already continued.
+The items of a `for_each` node, an agent or a workflow node, always start fresh.
 
 ## Follow-ups
 
