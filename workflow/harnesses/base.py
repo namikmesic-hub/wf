@@ -26,7 +26,9 @@ How a turn ended:
   submit_result; the attempt loop checks the tool).
 - unavailable: a usage limit, a login problem, or a harness that can't start.
   The runner moves on to the next harness in the node's list right away.
-- failed: anything else. It counts against the node's `retry`.
+- failed: anything else. It counts against the node's `retry`. A turn that sets
+  retry_after makes the runner wait that many seconds before the retry on the same
+  harness. The harness sets it for an error that a retry can clear, but not at once.
 """
 
 import json
@@ -79,6 +81,7 @@ class TurnEnd:
     status: Literal["done", "unavailable", "failed"]
     message: str = ""
     usage: Usage = field(default_factory=Usage)
+    retry_after: float = 0  # failed: the seconds to wait before the retry
 
 
 class Session(Protocol):

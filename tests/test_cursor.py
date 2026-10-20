@@ -312,6 +312,32 @@ def test_a_notice_sent_in_several_chunks_is_still_read(repo, monkeypatch, capsys
     assert "cursor is unavailable: cursor: Error: [resource_exhausted] You've hit your usage limit" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("notice", ["Error: RetriableError: [resource_exhausted] Error", "Error: RetriableError: "])
+def test_a_retriable_error_is_not_a_usage_limit_and_the_retry_runs_after_a_wait(repo, monkeypatch, capsys, notice):
+    from fakes import record_pauses
+    monkeypatch.setattr("workflow.harnesses.cursor.RETRY_AFTER", 0.01)
+    pauses = record_pauses(monkeypatch)
+    log = cursor(monkeypatch, repo, [{"text": "Working on it"}, {"error": notice}], [GOOD])
+    assert run() == 0
+    out = capsys.readouterr().out
+    assert f"attempt 1 failed: cursor: {notice.rstrip()}" in out  # the second has no message
+    assert "unavailable" not in out
+    assert pauses == [0.01]
+    assert len(entries(log, "start")) == 2  # the retry runs in a new cursor-agent
+
+
+def test_a_resource_exhausted_error_that_is_not_retriable_hands_over_at_once(repo, monkeypatch, capsys):
+    from fakes import Fake, record_pauses, submit
+    pauses = record_pauses(monkeypatch)
+    log = cursor(monkeypatch, repo, [{"error": "Error: ConnectError: [resource_exhausted] You've hit your usage limit"}])
+    claude = Fake("claude-code", submit({"summary": "from claude"}))
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", claude.factory)
+    assert run("harness: [cursor, claude-code]\nmodel: {cursor: composer-2.5, claude-code: opus}\n") == 0
+    assert output() == {"out": "from claude"}
+    assert "cursor is unavailable: cursor: Error: ConnectError: [resource_exhausted]" in capsys.readouterr().out
+    assert pauses == [] and len(entries(log, "start")) == 1  # no wait, and no retry on Cursor
+
+
 def test_an_error_notice_fails_the_turn_and_other_text_does_not(repo, monkeypatch, capsys):
     cursor(monkeypatch, repo, [{"error": "Error: ConnectError: [internal] the model broke"}], [GOOD, {"text": "\nError: handling is covered"}])
     assert run() == 0  # attempt 2's last message isn't a notice: it mentions an error in passing

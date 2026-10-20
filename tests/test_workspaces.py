@@ -657,6 +657,17 @@ def test_a_signal_while_git_starts_still_stops_that_git(repo, tmp_path):
     assert all(gone(pid) for pid in signers(tmp_path))
 
 
+def test_a_group_with_only_exited_processes_left_has_nothing_to_stop():
+    exited = subprocess.Popen(["sleep", "0"], start_new_session=True)
+    os.waitid(os.P_PID, exited.pid, os.WEXITED | os.WNOWAIT)  # it has exited, and nobody reaped it yet
+    unreaped = SimpleNamespace(pid=exited.pid, poll=lambda: None)  # as git's signing program, until launchd reaps it
+    try:  # macOS refuses a signal to such a group (EPERM): neither call raises
+        workspaces._signal(unreaped, signal.SIGKILL)
+        workspaces._group_alive(unreaped)
+    finally:
+        exited.wait()
+
+
 def test_a_hangup_that_wf_ignores_stays_ignored(repo, tmp_path):
     sign_with_program(tmp_path, "exec sleep 60")
     wf = start_wf("import signal; signal.signal(signal.SIGHUP, signal.SIG_IGN)  # nohup\n"

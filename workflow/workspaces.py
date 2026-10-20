@@ -468,13 +468,13 @@ def _group_alive(process: subprocess.Popen) -> bool:
     process.poll()  # reap git once it exits: only running processes should keep its group
     try:
         os.killpg(process.pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):  # macOS refuses (EPERM) when only exited processes are left
         return False
     return True
 
 
 def _signal(process: subprocess.Popen, signum: int) -> None:
-    with contextlib.suppress(ProcessLookupError):  # the group is gone already
+    with contextlib.suppress(ProcessLookupError, PermissionError):  # the group is gone, or only exited processes are left
         os.killpg(process.pid, signum)
 
 

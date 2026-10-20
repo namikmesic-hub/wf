@@ -8,13 +8,14 @@ retries, fallbacks, timeouts, usage, limits) without running an agent.
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from textwrap import dedent, indent
 
 import pytest
 
 from workflow import cli, harnesses, runner
-from fakes import Fake, ends, hang, submit, talk
+from fakes import Fake, ends, hang, record_pauses, submit, talk
 from workflow.output_tool import FINISH, REMINDER
 
 
@@ -160,6 +161,29 @@ def test_an_unavailable_harness_falls_back_to_the_next_one_at_once(repo, monkeyp
     assert codex.specs[0].model == "gpt-6-mini"
     assert codex.specs[0].log.name == "attempt-2.log"
     assert "claude-code is unavailable" in capsys.readouterr().out
+
+
+def test_a_failed_turn_can_ask_for_a_wait_before_its_retry_but_not_before_a_fallback(repo, monkeypatch):
+    pauses = record_pauses(monkeypatch)
+    busy = ends("failed", "the model is busy", retry_after=0.01)
+    claude, codex = Fake("claude-code", busy, busy), Fake("codex", submit({"steps": ["from codex"]}))
+    install(monkeypatch, claude, codex)
+    node = PLAN + "  harness: [claude-code, codex]\n  model: {claude-code: opus, codex: gpt-6-mini}\n"
+    assert cli.main(["run", flow(node)]) == 0
+    assert output()["steps"] == ["from codex"]
+    assert len(claude.specs) == 2
+    assert pauses == [0.01]  # before claude-code's retry, and none before codex took over
+
+
+@pytest.mark.parametrize("limit", ["{cost_usd: 0.01}", "{duration: 1s}"])  # reached before the wait, and during it
+def test_a_limit_ends_the_wait_before_a_retry_and_the_retry_does_not_start(repo, monkeypatch, limit):
+    fake = Fake("claude-code", ends("failed", "the model is busy", cost=0.02, retry_after=60))
+    install(monkeypatch, fake)
+    began = time.monotonic()
+    assert cli.main(["run", flow(PLAN, top=f"limits: {limit}")]) == 1
+    assert time.monotonic() - began < 30  # the wait stopped at the limit, long before its minute
+    assert status() == "limit"
+    assert len(fake.specs) == 1
 
 
 def test_a_harness_that_is_not_built_yet_counts_as_unavailable(repo, monkeypatch):

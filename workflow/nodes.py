@@ -272,7 +272,7 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
             on = {"harness": harness} if harness else {}
             fallback = {"fallback": True} if position and not tries and not handed_over else {}
             handed_over = False
-            deadline = None
+            deadline, wait = None, 0
             try:
                 async with slot(number, harness):  # an attempt starts once it has its slot
                     if number > 1:
@@ -294,12 +294,14 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
                 handed_over = True
                 break
             except _AttemptFailed as failure:
-                error = str(failure)
+                error, wait = str(failure), failure.retry_after
             except dryrun.ScriptExhausted as failure:  # another attempt would find no entry either
                 emit({"event": "attempt_failed", **label, **on, "attempt": number, "error": str(failure)})
                 raise _Failed(str(failure), number) from None
             emit({"event": "attempt_failed", **label, **on, "attempt": number, "error": error})
             number += 1
+            if wait and tries < retry:  # only before a retry on this harness, not before a fallback
+                await _pause(ctx, wait)
     raise _Failed(error, number - 1)
 
 
@@ -309,8 +311,19 @@ def _limit_stop(error: str, number: int, reason: str) -> _Failed:
     return _Failed(f"{error}; {stop}" if error else stop, number - 1, stopped="limit")
 
 
+async def _pause(ctx: RunContext, wait: float) -> None:
+    """Wait `wait` seconds before a retry, but stop when a limit is reached: then the retry doesn't start."""
+    end = time.monotonic() + wait
+    while ctx.limit_reached() is None and (left := end - time.monotonic()) > 0:
+        await asyncio.sleep(min(left, capacity.POLL_SECONDS))
+
+
 class _AttemptFailed(Exception):
     """One attempt failed; another may follow."""
+
+    def __init__(self, message: str, retry_after: float = 0):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class _LimitWhileWaiting(Exception):
@@ -433,7 +446,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                 if end.status == "unavailable":
                     raise _Unavailable(end.message)
                 if end.status == "failed":
-                    raise _AttemptFailed(end.message)
+                    raise _AttemptFailed(end.message, end.retry_after)
             raise _AttemptFailed("the agent never made a valid submit_result call")
         finally:
             cut_off = session.pending_usage()  # zero unless a timeout stopped a turn midway

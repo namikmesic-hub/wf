@@ -73,7 +73,9 @@ The paragraph can come in several chunks, so the adapter reads the whole
 message since the last tool call. A paragraph in the form Cursor writes an
 error, "Error: [code] ..." or "Error: SomeError: ...", fails the turn, and a
 sign-in, plan or payment notice, or an unauthenticated or resource_exhausted
-error (a usage limit), makes it unavailable. Other text that starts with
+error (a usage limit), makes it unavailable. A RetriableError is not a usage
+limit, even "RetriableError: [resource_exhausted]": it only fails the turn, and
+the node's retry starts RETRY_AFTER seconds later. Other text that starts with
 "Error:" is the agent's own. Any stopReason but end_turn fails the turn.
 
 Usage: ACP reports neither tokens nor cost, so Cursor turns count as zero.
@@ -133,8 +135,10 @@ NOTICES = (  # Cursor's own messages when the account needs attention
     "Please sign in to continue", "Upgrade your plan to continue", "Add a payment method to continue",
     "Check your settings to continue",
 )
-ERROR = re.compile(r"\n\nError: (?:\[[a-z_]+\] |\w*Error: )")  # how Cursor reports a failed request
+ERROR = re.compile(r"\n\nError: (?:\[[a-z_]+\]|\w*Error:)(?: |$)")  # how Cursor reports a failed request (with a message or none)
 UNAVAILABLE = (*NOTICES, "[unauthenticated]", "[resource_exhausted]")  # in a notice: it can't run here now
+RETRIABLE = "Error: RetriableError:"  # by its name, an error that a retry can clear
+RETRY_AFTER = 30  # seconds
 AUTH_REQUIRED = -32000  # ACP's error code for "authenticate first"
 LABELS = {"read": "read", "edit": "edit", "delete": "delete", "move": "move", "search": "search",
           "execute": "command", "fetch": "web fetch"}
@@ -318,6 +322,8 @@ class CursorSession:
         stop = result.get("stopReason")
         transcript(log, "turn", stop_reason=stop)
         failure = notice(message)
+        if failure.startswith(RETRIABLE):
+            return TurnEnd("failed", f"cursor: {failure}", retry_after=RETRY_AFTER)
         if any(sign in failure for sign in UNAVAILABLE):
             return TurnEnd("unavailable", f"cursor: {failure}")
         if failure:

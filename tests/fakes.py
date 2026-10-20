@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 
+from workflow import nodes
 from workflow.harnesses.base import TurnEnd, Usage
 
 
@@ -65,9 +66,9 @@ def talk(tokens=100, cost=0.01):
     return turn
 
 
-def ends(status, message, cost=0.0):
+def ends(status, message, cost=0.0, retry_after=0):
     async def turn(session):
-        return TurnEnd(status, message, Usage(0, cost))
+        return TurnEnd(status, message, Usage(0, cost), retry_after)
     return turn
 
 
@@ -91,3 +92,15 @@ def edits(files: dict, *results, check=None):
             session.fake.replies.append(session.spec.tool.submit(result))
         return TurnEnd("done", usage=Usage(10, 0.0))
     return turn
+
+
+def record_pauses(monkeypatch) -> list[float]:
+    """The waits the runner makes before a retry, in seconds. Each wait still runs."""
+    pauses, real_pause = [], nodes._pause
+
+    async def pause(ctx, wait):
+        pauses.append(wait)
+        await real_pause(ctx, wait)
+
+    monkeypatch.setattr(nodes, "_pause", pause)
+    return pauses
