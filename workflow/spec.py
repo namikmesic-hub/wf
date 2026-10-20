@@ -44,7 +44,7 @@ from pydantic_core import PydanticCustomError
 
 HARNESSES = ("claude-code", "codex", "cursor")
 KIND_KEYS = {"instruction": "agent", "command": "command", "human": "human", "workflow": "workflow"}
-RESERVED = frozenset({"start", "end", "run", "history", "workspace", "errors", "item", "index", "session"})
+RESERVED = frozenset({"start", "end", "run", "history", "workspace", "errors", "item", "index", "session", "follow_up"})
 NODE_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 _DURATION = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
 
@@ -287,6 +287,16 @@ class End(_Model):
     output: dict[str, Annotated[str | dict, PlainValidator(_end_value)]] = {}
 
 
+class FollowUp(_Model):
+    """Where `wf continue` sends a follow-up request: the nodes that become pending."""
+
+    to: NameOrList
+
+    @property
+    def targets(self) -> tuple[str, ...]:
+        return (self.to,) if isinstance(self.to, str) else tuple(self.to)
+
+
 # Built-in defaults, used when neither the node nor `defaults` sets a field
 _BUILTIN = {
     "max_parallel": 4,
@@ -313,6 +323,7 @@ class Workflow(_Model):
     start: Start
     nodes: dict[str, Node]
     end: End
+    follow_up: FollowUp | None = None
 
     _path: Path | None = PrivateAttr(None)
 

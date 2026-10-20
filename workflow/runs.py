@@ -6,7 +6,8 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
       workflow/                     copies of the workflow files as they were run
       input.json
       run.json                      the workflow's name and `repo` workspace, for starting it later,
-                                    and the --limit and --model values that `wf retry` keeps (keep())
+                                    the --limit and --model values that `wf retry` keeps (keep()),
+                                    and the number of the latest follow-up (keep_follow_up())
       branches.json                 the branches `branch` named, by node path, and where the run left them
       output.json                   the end output, once the run succeeds
       status.json                   running | waiting | succeeded | failed | limit, with a sequence
@@ -133,6 +134,24 @@ class Run:
         for name, new in (("limits", limits), ("overrides", overrides)):
             if new:
                 info[name] = {**(info.get(name) or {}), **new}
+        write_json(self.dir / "run.json", info)
+
+    def follow_up(self) -> int:
+        """The number of the run's latest follow-up (`wf continue`), or 0 before the first."""
+        number = self.info().get("follow_up")
+        return number if isinstance(number, int) else 0
+
+    def keep_follow_up(self, number: int, limits: dict) -> dict:
+        """Keep the number of a new follow-up and its own --limit values in one write of run.json. Those
+        limits replace the ones earlier passes were given. Returns run.json as it was, for rewrite_info()
+        (call it holding the run's lock)."""
+        before = self.info()
+        info = {k: v for k, v in before.items() if k != "limits"}
+        write_json(self.dir / "run.json", {**info, "follow_up": number, **({"limits": limits} if limits else {})})
+        return before
+
+    def rewrite_info(self, info: dict) -> None:
+        """Write run.json as `info` again, e.g. as keep_follow_up() found it."""
         write_json(self.dir / "run.json", info)
 
     def branches(self) -> dict[str, str]:

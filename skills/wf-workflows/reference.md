@@ -26,6 +26,7 @@ start:
     task: {type: string, description: What to do}
     test_command: {type: string, default: uv run pytest -q}
 nodes: {...}
+follow_up: {to: implement}     # the node that a `wf continue` request goes to (see "Follow-ups" below)
 end:
   output:
     branch: "{{ workspace.implement.branch }}"           # short form: exactly one field reference
@@ -46,7 +47,8 @@ or write the field in block style.
 ## Nodes
 
 Node ids: `^[a-z][a-z0-9_]*$`, not start, end, run, history, workspace, errors,
-item, index, session. A node's kind is whichever of these keys it has:
+item, index, session, follow_up.
+A node's kind is whichever of these keys it has:
 
 | Kind | Key | Output |
 |---|---|---|
@@ -90,11 +92,11 @@ A node with `tools` may not have a shell that reaches the Keychain, where every 
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| A node with `tools` can run on Claude Code or Cursor at `edit` or `full`, or on Codex at `full`, and doesn't set `tools_with_shell: true` | `wf validate` errors, naming each such harness and the access level, so the run doesn't start. | `workflow/validate.py:631`, `workflow/harnesses/__init__.py:49` | `tests/test_tools.py::test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in`, `tests/test_tools.py::test_a_harness_list_names_each_harness_whose_shell_reaches_the_keychain` |
+| A node with `tools` can run on Claude Code or Cursor at `edit` or `full`, or on Codex at `full`, and doesn't set `tools_with_shell: true` | `wf validate` errors, naming each such harness and the access level, so the run doesn't start. | `workflow/validate.py:678`, `workflow/harnesses/__init__.py:49` | `tests/test_tools.py::test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in`, `tests/test_tools.py::test_a_harness_list_names_each_harness_whose_shell_reaches_the_keychain` |
 | A template picks such a harness at run time, which `wf validate` can't see, and the node doesn't set `tools_with_shell: true` | The run refuses that harness, and the node fails without a session. | `workflow/nodes.py:441` | `tests/test_tool_sessions.py::test_a_run_refuses_a_harness_whose_shell_reaches_the_keychain_without_the_opt_in` |
-| The node sets `tools_with_shell: true` | `wf validate` warns, naming the node and its tools: its agent could read every stored sign-in. The run attaches the tools. | `workflow/validate.py:628` | `tests/test_tools.py::test_a_node_that_opts_in_gets_a_warning_naming_it_and_its_tools`, `tests/test_tool_sessions.py::test_a_run_lets_a_node_that_opted_in_have_tools_and_a_shell` |
+| The node sets `tools_with_shell: true` | `wf validate` warns, naming the node and its tools: its agent could read every stored sign-in. The run attaches the tools. | `workflow/validate.py:675` | `tests/test_tools.py::test_a_node_that_opts_in_gets_a_warning_naming_it_and_its_tools`, `tests/test_tool_sessions.py::test_a_run_lets_a_node_that_opted_in_have_tools_and_a_shell` |
 | A node with `tools` is read-only on any harness, or on Codex at `edit` | It needs no opt-in: its commands can't reach the Keychain. | `workflow/harnesses/__init__.py:49` | `tests/test_tools.py::test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in` |
-| A node has no tools, `tools: []` included | `wf validate` says nothing about its shell. | `workflow/validate.py:624` | `tests/test_tools.py::test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools` |
+| A node has no tools, `tools: []` included | `wf validate` says nothing about its shell. | `workflow/validate.py:671` | `tests/test_tools.py::test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools` |
 | `tools_with_shell` isn't `true` or `false`, or is in `defaults` | `wf validate` errors: the field takes only a boolean, and only on the node, so that each such node says so itself. | `workflow/spec.py:193` | `tests/test_tools.py::test_tools_with_shell_takes_a_boolean_and_matters_only_with_tools`, `tests/test_tools.py::test_tools_with_shell_goes_on_the_node_not_in_defaults` |
 
 `harness: [codex, claude-code]` falls back in order: each harness gets 1 +
@@ -157,6 +159,7 @@ A template that is exactly one `{{ ... }}` keeps its type (a list stays a list).
 | `errors.<node>` | failed items `{index, item, error}` (on_item_error: continue) |
 | `run` | `{id, dir, cost_usd, tokens, elapsed_s, base}` |
 | `session.continued` | true while rendering a continued session's instruction |
+| `follow_up` | `{request, number, requests}` of the latest `wf continue` request, or `none` before the first |
 
 Reading a field of a node that hasn't run fails the run, so guard every node
 some path skips, each by its own name (a guard on `review` doesn't cover
@@ -193,29 +196,29 @@ fails when the code stops doing what the row says.
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | A `workspace: new` node has `branch` | Its worktree's branch is the rendered name, stripped, instead of `wf/<run-id>/...` | `workflow/nodes.py:199` | `tests/test_workspaces.py::test_branch_names_the_worktrees_branch` |
-| `branch` is on a node whose workspace isn't `new` | `wf validate` error | `workflow/validate.py:730` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
+| `branch` is on a node whose workspace isn't `new` | `wf validate` error | `workflow/validate.py:777` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
 | A later pass of the node | The name that the first pass gave stays | `workflow/nodes.py:197` | `tests/test_workspaces.py::test_a_loop_keeps_the_branch_its_first_pass_named` |
 | `wf retry` continues the run, and its worktree is gone | It takes up the branch that `branches.json` records for the node | `workflow/nodes.py:216` | `tests/test_workspaces.py::test_a_retried_run_keeps_the_branch_it_made` |
 | A `for_each` item, or an item of a `for_each` node that runs a sub-workflow, on a later pass | The name renders again; a name that differs from the one its index had fails the item | `workflow/nodes.py:198` | `tests/test_workspaces.py::test_an_item_keeps_its_branch_only_while_its_index_holds_the_same_item`, `tests/test_subworkflows.py::test_a_sub_workflow_item_fails_when_its_index_names_another_branch_on_a_later_pass` |
-| The rendered name is empty, or only spaces | The node fails | `workflow/workspaces.py:120` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
-| The name is `wf`, or under `wf/`, in any case | The node fails | `workflow/workspaces.py:122` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
-| git doesn't allow the name as a branch name | The node fails | `workflow/workspaces.py:124` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
-| The fixed text of `branch` is empty or only spaces | `wf validate` error | `workflow/validate.py:741` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
-| The fixed text is `wf`, or starts with `wf/`, in any case | `wf validate` error | `workflow/validate.py:744` | `tests/test_validate.py::test_branch_cannot_be_wf_or_under_it_in_any_case` |
+| The rendered name is empty, or only spaces | The node fails | `workflow/workspaces.py:138` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| The name is `wf`, or under `wf/`, in any case | The node fails | `workflow/workspaces.py:140` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| git doesn't allow the name as a branch name | The node fails | `workflow/workspaces.py:142` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| The fixed text of `branch` is empty or only spaces | `wf validate` error | `workflow/validate.py:788` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
+| The fixed text is `wf`, or starts with `wf/`, in any case | `wf validate` error | `workflow/validate.py:791` | `tests/test_validate.py::test_branch_cannot_be_wf_or_under_it_in_any_case` |
 | The branch exists, and this run didn't make it for this node | The node fails | `workflow/nodes.py:230` | `tests/test_workspaces.py::test_a_branch_that_already_exists_is_refused` |
-| A branch exists that git can't have beside the name: `fix/a` beside `fix/a/b` | The node fails | `workflow/workspaces.py:134` | `tests/test_workspaces.py::test_a_branch_git_cannot_have_beside_an_existing_one_is_refused` |
-| `core.ignorecase` is on, and a branch exists with the name in another case | The node fails | `workflow/workspaces.py:133` | `tests/test_workspaces.py::test_where_git_ignores_case_a_name_in_other_case_is_the_same_branch` |
+| A branch exists that git can't have beside the name: `fix/a` beside `fix/a/b` | The node fails | `workflow/workspaces.py:152` | `tests/test_workspaces.py::test_a_branch_git_cannot_have_beside_an_existing_one_is_refused` |
+| `core.ignorecase` is on, and a branch exists with the name in another case | The node fails | `workflow/workspaces.py:151` | `tests/test_workspaces.py::test_where_git_ignores_case_a_name_in_other_case_is_the_same_branch` |
 | Another node or item of the run has that name, or one that git can't have beside it | The node fails | `workflow/nodes.py:225` | `tests/test_workspaces.py::test_each_item_names_its_own_branch_and_two_items_cannot_share_one` |
-| Two `branch` fields, in a file or the sub-workflows it runs, could name the same branch or one under the other | `wf validate` error | `workflow/validate.py:751` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused`, `tests/test_validate.py::test_two_nodes_that_could_name_the_same_branch_are_refused` |
-| Two `branch` fields differ only in case | `wf validate` error on every machine, also where git doesn't ignore case | `workflow/validate.py:992` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused` |
-| A sub-workflow's `branch` reads `{{ start.<input> }}` | `wf validate` compares it with the value that `with` gives | `workflow/validate.py:769` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
-| A `for_each` node's `branch` doesn't use `item` or `index` | `wf validate` error | `workflow/validate.py:737` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
-| A `for_each` workflow node doesn't give `item` or `index` to a `branch` in its sub-workflow | `wf validate` error | `workflow/validate.py:782` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
+| Two `branch` fields, in a file or the sub-workflows it runs, could name the same branch or one under the other | `wf validate` error | `workflow/validate.py:798` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused`, `tests/test_validate.py::test_two_nodes_that_could_name_the_same_branch_are_refused` |
+| Two `branch` fields differ only in case | `wf validate` error on every machine, also where git doesn't ignore case | `workflow/validate.py:1049` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused` |
+| A sub-workflow's `branch` reads `{{ start.<input> }}` | `wf validate` compares it with the value that `with` gives | `workflow/validate.py:816` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
+| A `for_each` node's `branch` doesn't use `item` or `index` | `wf validate` error | `workflow/validate.py:784` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
+| A `for_each` workflow node doesn't give `item` or `index` to a `branch` in its sub-workflow | `wf validate` error | `workflow/validate.py:829` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
 | The run made the branch but stopped before it recorded it | The next pass records it and goes on | `workflow/nodes.py:221` | `tests/test_workspaces.py::test_a_run_that_stopped_before_recording_its_branch_takes_it_up_again` |
-| `wf discard --branches`, and a worktree of the run has the named branch checked out | Deletes the branch, also when `branches.json` has no record of it | `workflow/runs.py:406` | `tests/test_workspaces.py::test_discard_deletes_the_branch_a_run_made_without_recording_it` |
-| `wf discard --branches`, and the named branch isn't on the commit that the run left it on | The branch stays, and discard says why | `workflow/runs.py:407` | `tests/test_workspaces.py::test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work` |
-| A dry run succeeds | Its named branches are deleted | `workflow/runner.py:563` | `tests/test_workspaces.py::test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them` |
-| A `command` writes `workspace.<node>.branch` unquoted, and that node's `branch` reads node output | `wf validate` warning | `workflow/validate.py:485` | `tests/test_validate.py::test_a_branch_named_from_agent_output_is_untrusted_in_a_command` |
+| `wf discard --branches`, and a worktree of the run has the named branch checked out | Deletes the branch, also when `branches.json` has no record of it | `workflow/runs.py:430` | `tests/test_workspaces.py::test_discard_deletes_the_branch_a_run_made_without_recording_it` |
+| `wf discard --branches`, and the named branch isn't on the commit that the run left it on | The branch stays, and discard says why | `workflow/runs.py:431` | `tests/test_workspaces.py::test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work` |
+| A dry run succeeds | Its named branches are deleted | `workflow/runner.py:577` | `tests/test_workspaces.py::test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them` |
+| A `command` writes `workspace.<node>.branch` unquoted, and that node's `branch` reads node output | `wf validate` warning | `workflow/validate.py:532` | `tests/test_validate.py::test_a_branch_named_from_agent_output_is_untrusted_in_a_command` |
 
 A `new` worktree has only what's committed: an uncommitted script or fixture a
 step needs isn't there (`wf run` lists such files when it starts). Worktrees and
@@ -253,6 +256,38 @@ through the instruction (`history.<node>`, a reviewer's output). `continue`:
 later passes fork the previous session and `session.continued` is true, so the
 instruction can send only the new feedback; it falls back to fresh when the
 harness or model changes or two passes in a row already continued.
+
+## Follow-ups
+
+`wf continue <run-id> "<request>"` gives a run that succeeded a follow-up request.
+The run goes on as a new pass of the same run.
+`follow_up: {to: <node>}` names the nodes where the request goes in, and the template variable `follow_up` brings it in:
+
+```yaml
+follow_up: {to: implement}
+nodes:
+  implement:
+    session: continue
+    instruction: |
+      {% if follow_up and not review %}
+      A follow-up request for the change on this branch: {{ follow_up.request }}
+      {% elif not review %}
+      {{ start.task }}
+      {% else %}
+      Fix these problems: {{ review.blocking_issues | tojson }}
+      {% endif %}
+```
+
+- Each node that `to` can lead to reads `none` until it runs again, so its first-pass template works again.
+  The other nodes keep their outputs, and `history` keeps every pass.
+- The worktrees come back on their branches.
+  A `session: continue` node continues its last session.
+- Each route counts from zero again, so a fix loop gets its full `max` in each follow-up.
+- The limits count only the follow-up: the file's, with the `--limit` values of `wf continue` on top.
+- Only a run that succeeded takes a follow-up, and only when the workflow file had `follow_up` when the run started.
+- Validate warns when a template reads a node that a follow-up clears and that might not run again before it.
+
+Dry-run a follow-up: give the script entries for both passes, run it, then `wf continue <run-id> "<request>"`.
 
 ## Dry runs
 
@@ -299,7 +334,7 @@ dry runs out.
 ## Commands
 
 `wf init`, `examples`, `validate`, `graph`, `run [--detach] [--dry-run] [--limit
-NAME=VALUE]`, `retry [--limit NAME=VALUE] [--model NODE=MODEL]`, `answer`, `wait`, `status`, `list` (newest first), `report [--real |
+NAME=VALUE]`, `retry [--limit NAME=VALUE] [--model NODE=MODEL]`, `continue <run-id> <request | --file FILE> [--limit NAME=VALUE]`, `answer`, `wait`, `status`, `list` (newest first), `report [--real |
 --dry-runs] [--version V]`, `trace <run-id> [--node N] [--pass P] [--field F] [--var PATH]`
 (what one run read, decided and did: improving.md), `discard [<run-id>... | --workflow NAME
 [--dry-runs]]`, `steer <run-id> <node> [--item N] <message | --file FILE>`. Exit codes: 0 succeeded, 1 failed or limit, 2 waiting for a

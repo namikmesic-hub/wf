@@ -30,6 +30,11 @@ is the operator's explicit consent to that.
 firstmate keeps its built-in answers channel for its own adapters, so the
 first mate answers a waiting run itself, with `wf answer` (see the wf skill in
 integrations/firstmate/).
+
+`wf continue` gives a run that succeeded a follow-up: a new pass of the same
+run folder. The first mate registers it as a new source, and each state of
+the follow-up carries its number (`follow_up`), so that pass reports and
+retires as a run does.
 """
 
 import json
@@ -160,7 +165,7 @@ def _bounded(state: dict, more: str) -> str:
     text = json.dumps(slim, ensure_ascii=False, default=str)
     if len(text.encode("utf-8")) <= MAX_OUTPUT:
         return text
-    keep = ("run", "status", "seq", "dir", "workflow", "nodes", "answer", "retry")
+    keep = ("run", "status", "seq", "dir", "workflow", "follow_up", "nodes", "answer", "retry")
     return json.dumps({k: state[k] for k in keep if k in state} | {"more": more})
 
 

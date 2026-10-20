@@ -2,6 +2,7 @@
 
     start(file, pairs, input_file, no_input) -> exit code     (wf run)
     retry(run_id, no_input) -> exit code                      (wf retry, wf answer)
+    follow_up(run_id, request, no_input) -> exit code         (wf continue)
 
 Driving a run alternates between two things:
 1. Streaming the graph (_stream, inside asyncio.run): graph.astream() with
@@ -25,6 +26,11 @@ Driving a run alternates between two things:
      or one item another model for the rest of the run (overrides.py). It keeps
      the override in run.json only when all of the checks pass.
    - END: write output.json, or record why the run failed or hit a limit.
+   - `wf continue` gives a run that succeeded a follow-up request. It checks
+     the run, brings back the worktrees the follow-up needs, keeps the
+     follow-up's number and limits in run.json, and writes the request into
+     the checkpoints (graph.follow_up). From there, the run is driven as a
+     retry is: `wf retry` after a crash takes the follow-up in too.
 
 Questions are asked between streams, not inside the event loop, so Ctrl-C
 and Ctrl-D at a prompt behave as they do in any terminal program: the run is
@@ -35,8 +41,9 @@ LangGraph's thread_id, so a later `wf retry` process finds the run exactly
 where this one left it.
 
 The run's trace (trace.py) gets a `run` record just before a process drives the
-run. It gets a `run_stopped` record with the run's status when the process
-stops, so each `run` record has its `run_stopped` record.
+run: started, retried, or continued with a follow-up. It gets a `run_stopped`
+record with the run's status when the process stops, so each `run` record has
+its `run_stopped` record.
 """
 
 import asyncio
@@ -53,7 +60,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, schemas, settings, spec, steer, validate, workspaces
+from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, settings, spec, steer, validate, workspaces
 from .context import RunContext
 from .harnesses.base import short
 
@@ -188,7 +195,7 @@ def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, ans
     state = asyncio.run(_snapshot(ctx))
     ctx.limits = limits.effective(workflow.limits, {**run.limits(), **new_limits})
     if any(i.value.get("kind") == "limit" for i in state.interrupts):  # paused at a limit: is there room now?
-        still = limits.check(ctx.limits, state.values.get("usage") or {}, state.values.get("elapsed_s", 0.0))
+        still = limits.check(ctx.limits, *limits.spent(state.values))
         if still:
             print(f"{name}: run {run.id} is still over a limit ({still[1]}). "
                   f"Continue it with a bigger one: {run.command('retry', limits.hint(still[0]))}", file=sys.stderr)
@@ -249,6 +256,11 @@ def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | 
         ctx.trace.run("started", workflow=ctx.workflow.name, inputs=inputs, dry_run=ctx.script is not None)
         return _drive(ctx, {"input": inputs}, asking)
     ctx.home = _run_home(run, state)
+    if (request := state.values.get("follow_up_request")) is not None:  # from wf continue: the next step takes it in
+        number = len(state.values.get("follow_ups") or []) + 1
+        print(f"Continuing run {run.id} with follow-up {number}")
+        ctx.trace.run("continued", workflow=ctx.workflow.name, follow_up=number, request=request)
+        return _drive(ctx, None, asking)
     print(f"{'Continuing' if answers is not None else 'Retrying'} run {run.id}")
     if state.interrupts:
         command = _continue(state.interrupts, asking, run, answers, ctx.script)
@@ -260,7 +272,9 @@ def _retry(ctx: RunContext, state: StateSnapshot, asking: bool, answers: dict | 
         status = state.values.get("status")
         if run.status().get("status") != status:  # it reached the end, but stopped before recording it
             return _finished(ctx, state.values)
-        print(f"Run {run.id} already {status}.")
+        more = (f" Give it a follow-up with: {run.command('continue', '<request>')}"
+                if status == "succeeded" and ctx.workflow.follow_up else "")
+        print(f"Run {run.id} already {status}.{more}")
         return 0 if status == "succeeded" else 1
     ctx.trace.run("retried", workflow=ctx.workflow.name, **({"answers": True} if answers is not None else {}))
     return _drive(ctx, command, asking)
@@ -614,6 +628,8 @@ def describe(event: dict) -> str | None:
     if kind == "steer":
         detail = short(event["text"], 80) if "text" in event else event.get("reason")
         return f"  {where}: message from wf steer {event['status']}" + (f": {detail}" if detail else "")
+    if kind == "follow_up":
+        return f"↪ follow-up {event['number']} → {', '.join(event['to'])}: {short(event['request'], 80)}"
     return None
 
 
@@ -672,3 +688,144 @@ def _parse(raw: str, field: dict):
     if schemas.check(value, field) and not schemas.check(raw, field):
         return raw  # e.g. name=123 for a string field
     return value
+
+
+# ---------- follow-ups ----------
+
+
+def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, as_json: bool = False,
+              limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
+    """Give a run that succeeded a follow-up request, and drive it again from the nodes that its
+    workflow's `follow_up` names. `limit_pairs` (--limit) give the follow-up its own budget. With
+    `detach`, check and prepare everything here, then let a background `wf retry` drive it.
+
+    The run's lock is taken before anything is checked. Nothing changes until every check passed."""
+    name = "wf continue"
+    try:
+        run = runs.find(Path.cwd(), run_id, runs_dir)
+        workflows = [spec.load(f) for f in validate.check(run.workflow_file).files]
+        new_limits = limits.parse(limit_pairs or [])
+        max_agents = capacity.configured()
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, capacity.CapError, settings.SettingsError) as error:
+        print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
+        return 1
+    try:
+        with run.driving() as lock:
+            return _checked_follow_up(run, workflows, request, no_input, detach, as_json, lock, new_limits, max_agents,
+                                      runs_dir)
+    except runs.RunBusy as error:
+        print(f"{name}: {error}, and only a run that succeeded takes a follow-up. Follow it with: {run.command('wait')}",
+              file=sys.stderr)
+        return 1
+
+
+def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: str, no_input: bool, detach: bool,
+                       as_json: bool, lock: runs.Lock, new_limits: dict, max_agents: int | None,
+                       runs_dir: Path | None) -> int:
+    name, workflow = "wf continue", workflows[0]
+    ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
+    dry = bool(run.info().get("dry_run"))
+    if dry:  # a dry run's follow-up takes the next entries of its script
+        try:
+            ctx.script = dryrun.Script.resume(run.dir / "dry-run")
+        except dryrun.ScriptError as error:
+            print(f"{name}: {error}", file=sys.stderr)
+            return 1
+    state = asyncio.run(_snapshot(ctx))
+    if problem := _not_continuable(run, workflow, state):
+        print(f"{name}: {problem}", file=sys.stderr)
+        return 1
+    home = _run_home(run, state)
+    if problem := _signing_problem(workflows, home):
+        print(f"{name}: {problem}", file=sys.stderr)
+        return 1
+    try:
+        _restore_worktrees(run, workflow, state.values, home, remake=dry)
+    except workspaces.WorkspaceError as error:
+        print(f"{name}: can't bring back a worktree of the run, so the run stays as it was: {error}", file=sys.stderr)
+        return 1
+    number = len(state.values.get("follow_ups") or []) + 1
+    try:
+        with _holding_signals():  # run.json and the checkpoints change together, or neither does
+            before = run.keep_follow_up(number, new_limits)
+            try:
+                asyncio.run(_give(ctx, request))
+            except BaseException:
+                run.rewrite_info(before)
+                raise
+    except Exception as error:  # OSError, or the checkpoint store failing: the run stays as it was
+        workspaces.remove_run(home["path"], run.id)
+        print(f"{name}: can't give run {run.id} the follow-up, so the run stays as it was: "
+              f"{getattr(error, 'strerror', None) or error}", file=sys.stderr)
+        return 1
+    ctx.limits = limits.effective(workflow.limits, run.limits())
+    ctx.overrides = run.overrides()
+    print(f"Limits for this follow-up: {limits.describe(ctx.limits)}", file=sys.stderr if as_json else sys.stdout)
+    if detach:
+        pid = operate.detach(run, ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)], lock)
+        _say({"run": run.id, "dir": str(run.dir), "pid": pid, "follow_up": number},
+             f"Run {run.id} takes follow-up {number} in the background. Follow it with: {run.command('wait')}", as_json)
+        return 0
+    return _retry(ctx, asyncio.run(_snapshot(ctx)), interactive() and not no_input, None)
+
+
+def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapshot) -> str | None:
+    """Why `wf continue` can't give this run a follow-up now, or None. The caller holds the run's lock."""
+    status = run.status().get("status")
+    if status == "waiting":
+        return f"run {run.id} waits for a person: answer it with {run.command('answer', '<answers.json>')}"
+    if status == "failed":
+        return f"run {run.id} failed: continue it with {run.command('retry')}"
+    if status == "limit":
+        return (f"run {run.id} is paused at a limit: continue it with "
+                f"{run.command('retry', limits.hint(run.status().get('limit')))}")
+    if status == "running":  # and no process drives it, since this one holds its lock
+        return f"run {run.id} stopped before it ended: continue it with {run.command('retry')}"
+    if status != "succeeded":
+        return f"run {run.id} hasn't succeeded (its status is {status}), and only a run that succeeded takes a follow-up"
+    if workflow.follow_up is None:
+        return (f"workflow `{workflow.name}` has no `follow_up`, which names the node that takes a follow-up request. "
+                "A run keeps the workflow files it started with, so only a run of a file that has `follow_up` takes one")
+    if (state.values or {}).get("follow_up_request") is not None:
+        return f"run {run.id} has a follow-up that hasn't started yet: start it with {run.command('retry')}"
+    if not _ended(run, state) or (state.values or {}).get("status") != "succeeded":
+        return f"run {run.id} has no checkpoint of its end to continue from: wf retry {run.id} says where it stands"
+    return None
+
+
+def _restore_worktrees(run: runs.Run, workflow: spec.Workflow, values: dict, home: dict, remake: bool) -> None:
+    """Bring back the workspaces that the follow-up's nodes can use: a run that succeeded removed its
+    worktrees, and kept their branches. Each is the workspace of a node the follow-up can reach, or of the
+    node whose workspace it shares. A dry run deleted its branches too, so with `remake` a branch that is
+    gone starts again from its base. Raises WorkspaceError, after the worktrees go again."""
+    owners = set()
+    for node in scheduler.Topology.of(workflow).reachable(workflow.follow_up.targets):
+        seen = set()
+        while workflow.setting(node, "workspace") in workflow.nodes and node not in seen:
+            seen.add(node)
+            node = workflow.setting(node, "workspace")  # it works in that node's workspace
+        owners.add(node)
+    found: dict[str, tuple[str, dict]] = {}
+    for node in sorted(owners):
+        value = (values.get("workspaces") or {}).get(node)
+        for workspace in value if isinstance(value, list) else [value]:
+            if workspace and workspace.get("path"):
+                found.setdefault(workspace["path"], (node, workspace))
+    own, temp = (workspaces.root() / run.id).resolve(), workspaces.temp_root(run.id).resolve()
+    try:
+        for path, (node, workspace) in found.items():
+            if Path(path).resolve().is_relative_to(own) and workspace.get("branch"):
+                try:
+                    workspaces.restore(home["path"], workspace, remake)
+                except workspaces.WorkspaceError as error:
+                    raise workspaces.WorkspaceError(f"`{node}` worked in {path}, and {error}") from error
+            elif Path(path).resolve().is_relative_to(temp):  # a temp folder another node shares: empty again
+                Path(path).mkdir(parents=True, exist_ok=True)
+    except BaseException:
+        workspaces.remove_run(home["path"], run.id)
+        raise
+
+
+async def _give(ctx: RunContext, request: str) -> None:
+    async with AsyncSqliteSaver.from_conn_string(str(ctx.run.checkpoints)) as saver:
+        await graph.follow_up(graph.build(saver), _config(ctx), request)

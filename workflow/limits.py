@@ -14,6 +14,10 @@ in run.json (runs.Run.keep), so every later `wf retry` uses it too. The
 run then carries on where it stopped: a step the limit kept from retrying gets
 its retry, and a sub-workflow the limit stopped continues its own steps.
 
+A follow-up (`wf continue <run-id> <request> --limit ...`) has a budget of its
+own: the file's limits, with its own --limit values on top, count only what
+the run spends after the follow-up began (since(), spent()).
+
 This module is plain functions: parse() reads `--limit` arguments, effective()
 combines them with the workflow file's, check() says which limit (if any) a
 run has reached, and hint() turns that into the --limit option that continues it.
@@ -60,6 +64,20 @@ def parse(pairs: list[str]) -> dict[str, Any]:
 def effective(file_limits: Limits, overrides: dict[str, Any]) -> Limits:
     """The limits that apply: the workflow file's, with the run's overrides on top."""
     return Limits(**{**file_limits.model_dump(), **overrides})
+
+
+def since(used: dict, elapsed_s: float, start: dict | None) -> tuple[dict, float]:
+    """What counts against the limits: the usage and running time after `start`, the run's totals
+    when its latest follow-up began (`wf continue`), or all of them before any follow-up."""
+    if not start:
+        return used, elapsed_s
+    return ({"cost_usd": used.get("cost_usd", 0.0) - start["cost_usd"], "tokens": used.get("tokens", 0) - start["tokens"]},
+            elapsed_s - start["elapsed_s"])
+
+
+def spent(values: dict) -> tuple[dict, float]:
+    """since(), for a run's saved state: what counts against its limits."""
+    return since(values.get("usage") or {}, values.get("elapsed_s", 0.0), values.get("budget_from"))
 
 
 def check(limits: Limits, used: dict, elapsed_s: float) -> tuple[str, str] | None:

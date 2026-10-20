@@ -16,7 +16,7 @@ topology, folder and `repo` workspace, and the path of node ids leading to it
 belongs to the whole run is the top-level context's, reached through `root`:
 the clock, the usage counters and the limits (a sub-workflow's own `limits`
 are ignored; `limits` is the file's, with any `--limit` the run was given on
-top: limits.py), the agent cap and the attempts waiting for it, the open
+top: limits.py, and after `wf continue` they count from `budget_from`), the agent cap and the attempts waiting for it, the open
 harnesses, the agent sessions that `wf steer` can reach (steer.py), the git
 lock, the checkpointer and the trace file. `trace` is the trace as this
 workflow writes it (trace.Scope): a sub-workflow's ids start with the attempt
@@ -32,7 +32,7 @@ from pathlib import Path
 from . import harnesses, overrides, spec
 from .harnesses import Harness, Usage
 from .harnesses.scripted import Scripted
-from .limits import check
+from .limits import check, since
 from .runs import Run
 from .scheduler import Topology
 from .spec import Workflow
@@ -53,6 +53,7 @@ class RunContext:
     script: object = None  # a dryrun.Script during a dry run
     limits: spec.Limits | None = None  # the run's limits, if not just the workflow file's (--limit)
     usage: dict = field(default_factory=lambda: {"cost_usd": 0.0, "tokens": 0})  # spent so far, kept live
+    budget_from: dict | None = None  # the usage and time when the run's latest follow-up began (limits.since)
     max_agents: int | None = None  # the cap on live agent sessions across runs (capacity.py), if any
     trace_parent: str = "run"  # in the trace, the attempt that runs this sub-workflow
     secret_outputs: frozenset[str] = frozenset()  # its end outputs that feed a secret of the parent
@@ -139,7 +140,7 @@ class RunContext:
     def limit_check(self) -> tuple[str, str] | None:
         """The run's first limit reached, as (name, in words), or None (always the top-level run's)."""
         root = self.root
-        return check(root.limits or root.workflow.limits, root.usage, self.elapsed())
+        return check(root.limits or root.workflow.limits, *since(root.usage, self.elapsed(), root.budget_from))
 
     def limit_reached(self) -> str | None:
         """The same, in words only (for messages)."""

@@ -39,7 +39,8 @@ later if it's still there. Nothing can stop git on SIGKILL, which ends wf at
 once.
 
 When a run succeeds its worktrees are removed and its branches kept; a failed
-run keeps them for `wf retry`.
+run keeps them for `wf retry`. `wf continue` brings them back from their
+branches (restore), so a follow-up works where the run left off.
 
 These are plain blocking functions (git is a subprocess). nodes.py runs them
 in a thread, one at a time per run, because parallel `git worktree add`
@@ -109,6 +110,23 @@ def worktree(repo: str | Path, run_id: str, parts: list[str], base: str, branch:
         else:
             _git(repo, "worktree", "add", "--quiet", "-b", branch, str(path), commit)
     return {"path": str(path), "branch": branch, "base": commit}
+
+
+def restore(repo: str | Path, workspace: dict, remake: bool = False) -> None:
+    """Bring back a worktree that a run removed when it succeeded, on its branch, for a follow-up
+    (`wf continue`). With `remake`, a branch that is gone starts again from the worktree's base.
+    Raises WorkspaceError: the branch is gone, or git can't check it out (another worktree has it)."""
+    path, branch = Path(workspace["path"]), workspace["branch"]
+    if (path / ".git").exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _git(repo, "worktree", "prune", check=False)  # its folder is gone but may still be registered
+    if branch_exists(repo, branch):
+        _git(repo, "worktree", "add", "--quiet", str(path), branch)
+    elif remake and workspace.get("base"):
+        _git(repo, "worktree", "add", "--quiet", "-b", branch, str(path), workspace["base"])
+    else:
+        raise WorkspaceError(f"its branch `{branch}` is gone")
 
 
 def branch_exists(repo: str | Path, branch: str) -> bool:

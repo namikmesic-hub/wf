@@ -201,7 +201,9 @@ def _lines(run: Run, record: dict) -> list[str]:
     label = record["id"]
     if kind == "run":
         inputs = f", input {_short(record['inputs'])}" if "inputs" in record else ""
-        return [f"run {record.get('action')}: {record.get('workflow')}{inputs}{' (dry run)' if record.get('dry_run') else ''}"]
+        follow_up = f", follow-up {record['follow_up']}: {_short(record.get('request'))}" if "follow_up" in record else ""
+        return [f"run {record.get('action')}: {record.get('workflow')}{inputs}{follow_up}"
+                f"{' (dry run)' if record.get('dry_run') else ''}"]
     if kind == "run_stopped":
         detail = {k: v for k, v in record.items() if k not in ("time", "kind", "id", "parent", "status")}
         return [f"run stopped: {record.get('status')}" + (f" {_short(detail)}" if detail else "")]

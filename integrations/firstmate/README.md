@@ -2,7 +2,7 @@
 
 Lets a [firstmate](https://github.com/kunchenguid/firstmate) first mate start wf
 runs, get woken when one needs attention, answer its questions, retry it after
-a failure, and report the result.
+a failure, give it a follow-up request after it succeeded, and report the result.
 
 It has two parts:
 
@@ -33,7 +33,7 @@ It has two parts:
    `.agents/skills/agent-skill-trigger-index/SKILL.md`:
 
    ```
-   - `wf` - load before starting a wf run, on any `procevent wf <source-id> <sequence>` check wake, and before answering, retrying or reporting a wf run.
+   - `wf` - load before starting a wf run, on any `procevent wf <source-id> <sequence>` check wake, and before answering, retrying, continuing or reporting a wf run.
    ```
 
 4. So the first mate can also write and improve workflows, install
@@ -54,6 +54,7 @@ command that the new wf doesn't have.
 | `wf run <file> ... --detach --json` | start a run in the background |
 | `wf answer <run-id> <answers.json> [--detach]` | answer the questions a run waits on |
 | `wf retry <run-id> --detach` | continue a failed or stopped run |
+| `wf continue <run-id> <request> --detach --json` | give a run that succeeded a follow-up request, on the same branches |
 | `wf status <run-id> --json`, `wf list --json` | where runs stand, and in `progress` of status, how far, as an estimate |
 | `wf sessions [run-id] --json` | the agent sessions that run now, with each one's last tool call and quiet time |
 | `wf watch <run-id>` | the run's steps and tool calls as they come, until it succeeds, for a terminal pane |

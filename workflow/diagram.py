@@ -1,7 +1,7 @@
 """Diagram: a workflow as a Mermaid flowchart, for `wf graph`, and as rows of boxes, for `wf ui`.
 
 Solid arrows are `needs` edges; dotted arrows are routes, labelled with their
-`when` and `max`. Shapes show the kind of node:
+`when` and `max`, and the way in of a `follow_up` request. Shapes show the kind of node:
 
     ("agent")   [/"command"/]   {{"human"}}   [["workflow"]]
 
@@ -31,6 +31,9 @@ def mermaid(workflow: Workflow) -> str:
         opening, closing = _SHAPES[node.kind]
         lines.append(f"  {_id(node_id)}{opening}{_label(workflow, node_id)}{closing}")
     lines.append('  wf_end(["end"])')
+    if workflow.follow_up:
+        lines.append('  wf_follow_up(["follow-up"])')
+        lines += [f"  wf_follow_up -.-> {_id(target)}" for target in workflow.follow_up.targets]
     for node_id, node in workflow.nodes.items():
         for need in node.needs:
             lines.append(f"  {_id(need)} --> {_id(node_id)}")
