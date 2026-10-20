@@ -1,19 +1,24 @@
 """wf ui: the JSON the page reads, the files it may show, and the server on 127.0.0.1 (ui.py)."""
 
+import errno
 import http.client
 import json
+import os
 import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
-from fakes import Fake, submit
-from workflow import cli, diagram, harnesses, report, runner, runs, spec, ui
+from fakes import Fake, submit, talk
+from workflow import cli, diagram, harnesses, observe, progress, report, runner, runs, spec, ui
 from workflow.runs import Run
 
 EXAMPLES = Path(__file__).parent.parent / "workflow" / "examples"
+HELD_AGENT = Path(__file__).parent / "held_agent.py"
 
 
 @pytest.fixture
@@ -93,23 +98,121 @@ def test_a_transcript_shows_once_the_running_session_writes_it(repo):
     assert (think["log"], think["harness"], think["started"] is not None) == ("nodes/think/1/attempt-1.log", "claude-code", True)
 
 
-def test_a_refresh_reads_only_the_folders_of_nodes_that_run_or_that_new_events_name(finished, monkeypatch):
-    read = []
-    real = ui._read_pass
-    monkeypatch.setattr(ui, "_read_pass", lambda run, folder, node, pass_no, index=None: (
-        read.append((node, pass_no)), real(run, folder, node, pass_no, index))[1])
-    first = ui.attempts(finished)
-    assert sorted(read) == [("check", 1), ("think", 1)]
-    read.clear()
-    assert ui.attempts(finished) == first and read == []  # the run ended: nothing can change
+def test_a_refresh_reads_only_the_new_events_and_the_files_of_attempts_that_can_change(finished, monkeypatch):
+    parsed, checked = [], []
+    real_parse, real_check = runs.parse_events, ui._is_file
+    monkeypatch.setattr(runs, "parse_events", lambda lines: parsed.append(real_parse(lines)) or parsed[-1])
+    monkeypatch.setattr(ui, "_is_file", lambda path: checked.append(path.relative_to(finished.dir).as_posix()) or real_check(path))
+    first = ui.run_detail(finished)
+    assert len(parsed[0]) == len(report.events(finished))
+    assert sorted({path.rsplit("/", 1)[0] for path in checked}) == ["nodes/check/1", "nodes/think/1"]
+    parsed.clear(), checked.clear()
+    assert ui.run_detail(finished) == first and parsed == [[]] and checked == []  # the run ended: nothing can change
+
     (finished.dir / "nodes" / "check" / "2").mkdir()
     (finished.dir / "nodes" / "check" / "2" / "attempt-1.log").write_text("checked\n")
     finished.add_event({"event": "node_started", "node": "check", "pass": 2})
+    parsed.clear()
     assert [a["log"] for a in ui.attempts(finished)][-1] == "nodes/check/2/attempt-1.log"
-    assert read == [("check", 1), ("check", 2)]  # from the newest pass read before: it can have ended since
-    read.clear()
+    assert [len(events) for events in parsed] == [1]
+    assert checked == ["nodes/check/2/attempt-1.log", "nodes/check/2/instruction.md", "nodes/check/2/output.json"]
+    checked.clear()
     ui.attempts(finished)
-    assert read == [("check", 2)]  # check runs: its newest pass can get a file with no event
+    assert checked == ["nodes/check/2/instruction.md", "nodes/check/2/output.json"]  # check runs: it can still write them
+
+    assert ui.run_detail(finished)["metrics"]["nodes"]["check"]["attempts"] == 2  # with the attempt that runs
+    finished.add_event({"event": "node_finished", "node": "check", "pass": 2, "tokens": 0, "cost_usd": 0.0})
+    found = ui.run_detail(finished)  # what it adds up, event by event, is what wf report and wf status count
+    assert found["metrics"]["nodes"] == report.build([finished])["nodes"]
+    assert found["progress"] == progress.of(finished)
+
+
+def test_a_refresh_starts_over_when_events_jsonl_is_cut_back_and_grows_again(finished):
+    size = finished.add_events([{"event": "node_started", "node": "check", "pass": 2}])
+    assert ui.run_detail(finished)["metrics"]["nodes"]["check"]["passes"] == 2
+    finished.take_back_events(size)
+    finished.add_events([{"event": "warning", "message": "a line as long as the one that was taken back"}])
+    found = ui.run_detail(finished)
+    assert found["metrics"]["nodes"]["check"]["passes"] == 1 and found["states"]["check"] == "done"
+
+
+def test_an_error_while_looking_for_a_finished_node_s_files_hides_its_attempt_only_until_the_next_refresh(finished, monkeypatch):
+    log = finished.dir / "nodes" / "check" / "1" / "attempt-1.log"
+    real = Path.stat
+
+    def failing(path, *args, **kwargs):
+        if path == log:
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", failing)
+    assert [a["node"] for a in ui.attempts(finished)] == ["think"]
+    monkeypatch.setattr(Path, "stat", real)
+    assert [(a["node"], a["log"]) for a in ui.attempts(finished)] == [("think", None), ("check", "nodes/check/1/attempt-1.log")]
+
+
+INNER = """
+version: 1
+name: rules
+start: {input: {}}
+nodes:
+  print: {needs: [start], command: "echo rules"}
+end: {output: {}}
+"""
+
+DELIVERY = """
+version: 1
+name: delivery
+defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+start: {input: {}}
+nodes:
+  rules: {needs: [start], workflow: rules.yaml}
+  implement: {needs: [rules], instruction: Implement it.}
+  review: {needs: [implement], command: "echo reviewed"}
+end: {output: {}}
+"""
+
+
+def until(condition, seconds: float = 30) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.05)
+
+
+def test_each_step_has_a_state_and_a_step_that_runs_shows_its_numbers_so_far(repo, tmp_path_factory):
+    Path("rules.yaml").write_text(INNER.lstrip())
+    Path("delivery.yaml").write_text(DELIVERY.lstrip())
+    marks, release = tmp_path_factory.mktemp("marks"), tmp_path_factory.mktemp("release") / "go"
+    process = subprocess.Popen([sys.executable, str(HELD_AGENT), str(marks), str(release), "run", "delivery.yaml"],
+                               env={**os.environ, "USAGE_SECONDS": "0.05"}, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        until(lambda: (marks / f"{process.pid}.started").exists())
+        (folder,) = (Path(".wf") / "runs").iterdir()
+        run = Run.at(folder)
+        until(lambda: any(e["event"] == "agent_usage" for e in report.events(run)))  # what the turn has used so far
+        found = ui.run_detail(run)
+        assert found["states"] == {"rules": "done", "implement": "running", "review": "waiting", "rules/print": "done"}
+        assert {name: found["states"][name] for name in found["metrics"]["nodes"]} == {
+            "rules/print": "done", "rules": "done", "implement": "running"}
+        assert all(found["states"][n] == info["state"] for n, info in found["progress"]["nodes"].items())  # the graph's
+        implement = found["metrics"]["nodes"]["implement"]
+        assert (implement["passes"], implement["attempts"], implement["tokens"], implement["cost_usd"]) == (1, 1, 1234, 0.5)
+        began = next(e["time"] for e in report.events(run) if e["event"] == "node_started" and e["node"] == "implement")
+        time.sleep(0.2)
+        asked = time.time()
+        later = ui.run_detail(run)["metrics"]
+        assert later["nodes"]["implement"]["duration_s"] >= round(asked - observe.timestamp(began), 1) >= 0.2
+        assert (later["run"]["tokens"], later["run"]["cost_usd"]) == (1234, 0.5)
+    finally:
+        release.touch()
+        out, _ = process.communicate(timeout=60)
+    assert process.returncode == 0, out
+    found = ui.run_detail(run)
+    assert set(found["states"].values()) == {"done"}
+    assert found["metrics"]["nodes"] == report.build([run])["nodes"]
+    assert found["metrics"]["nodes"]["implement"]["tokens"] == 10  # the turn's own numbers, at its end
 
 
 def test_a_run_that_moves_shows_its_progress_in_the_run_list(repo):
@@ -154,6 +257,35 @@ def test_attempts_are_found_in_items_and_in_sub_workflows(repo, monkeypatch):
     assert found[("sub/note", 1, 1)]["log"] == "nodes/sub/1/attempt-1/nodes/note/1/attempt-1.log"
     assert found[("sub/think", 1, 1)]["harness"] == "claude-code" and found[("each[0]", 1, 1)]["model"] == "opus"
     assert ui.run_file(Run.at(folder), found[("sub/note", 1, 1)]["log"])["text"] == "inner\n"
+
+
+def test_a_sub_workflow_attempt_that_starts_over_lists_the_attempts_of_both(repo, monkeypatch):
+    fake = Fake("claude-code", talk(), talk(), talk(), submit({"summary": "ok"}))  # inner's first attempt never submits
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    Path("inner.yaml").write_text(dedent("""
+        version: 1
+        name: inner
+        defaults: {harness: claude-code, retry: 0}
+        start: {input: {}}
+        nodes:
+          think: {needs: [start], instruction: Think.}
+        end: {output: {}}
+    """).lstrip())
+    Path("outer.yaml").write_text(dedent("""
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          sub: {needs: [start], workflow: inner.yaml, retry: 1}
+        end: {output: {}}
+    """).lstrip())
+    assert cli.main(["run", "outer.yaml"]) == 0
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    found = ui.run_detail(Run.at(folder))
+    assert [(a["node"], a["pass"], a["attempt"], a["instruction"]) for a in found["attempts"]] == [
+        ("sub/think", 1, 1, "nodes/sub/1/attempt-1/nodes/think/1/instruction.md"),
+        ("sub/think", 1, 1, "nodes/sub/1/attempt-2/nodes/think/1/instruction.md")]
+    assert found["states"] == {"sub": "done", "sub/think": "done"}
 
 
 def test_events_come_as_lines_and_then_only_the_new_ones(finished):

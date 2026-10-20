@@ -2,13 +2,15 @@
 
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
 from fakes import Fake, submit, talk
-from workflow import cli, harnesses, runner
+from workflow import cli, harnesses, runner, runs
+from workflow.report import Tally
 
 
 @pytest.fixture
@@ -253,3 +255,49 @@ def test_a_sub_workflow_attempt_that_starts_over_counts_both_attempts(repo, caps
     found = report(capsys, "--workflow", "outer")
     assert found["nodes"]["sub/think"]["tokens"] == 2700  # 1000 + 2 reminders of 100, then 1500
     assert found["runs"][0]["tokens"] == 2700
+
+
+def test_a_pass_that_runs_adds_what_it_has_done_so_far_also_when_its_sub_workflow_starts_over(repo):
+    write("inner.yaml", """
+        version: 1
+        name: inner
+        defaults: {harness: claude-code}
+        start: {input: {}}
+        nodes:
+          think: {needs: [start], instruction: x}
+        end: {output: {}}
+    """)
+    write("outer.yaml", """
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          sub: {needs: [start], workflow: inner.yaml, retry: 1}
+        end: {output: {}}
+    """)
+    run = runs.create(Path.cwd(), "outer", [Path("outer.yaml"), Path("inner.yaml")], Path("outer.yaml"), {})
+    start = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+
+    def at(seconds: int, kind: str, node: str, **more) -> dict:
+        return {"time": (start + timedelta(seconds=seconds)).isoformat(), "event": kind, "node": node, "pass": 1, **more}
+
+    tally = Tally(run)
+    for event in [at(0, "node_started", "sub"), at(0, "node_started", "sub/think"),
+                  at(10, "agent_usage", "sub/think", attempt=1, tokens=100, cost_usd=0.1),
+                  at(20, "agent_usage", "sub/think", attempt=1, tokens=300, cost_usd=0.3),
+                  at(30, "attempt_failed", "sub", attempt=1, error="timed out after 30s"),
+                  at(31, "attempt_started", "sub", attempt=2), at(31, "node_started", "sub/think"),
+                  at(40, "agent_usage", "sub/think", attempt=1, tokens=50, cost_usd=0.05)]:  # the same names again
+        tally.add(event)
+    found = tally.report(now=(start + timedelta(seconds=60)).timestamp())
+    sub, think = found["nodes"]["sub"], found["nodes"]["sub/think"]
+    assert (sub["attempts"], sub["tokens"], sub["cost_usd"], sub["duration_s"]) == (2, 350, 0.35, 60)  # 1 failed, 1 runs
+    assert (think["passes"], think["attempts"], think["tokens"], think["duration_s"]) == (2, 1, 50, 29)  # the cut one ran out
+    assert (found["runs"][0]["tokens"], found["runs"][0]["duration_s"]) == (350, 60)
+    assert Tally(run).report()["nodes"] == {} and tally.report()["nodes"]["sub"]["attempts"] == 1  # without now: ended only
+
+    tally.add(at(50, "attempt_failed", "sub", attempt=2, error="timed out after 30s"))
+    tally.add(at(50, "node_failed", "sub", error="timed out after 30s", tokens=350, cost_usd=0.35))
+    ended = tally.report(now=(start + timedelta(seconds=600)).timestamp())  # think's attempt was cut: it runs no more
+    assert {k: ended["nodes"]["sub/think"][k] for k in ("attempts", "tokens", "duration_s")} == {"attempts": 0, "tokens": 0, "duration_s": 0}
+    assert {k: ended["nodes"]["sub"][k] for k in ("attempts", "tokens", "duration_s")} == {"attempts": 2, "tokens": 350, "duration_s": 50}

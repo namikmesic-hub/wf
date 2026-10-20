@@ -462,6 +462,62 @@ def test_a_sub_workflow_in_progress_counts_its_own_steps_and_items(tmp_path):
     assert progress.describe(found) == "step 1 of 2 (sub: step 2 of 2), about 38%"
 
 
+def test_each_step_of_a_sub_workflow_has_a_state_from_its_own_events(tmp_path):
+    (tmp_path / "inner.yaml").write_text(dedent("""
+        version: 1
+        name: inner
+        start: {input: {}}
+        nodes:
+          print: {needs: [start], command: "true"}
+          check: {needs: [print], command: "true"}
+        end: {output: {}}
+    """).lstrip())
+    outer = tmp_path / "outer.yaml"
+    outer.write_text(dedent("""
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          rules: {needs: [start], workflow: inner.yaml}
+          build: {needs: [rules], for_each: "[1, 2]", workflow: inner.yaml}
+          review:
+            needs: [build]
+            command: "true"
+            routes: [{when: "review.exit_code != 0", to: rules, max: 2}, {to: end}]
+        end: {output: {}}
+    """).lstrip())
+    workflow = spec.load(outer)
+
+    def states(events: list[dict], status: str = "running") -> dict:
+        tracker = progress.Tracker(workflow)
+        for one in events:
+            tracker.add(one)
+        return tracker.states(status)
+
+    rules = [started("rules"), *lap("rules/print"), started("rules/check")]
+    assert states(rules) == {"rules": "running", "build": "waiting", "review": "waiting",
+                             "rules/print": "done", "rules/check": "running"}
+    assert states(rules, "waiting")["rules/check"] == "paused"
+
+    items = rules + lap("rules/check") + [event("node_finished", "rules", **{"pass": 1}), started("build", items=2)]
+    items += lap("build[0]/print", "build[0]/check") + [started("build[1]/print")]
+    found = states(items)
+    assert (found["rules/check"], found["build"], found["build[]/print"], found["build[]/check"]) == (
+        "done", "running", "running", "waiting")  # item 1 still prints, and checks after
+
+    cut = items + [event("attempt_failed", "build", index=1, attempt=1, error="timed out after 10m", **{"pass": 1})]
+    assert states(cut)["build[]/print"] == "failed"  # its item's attempt ended under it
+    again = cut + [event("attempt_started", "build", index=1, attempt=2, **{"pass": 1})]
+    assert states(again)["build[]/print"] == "waiting"  # the next attempt starts its sub-workflow over
+
+    back = items + [event("node_finished", "build[1]/print", **{"pass": 1})] + lap("build[1]/check")
+    back += [event("node_finished", "build", **{"pass": 1})] + lap("review") + [route("review", 0, "rules")]
+    found = states(back)
+    assert (found["rules"], found["rules/print"], found["build[]/check"]) == ("waiting", "waiting", "waiting")
+    done = back[:-1] + [route("review", 1, "end")]
+    assert set(states(done, "succeeded").values()) == {"done"}
+
+
 def test_durations_read_as_people_say_them():
     assert [progress.duration(s) for s in (45, 720, 3900, 7200)] == ["45 s", "12 min", "1 h 5 min", "2 h"]
 
