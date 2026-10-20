@@ -27,7 +27,7 @@ For an operator that isn't at a terminal (operate.py):
     wf report <run-id>... | --workflow NAME   what runs did, per node (report.py)
     wf trace <run-id> [--node N] [--pass P] [--field F] [--var PATH]
                                      what one run read, decided and did, from its trace (trace_view.py)
-    wf discard <run-id>...           delete runs: folders, worktrees, temp folders
+    wf discard <run-id>...           delete runs: folders, worktrees, temp folders, saved sessions
     wf integrate firstmate <dir>     write the firstmate extension package (firstmate.py)
 
 To see runs as they happen (observe.py, ui.py):
@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     tracing.add_argument("--runs-dir", **runs_dir)
     tracing.set_defaults(handler=_trace)
 
-    discarding = commands.add_parser("discard", help="delete runs: their folders, worktrees and temp folders")
+    discarding = commands.add_parser("discard", help="delete runs: their folders, worktrees, temp folders and saved sessions")
     discarding.add_argument("run_ids", nargs="*", metavar="run-id")
     discarding.add_argument("--workflow", metavar="NAME", help="every run of this workflow in this folder")
     discarding.add_argument("--dry-runs", action="store_true", help="only dry runs (with --workflow)")

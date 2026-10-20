@@ -42,9 +42,12 @@ SDK's catalog and its parameters, and refuses an id it can't map (cursor_host/sr
 `effort` isn't used: a Cursor model id carries its own.
 
 session: continue loads the previous pass's agent (start: load) from its state folder. Each
-session's folder is ~/.wf/temp/<run-id>/cursor-sdk/<id>, and goes when the session closes, but
-one that a later pass may continue is kept in sessions/<agent-id> next to it, until the run
-succeeds. As with ACP, after a continued attempt fails, the next one starts fresh.
+session's folder is ~/.wf/temp/<run-id>/cursor-sdk/<id>, and goes when the session closes. One
+that a later pass may continue moves to the run's saved sessions, as cursor-sdk/<agent-id>
+(workspaces.saved_sessions), which outlive the run's success, so that `wf continue` continues it.
+That folder is the SDK's store of the agent: its agents, runs, run events and checkpoints. It holds
+no API key and no account details. As with ACP, after a continued attempt fails, the next one
+starts fresh.
 
 For one release, `cursor_runtime: acp` in ~/.wf/config.yaml (or WF_CURSOR_RUNTIME=acp, which
 wins) runs every Cursor session through ACP, as before, until the SDK has proven itself in real runs.
@@ -253,6 +256,7 @@ class Cursor(remote.RemoteHarness):
         self.acp = acp  # makes the harness for `edit` sessions (tests give a fake)
         self.run_dir = Path()
         self.home = Path()  # this run's Cursor folders
+        self.saved = Path()  # the sessions that a later pass may continue
         self._prepared = False
         self._preparing = asyncio.Lock()
         self._acp: Harness | None = None
@@ -263,6 +267,7 @@ class Cursor(remote.RemoteHarness):
         self.run_dir = Path(run_dir)
         self.home = workspaces.temp_root(self.run_dir.name) / "cursor-sdk"
         self.home.mkdir(parents=True, exist_ok=True)
+        self.saved = workspaces.saved_sessions(self.run_dir, "cursor-sdk")
 
     async def close(self) -> None:
         if self._acp is not None:
@@ -310,7 +315,7 @@ class Cursor(remote.RemoteHarness):
             transcript(spec.log, "runtime", runtime="acp", why=why)
             return await harness.session(spec)
         continuing = self.home / "continuing" / spec.fork_from if spec.fork_from else None
-        saved = self.home / "sessions" / spec.fork_from if spec.fork_from else None
+        saved = self.saved / spec.fork_from if spec.fork_from else None
         if continuing is not None and continuing.exists():
             raise Unavailable("the last attempt that continued this session failed, and Cursor can't fork it")
         if saved is not None and not saved.is_dir():
@@ -359,14 +364,13 @@ class Cursor(remote.RemoteHarness):
 
     def _keep(self, session: remote.RemoteSession, state: Path) -> None:
         """Keep a session's state where a later pass finds it, if one may continue it. Else remove
-        it, unless it is a saved session, which stays until the run succeeds."""
-        saved = self.home / "sessions"
+        it, unless it is a saved session already, which the run's success or `wf discard` removes."""
+        saved = self.saved
         if session.id and session.spec.continuable:
             if state != saved / session.id:
                 with contextlib.suppress(OSError):
                     shutil.rmtree(saved / session.id, ignore_errors=True)
-                    saved.mkdir(exist_ok=True)
-                    state.rename(saved / session.id)
+                    shutil.move(state, workspaces.make_private(saved) / session.id)
         elif state.parent != saved:
             shutil.rmtree(state, ignore_errors=True)
 

@@ -9,6 +9,7 @@ The opt-in tests at the bottom run the real SDK, with your Cursor API key (they 
 
 import json
 import os
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ from textwrap import dedent, indent
 import pytest
 
 from cursor_sdk import KEY, entries, needs_node, use
-from workflow import cli, runner
+from workflow import cli, runner, runs, workspaces
 from workflow.output_tool import FINISH
 
 pytestmark = needs_node
@@ -571,6 +572,7 @@ def test_continue_loads_the_last_passs_agent(repo, monkeypatch, cursor_host, cap
     assert second["text"] == f"Say hi\n\n{NEW_RESULT}\n\n{FINISH}"
     assert "continuing the last pass's session" in capsys.readouterr().out
     assert not (wf_home / "temp" / run_folder().name).exists()
+    assert not any((wf_home / "sessions").glob("*"))  # no follow-up can continue it
 
 
 def test_after_a_continued_attempt_fails_the_retry_starts_fresh(repo, monkeypatch, cursor_host, capsys):
@@ -592,6 +594,62 @@ def test_a_third_pass_continues_the_agent_a_successful_second_pass_continued(rep
     assert run("session: continue\nroutes: [{to: ask, max: 2}, {to: end}]\n") == 0
     assert (len(entries(log, "resume")), len(entries(log, "create"))) == (2, 1)
     assert len({send["agentId"] for send in entries(log, "send")}) == 1
+
+
+FOLLOW_UP = """
+    version: 1
+    name: cu
+    defaults: {harness: cursor, harnesses: {cursor: {model: composer-2.5}}}
+    start: {input: {}}
+    follow_up: {to: work}
+    nodes:
+      plan: {needs: [start], instruction: Plan it, session: continue}
+      work:
+        needs: [plan]
+        session: continue
+        instruction: "{% if follow_up %}Follow-up: {{ follow_up.request }}{% else %}Do it{% endif %}"
+    end: {output: {}}
+    """
+
+
+def follow_up_run() -> runs.Run:
+    """A run of FOLLOW_UP that succeeded, in a repo with a commit."""
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
+                   check=True)
+    Path("flow.yaml").write_text(dedent(FOLLOW_UP))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    (run,) = runs.all_runs(Path.cwd())
+    return run
+
+
+def session_id(run: runs.Run, node: str) -> str:
+    lines = [json.loads(line) for line in (run.dir / "nodes" / node / "1" / "attempt-1.log").read_text().splitlines()]
+    (session,) = [line for line in lines if line["kind"] == "session"]
+    return session["id"]
+
+
+def test_a_follow_up_continues_the_agent_that_the_run_ended_with(repo, monkeypatch, cursor_host, capsys, wf_home):
+    log = use(monkeypatch, repo, cursor_host, [GOOD], [GOOD], [GOOD])
+    run = follow_up_run()
+    saved = workspaces.saved_sessions(run.dir, "cursor-sdk")
+    assert [folder.name for folder in saved.iterdir()] == [session_id(run, "work")]  # no follow-up reaches plan
+    assert all(stat.S_IMODE(folder.stat().st_mode) == 0o700 for folder in (wf_home / "sessions", saved.parent, saved))
+    assert not (wf_home / "temp" / run.id).exists()  # the rest goes
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    (resumed,) = entries(log, "resume")
+    last = entries(log, "send")[-1]
+    assert resumed["agentId"] == last["agentId"] == session_id(run, "work")
+    assert last["text"].startswith("Follow-up: add a flag")
+    assert "work: continuing the last pass's session" in capsys.readouterr().out
+
+
+def test_wf_discard_removes_the_saved_sessions_of_a_run(repo, monkeypatch, cursor_host):
+    use(monkeypatch, repo, cursor_host, [GOOD], [GOOD])
+    run = follow_up_run()
+    saved = workspaces.sessions_root(run.dir)
+    assert saved.is_dir()
+    assert cli.main(["discard", run.id]) == 0
+    assert not saved.exists()
 
 
 # ---------- wf steer ----------

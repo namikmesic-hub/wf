@@ -22,7 +22,7 @@ from textwrap import dedent, indent
 import pytest
 
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
-from workflow import cli, harnesses, runner, schemas
+from workflow import cli, harnesses, runner, runs, schemas, workspaces
 from workflow.harnesses.base import SessionSpec
 from workflow.harnesses.cursor_acp import TESTED, WRITES_WITHOUT_ASKING, CursorAcp
 from workflow.output_tool import FINISH, NEW_RESULT, REMINDER, ResultTool
@@ -463,6 +463,37 @@ def test_continue_loads_the_last_passs_session(repo, monkeypatch, capsys, wf_hom
     assert "an earlier answer" not in texts  # what session/load replays isn't this attempt's
     assert len({e["config"] for e in entries(log, "start")}) == 2  # the session moved to the new process's folder
     assert not cursor_home(wf_home).exists()
+    assert not any((wf_home / "sessions").glob("*"))  # no follow-up can continue it
+
+
+def test_a_follow_up_loads_the_session_that_the_run_ended_with(repo, monkeypatch, capsys, wf_home):
+    log = cursor(monkeypatch, repo, [GOOD], [GOOD])
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
+                   check=True)
+    Path("flow.yaml").write_text(dedent("""
+        version: 1
+        name: cu
+        defaults: {harness: cursor, harnesses: {cursor: {model: composer-2.5}}}
+        start: {input: {}}
+        follow_up: {to: work}
+        nodes:
+          work:
+            needs: [start]
+            session: continue
+            instruction: "{% if follow_up %}Follow-up: {{ follow_up.request }}{% else %}Do it{% endif %}"
+        end: {output: {}}
+        """))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    (run,) = runs.all_runs(Path.cwd())
+    (session,) = {p["sessionId"] for p in sent(log, "session/prompt")}
+    saved = workspaces.saved_sessions(run.dir, "cursor-agent")
+    assert [folder.name for folder in saved.iterdir()] == [session]
+    assert [file.name for file in (saved / session).iterdir()] == ["meta.json"]  # not the config, with the account's details
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    (loaded,) = sent(log, "session/load")
+    assert loaded["sessionId"] == session
+    assert sent(log, "session/prompt")[-1]["prompt"][0]["text"].startswith("Follow-up: add a flag")
+    assert "work: continuing the last pass's session" in capsys.readouterr().out
 
 
 def test_after_a_continued_attempt_fails_the_retry_starts_fresh(repo, monkeypatch, capsys):

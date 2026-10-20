@@ -31,9 +31,11 @@ your account's details there. It holds wf's cli-config.json (CONFIG): nothing
 runs without asking, web search isn't accepted by itself, the sandbox is off,
 the agent doesn't credit itself in commits, and DENY's rules for the access
 level. The folder goes when the session closes. Your ~/.cursor settings don't
-apply and aren't changed. A session a later pass may continue is kept in
-sessions/ next to the folders, so `wf retry` can continue it, until the run
-succeeds and wf removes its temp folder.
+apply and aren't changed. A session a later pass may continue moves to the
+run's saved sessions, as cursor-agent/<session-id> (workspaces.saved_sessions),
+which outlive the run's success, so that `wf retry` and `wf continue` continue
+it. Only the session's folder from acp-sessions/ moves there: Cursor's record of
+the conversation. The config folder, with your account's details, still goes.
 The sandbox is off at every level: with it on, a command wf allows still runs
 outside it, so it would confine nothing that wf doesn't already decide.
 CURSOR_API_KEY and CURSOR_AUTH_TOKEN are removed from the environment, so the
@@ -176,6 +178,7 @@ class CursorAcp:
         self.command = command or COMMAND
         self.request_timeout = request_timeout  # for starting a session; a turn has the node's timeout
         self.home = Path()  # this run's Cursor folders
+        self.saved = Path()  # the sessions that a later pass may continue
         self.models: set[str] = set()
         self.tools: mcp_http.Server | None = None
         self.warning: str | None = None  # shown once, with the first session
@@ -183,6 +186,7 @@ class CursorAcp:
     async def open(self, run_dir: Path) -> None:
         self.home = workspaces.temp_root(Path(run_dir).name) / "cursor-agent"
         self.home.mkdir(parents=True, exist_ok=True)
+        self.saved = workspaces.saved_sessions(Path(run_dir), "cursor-agent")
         self.models = await self._list_models()
         installed = await self._version()
         if installed and installed != TESTED:
@@ -278,7 +282,7 @@ class CursorSession:
 
     async def start(self) -> None:
         spec, harness = self.spec, self.harness
-        saved = harness.home / "sessions" / spec.fork_from if spec.fork_from else None
+        saved = harness.saved / spec.fork_from if spec.fork_from else None
         if self.continuing is not None and self.continuing.exists():
             raise Unavailable("the last attempt that continued this session failed, and Cursor can't fork it")
         if saved is not None and not saved.is_dir():
@@ -298,7 +302,7 @@ class CursorSession:
             if saved is not None:  # Cursor loads a session from its own config folder
                 self.id = spec.fork_from  # set first: close() puts the session back even if loading fails
                 (self.folder / "acp-sessions").mkdir()
-                saved.rename(self.folder / "acp-sessions" / self.id)
+                shutil.move(saved, self.folder / "acp-sessions" / self.id)
             if not spec.project_instructions:
                 self.bare = _bare_folder()
             self.rpc = await _Connection.start(command, self.bare or spec.cwd, harness.env(self.folder),
@@ -459,10 +463,9 @@ class CursorSession:
         """Move the session out of the config folder, which goes, when a later pass may load it."""
         store = self.folder / "acp-sessions" / self.id
         if self.id and self.spec.continuable and store.is_dir():
-            target = self.harness.home / "sessions" / self.id
+            target = self.harness.saved / self.id
             shutil.rmtree(target, ignore_errors=True)
-            target.parent.mkdir(exist_ok=True)
-            store.rename(target)
+            shutil.move(store, workspaces.make_private(self.harness.saved) / self.id)
 
 
 def _bare_folder() -> Path:

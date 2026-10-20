@@ -557,6 +557,7 @@ def _finished(ctx: RunContext, values: dict) -> int:
         run.set_output(values["output"])
         run.set_status("succeeded", follow_up=_number(values) or None)
         shutil.rmtree(workspaces.temp_root(run.id), ignore_errors=True)
+        workspaces.keep_sessions(run.dir, _follow_up_sessions(ctx.workflow, values))  # for wf continue
         run.leave_worktrees(workspaces.run_worktrees(ctx.home["path"], run.id))  # for wf discard and wf continue
         workspaces.remove_run(ctx.home["path"], run.id)  # worktrees go; their branches stay
         if ctx.script is not None:  # ...except after a dry run: those branches hold scripted work
@@ -797,6 +798,24 @@ def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | N
         return None
     return (f"run {run.id} worked on branch `{saved}` in {home['path']}, and that checkout is on "
             f"{f'`{now}`' if now else 'a detached HEAD'} now: check out `{saved}` there first")
+
+
+def _follow_up_sessions(workflow: spec.Workflow, values: dict) -> set[str]:
+    """The ids of the agent sessions that a follow-up may continue: the last session of each node that it
+    can reach, and those of their sub-workflows. None without `follow_up`."""
+    if workflow.follow_up is None:
+        return set()
+    sessions = values.get("sessions") or {}
+    reached = scheduler.Topology.of(workflow).reachable(workflow.follow_up.targets)
+    return {ident for node in reached for ident in _session_ids(sessions.get(node))}
+
+
+def _session_ids(session: dict | None) -> list[str]:
+    if not session:
+        return []
+    if "sessions" in session:  # a workflow node's: those its sub-workflow ended with
+        return [ident for one in session["sessions"].values() for ident in _session_ids(one)]
+    return [session["id"]] if session.get("id") else []
 
 
 def _restore_worktrees(run: runs.Run, values: dict, home: dict, remake: bool) -> None:
