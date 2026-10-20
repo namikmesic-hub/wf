@@ -75,10 +75,41 @@ def test_a_run_has_its_graph_progress_metrics_and_attempts(finished):
     think, check = found["attempts"]  # the fake agent writes no transcript: its session's event names it
     assert (think["node"], think["pass"], think["attempt"], think["harness"], think["model"]) == ("think", 1, 1, "claude-code", "opus")
     assert (think["log"], think["instruction"]) == (None, "nodes/think/1/instruction.md")
-    (finished.dir / "nodes" / "think" / "1" / "attempt-1.log").write_text('{"kind": "sent", "text": "Think about it."}\n')
-    think = next(a for a in ui.run_detail(finished)["attempts"] if a["node"] == "think")
-    assert (think["log"], think["harness"], think["started"] is not None) == ("nodes/think/1/attempt-1.log", "claude-code", True)
     assert (check["node"], check["log"], check["output"]) == ("check", "nodes/check/1/attempt-1.log", "nodes/check/1/output.json")
+
+
+def test_a_transcript_shows_once_the_running_session_writes_it(repo):
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    run = runs.create(Path.cwd(), "flow", [Path("flow.yaml")], Path("flow.yaml"), {})
+    folder = run.pass_dir("think", 1, None)
+    (folder / "instruction.md").write_text("Think about it.")
+    run.add_event({"event": "node_started", "node": "think", "pass": 1})
+    run.add_event({"event": "session_started", "node": "think", "pass": 1, "attempt": 1, "harness": "claude-code",
+                   "model": "opus", "log": "nodes/think/1/attempt-1.log"})
+    (waiting,) = ui.attempts(run)
+    assert (waiting["log"], waiting["instruction"], waiting["harness"]) == (None, "nodes/think/1/instruction.md", "claude-code")
+    (folder / "attempt-1.log").write_text('{"kind": "sent", "text": "Think about it."}\n')  # no event: the node runs
+    (think,) = ui.attempts(run)
+    assert (think["log"], think["harness"], think["started"] is not None) == ("nodes/think/1/attempt-1.log", "claude-code", True)
+
+
+def test_a_refresh_reads_only_the_folders_of_nodes_that_run_or_that_new_events_name(finished, monkeypatch):
+    read = []
+    real = ui._read_pass
+    monkeypatch.setattr(ui, "_read_pass", lambda run, folder, node, pass_no, index=None: (
+        read.append((node, pass_no)), real(run, folder, node, pass_no, index))[1])
+    first = ui.attempts(finished)
+    assert sorted(read) == [("check", 1), ("think", 1)]
+    read.clear()
+    assert ui.attempts(finished) == first and read == []  # the run ended: nothing can change
+    (finished.dir / "nodes" / "check" / "2").mkdir()
+    (finished.dir / "nodes" / "check" / "2" / "attempt-1.log").write_text("checked\n")
+    finished.add_event({"event": "node_started", "node": "check", "pass": 2})
+    assert [a["log"] for a in ui.attempts(finished)][-1] == "nodes/check/2/attempt-1.log"
+    assert read == [("check", 1), ("check", 2)]  # from the newest pass read before: it can have ended since
+    read.clear()
+    ui.attempts(finished)
+    assert read == [("check", 2)]  # check runs: its newest pass can get a file with no event
 
 
 def test_a_run_that_moves_shows_its_progress_in_the_run_list(repo):

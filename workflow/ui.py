@@ -34,7 +34,9 @@ import hmac
 import json
 import re
 import secrets
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -141,47 +143,114 @@ def events_after(run: Run, after: int | None) -> dict:
     return {"next": offset, "events": lines if after is not None else lines[-EVENTS_BACK:]}
 
 
+@dataclass
+class _Tree:
+    """What attempts() found in a run folder, so that its next call reads only what can have changed."""
+    seen: int = 0  # the events read
+    last: dict | None = None  # the last of them: a new events.jsonl doesn't go on from it
+    sessions: dict[str, dict] = field(default_factory=dict)  # transcript -> its session_started event
+    waiting: dict[str, tuple[float, dict]] = field(default_factory=dict)  # transcript -> the attempt to show until it is there
+    passes: dict[str, dict[int, list[tuple[float, dict]]]] = field(default_factory=dict)  # node -> pass -> its attempts
+    open: set[str] = field(default_factory=set)  # the nodes that can still write a file with no event
+    listed: list[dict] = field(default_factory=list)
+
+
+_TREES: dict[Path, _Tree] = {}  # run folder -> its _Tree
+_TREES_MOST = 64
+_TREEING = threading.Lock()  # wf ui asks from several threads
+_ENDED = ("node_finished", "node_failed", "route")  # its node wrote its files before it
+
+
 def attempts(run: Run, events: list[dict] | None = None) -> list[dict]:
     """Each attempt's log in the run folder, sub-workflows' too, oldest first, with the harness and
     model of its agent session when its events name them. An agent session that has written no
-    transcript yet is there too, with no log."""
+    transcript yet is there too, with no log.
+
+    A node writes its files before the event that ends it. So after the first call, a node's
+    folder is read again only when an event names the node or while the node runs, and then only
+    from its newest pass that was read before. The page asks every 2 seconds, and each time it
+    reads the folders of the nodes that run, not the whole run."""
     events = report.events(run) if events is None else events
-    sessions = {e["log"]: e for e in events if e.get("event") == "session_started" and e.get("log")}
-    found: list[dict] = []
+    with _TREEING:
+        tree = _TREES.pop(run.dir, None)
+        if tree is None or len(events) < tree.seen or (tree.seen and events[tree.seen - 1] != tree.last):
+            tree, stale = _Tree(), {p.name for p in _folders(run.dir / "nodes")}
+        else:
+            stale = set(tree.open)
+        for event in events[tree.seen:]:
+            node = event.get("node")
+            if not isinstance(node, str) or not (top := re.match(r"[^\[/]*", node)[0]):
+                continue
+            stale.add(top)
+            if node == top and event.get("event") in _ENDED:
+                tree.open.discard(top)
+            else:
+                tree.open.add(top)
+            if event.get("event") == "session_started" and event.get("log"):
+                tree.sessions[event["log"]], tree.waiting[event["log"]] = event, _waiting(run, event)
+        try:
+            for node in sorted(stale):
+                _read_node(run, tree, node)
+        except OSError:  # a run being discarded: start over next time
+            return _listed(tree)
+        if stale:
+            tree.listed = _listed(tree)
+        tree.seen, tree.last = len(events), events[-1] if events else None
+        _TREES[run.dir] = tree
+        while len(_TREES) > _TREES_MOST:
+            del _TREES[next(iter(_TREES))]
+        return list(tree.listed)
 
-    def nodes(folder: Path, prefix: str) -> None:
-        for node in sorted(_folders(folder)):
-            for pass_dir in sorted((p for p in _folders(node) if p.name.isdigit()), key=lambda p: int(p.name)):
-                visit(pass_dir, prefix + node.name, int(pass_dir.name), None)
 
-    def visit(folder: Path, node: str, pass_no: int, index: int | None) -> None:
-        where = node + (f"[{index}]" if index is not None else "")
-        for child in sorted(folder.iterdir()):
-            if index is None and child.is_dir() and child.name.isdigit():
-                visit(child, node, pass_no, int(child.name))
-            elif match := re.fullmatch(r"attempt-(\d+)\.log", child.name):
-                log = str(child.relative_to(run.dir))
-                session = sessions.get(log, {})
-                found.append({"node": where, "pass": pass_no, "attempt": int(match[1]), "log": log,
-                              "instruction": _maybe(run, folder / "instruction.md"), "output": _maybe(run, folder / "output.json"),
-                              "harness": session.get("harness"), "model": session.get("model"),
-                              "started": session.get("time"), "_mtime": child.stat().st_mtime})
-            elif re.fullmatch(r"attempt-\d+", child.name) and (child / "nodes").is_dir():
-                nodes(child / "nodes", f"{where}/")
+def _read_node(run: Run, tree: _Tree, node: str) -> None:
+    """Read the node's passes from the newest that was read before: the older ones have ended."""
+    known = tree.passes.setdefault(node, {})
+    newest = max(known, default=0)
+    for number in sorted(int(p.name) for p in _folders(run.dir / "nodes" / node) if p.name.isdigit()):
+        if number >= newest:
+            known[number] = _read_pass(run, run.dir / "nodes" / node / str(number), node, number)
 
-    try:
-        nodes(run.dir / "nodes", "")
-    except OSError:  # a run being discarded
-        pass
-    logged = {a["log"] for a in found}
-    for log, e in sessions.items():
-        if log not in logged:
-            found.append({"node": observe.where(e), "pass": e.get("pass"), "attempt": e.get("attempt"), "log": None,
-                          "instruction": _maybe(run, (run.dir / log).with_name("instruction.md")), "output": None,
-                          "harness": e.get("harness"), "model": e.get("model"), "started": e.get("time"),
-                          "_mtime": observe.timestamp(e.get("time"))})
-    found.sort(key=lambda a: a.pop("_mtime"))
+
+def _read_pass(run: Run, folder: Path, node: str, pass_no: int, index: int | None = None) -> list[tuple[float, dict]]:
+    """The attempts of a pass folder, its items' and its sub-workflows' too, each with the time
+    its log last changed."""
+    where = node + (f"[{index}]" if index is not None else "")
+    found = []
+    for child in sorted(folder.iterdir()):
+        if index is None and child.is_dir() and child.name.isdigit():
+            found += _read_pass(run, child, node, pass_no, int(child.name))
+        elif match := re.fullmatch(r"attempt-(\d+)\.log", child.name):
+            found.append((child.stat().st_mtime, {
+                "node": where, "pass": pass_no, "attempt": int(match[1]), "log": str(child.relative_to(run.dir)),
+                "instruction": _maybe(run, folder / "instruction.md"), "output": _maybe(run, folder / "output.json")}))
+        elif re.fullmatch(r"attempt-\d+", child.name) and (child / "nodes").is_dir():
+            for inner in sorted(_folders(child / "nodes")):
+                for pass_dir in sorted((p for p in _folders(inner) if p.name.isdigit()), key=lambda p: int(p.name)):
+                    found += _read_pass(run, pass_dir, f"{where}/{inner.name}", int(pass_dir.name))
     return found
+
+
+def _waiting(run: Run, event: dict) -> tuple[float, dict]:
+    """The attempt of an agent session whose transcript isn't there yet."""
+    instruction = (run.dir / event["log"]).with_name("instruction.md")
+    return observe.timestamp(event.get("time")), {
+        "node": observe.where(event), "pass": event.get("pass"), "attempt": event.get("attempt"), "log": None,
+        "instruction": _maybe(run, instruction), "output": None}
+
+
+def _listed(tree: _Tree) -> list[dict]:
+    """The attempts oldest first, each with its agent session's harness, model and start."""
+    found = [(at, attempt, attempt["log"]) for node in sorted(tree.passes) for pass_no in sorted(tree.passes[node])
+             for at, attempt in tree.passes[node][pass_no]]
+    logged = {log for _, _, log in found}
+    found += [(at, attempt, log) for log, (at, attempt) in tree.waiting.items() if log not in logged]
+    found.sort(key=lambda timed: timed[0])
+    listed = []
+    for _, attempt, log in found:
+        session = tree.sessions.get(log, {})
+        listed.append({**attempt, "harness": session.get("harness"), "model": session.get("model"),
+                       "started": session.get("time")})
+    return listed
 
 
 def _maybe(run: Run, path: Path) -> str | None:
