@@ -1,6 +1,6 @@
 """Runs: the run folder on disk.
 
-Every `wf run` gets a folder, and `wf resume` finds it again by id:
+Every `wf run` gets a folder, and `wf retry` finds it again by id:
 
     .wf/runs/<run-id>/              <run-id> is like 20261018-1432-implement-k3f9
       workflow/                     copies of the workflow files as they were run
@@ -13,13 +13,13 @@ Every `wf run` gets a folder, and `wf resume` finds it again by id:
                                     attempts waiting for an agent slot: capacity.py)
       lock                          held by the one process driving the run (its pid inside)
       events.jsonl                  one line per progress event
-      checkpoints.sqlite            LangGraph checkpoints, used by wf resume
+      checkpoints.sqlite            LangGraph checkpoints, used by wf retry
       nodes/<node>/<pass>/[<index>/]
         instruction.md              the rendered instruction (or command, or message)
         output.json
         attempt-<n>.log             harness transcript or command output
 
-`wf resume` loads the copies in workflow/, so editing the YAML doesn't change a
+`wf retry` loads the copies in workflow/, so editing the YAML doesn't change a
 run already in progress. `.wf/` goes into the repo's .git/info/exclude, so run
 folders never show up in `git status`.
 
@@ -37,7 +37,7 @@ The checkpoints are LangGraph's; this module only says where they live.
 
 Only one process may drive a run at a time: two would both write its
 checkpoints. Run.driving() holds an exclusive lock on the run's `lock` file
-(fcntl.flock) for as long as a `wf run` or `wf resume` process works on it; the
+(fcntl.flock) for as long as a `wf run` or `wf retry` process works on it; the
 operating system releases it if that process dies, so a crash never leaves a
 stale lock behind.
 
@@ -95,7 +95,7 @@ class Run:
         return run
 
     def command(self, verb: str, *more: str) -> str:
-        """The wf command that does `verb` to this run, as typed in its repo, e.g. `wf resume <id>`.
+        """The wf command that does `verb` to this run, as typed in its repo, e.g. `wf retry <id>`.
         For a run in a runs folder it ends in --runs-dir, so it finds the run whatever WF_RUNS_DIR
         holds where it's typed. For one in ./.wf/runs while WF_RUNS_DIR is set, it starts with
         `WF_RUNS_DIR=`, which turns the setting off: no --runs-dir value names ./.wf/runs."""

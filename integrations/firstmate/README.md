@@ -1,7 +1,7 @@
 # wf for firstmate
 
 Lets a [firstmate](https://github.com/kunchenguid/firstmate) first mate start wf
-runs, get woken when one needs attention, answer its questions, resume it after
+runs, get woken when one needs attention, answer its questions, retry it after
 a failure, and report the result.
 
 It has two parts:
@@ -12,7 +12,7 @@ It has two parts:
   succeeded. The logic is in `workflow/firstmate.py`; the package is a small
   shim that runs it with this wf's Python.
 - **A skill**, `wf/SKILL.md`, that tells the first mate how to start, watch,
-  answer, resume and report wf runs.
+  answer, retry and report wf runs.
 
 ## Setup
 
@@ -33,7 +33,7 @@ It has two parts:
    `.agents/skills/agent-skill-trigger-index/SKILL.md`:
 
    ```
-   - `wf` - load before starting a wf run, on any `procevent wf <source-id> <sequence>` check wake, and before answering, resuming or reporting a wf run.
+   - `wf` - load before starting a wf run, on any `procevent wf <source-id> <sequence>` check wake, and before answering, retrying or reporting a wf run.
    ```
 
 4. So the first mate can also write and improve workflows, install
@@ -43,18 +43,22 @@ The binding points at a copy firstmate keeps in its home. After changing
 `workflow/firstmate.py`, nothing needs rebinding; after `wf integrate` writes a
 new package version, bind it again.
 
+The skill is a copy too, so copy `wf/SKILL.md` into your firstmate checkout
+again after each wf update. An old copy can tell the first mate to use a
+command that the new wf doesn't have.
+
 ## What the first mate gets
 
 | Command | Use |
 |---|---|
 | `wf run <file> ... --detach --json` | start a run in the background |
 | `wf answer <run-id> <answers.json> [--detach]` | answer the questions a run waits on |
-| `wf resume <run-id> --detach` | continue a failed or stopped run |
+| `wf retry <run-id> --detach` | continue a failed or stopped run |
 | `wf status <run-id> --json`, `wf list --json` | where runs stand |
 | `wf wait <run-id> [--consumer NAME]` | block until a run needs attention (what the adapter polls) |
 
 Only one process drives a run at a time (a lock in the run folder), so the
-first mate can't resume a run that is still going.
+first mate can't retry a run that is still going.
 
 To keep all runs within what the machine and the accounts hold, set
 `max_agents: <n>` in `~/.wf/config.yaml` (or `WF_MAX_AGENTS`).

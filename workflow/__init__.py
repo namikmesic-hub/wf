@@ -16,7 +16,7 @@ Then the runner, built on LangGraph:
     state.py       what the graph remembers (RunState, the inbox reducer) and
                    the bookkeeping the schedule node does with it
     context.py     what nodes get that isn't saved (LangGraph's runtime context)
-    limits.py      the run's limits: reaching one pauses it, `wf resume --limit` continues it
+    limits.py      the run's limits: reaching one pauses it, `wf retry --limit` continues it
     settings.py    wf's own settings for the user, in ~/.wf/config.yaml
     capacity.py    the cap on live agent sessions across all runs that share a ~/.wf (WF_MAX_AGENTS)
     runs.py        the run folder on disk
@@ -30,7 +30,7 @@ Then the runner, built on LangGraph:
     nodes.py       running one job: agents, commands, human questions via interrupt()
     graph.py       the LangGraph wiring: schedule -> Send -> execute -> schedule
     ask.py         questions at the terminal
-    runner.py      wf run / wf resume: streaming, interrupts, Command(resume=...)
+    runner.py      wf run / wf retry: streaming, interrupts, Command(resume=...)
     cli.py         the `wf` command
 
 Then the tools around runs, none of which LangGraph knows about:

@@ -28,7 +28,7 @@ runs without asking, web search isn't accepted by itself, the sandbox is off,
 the agent doesn't credit itself in commits, and DENY's rules for the access
 level. The folder goes when the session closes. Your ~/.cursor settings don't
 apply and aren't changed. A session a later pass may continue is kept in
-sessions/ next to the folders, so `wf resume` can continue it, until the run
+sessions/ next to the folders, so `wf retry` can continue it, until the run
 succeeds and wf removes its temp folder.
 The sandbox is off at every level: with it on, a command wf allows still runs
 outside it, so it would confine nothing that wf doesn't already decide.

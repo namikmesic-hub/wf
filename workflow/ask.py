@@ -13,7 +13,7 @@ Every answer is checked against its field's schema, and asked again until it
 fits; JSON written in the editor is kept for the next try. An optional field
 can be skipped with an empty answer (with `-` when the editor is used). End of
 input (Ctrl-D, or stdin closed) raises NoAnswer, so the runner can leave the
-run waiting for `wf resume`.
+run waiting for `wf retry`.
 
 `read` and `write` default to input() and print(), looked up when called, so
 tests can pass their own or patch builtins.input.

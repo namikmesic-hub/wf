@@ -39,7 +39,7 @@ later if it's still there. Nothing can stop git on SIGKILL, which ends wf at
 once.
 
 When a run succeeds its worktrees are removed and its branches kept; a failed
-run keeps them for `wf resume`.
+run keeps them for `wf retry`.
 
 These are plain blocking functions (git is a subprocess). nodes.py runs them
 in a thread, one at a time per run, because parallel `git worktree add`
@@ -100,7 +100,7 @@ def worktree(repo: str | Path, run_id: str, parts: list[str], base: str, branch:
     commit = _git(repo, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", check=False)
     if not commit:
         raise WorkspaceError(f"`{base}` isn't a commit in {repo}")
-    if not (path / ".git").exists():  # first pass (later passes and resumed runs reuse it)
+    if not (path / ".git").exists():  # first pass (later passes and `wf retry` reuse it)
         path.parent.mkdir(parents=True, exist_ok=True)
         _git(repo, "worktree", "prune", check=False)  # its folder may be gone but still registered
         if branch_exists(repo, branch):

@@ -1,4 +1,4 @@
-"""Limits: a run that reaches one pauses, and `wf resume --limit` continues it with a bigger budget.
+"""Limits: a run that reaches one pauses, and `wf retry --limit` continues it with a bigger budget.
 
 Spending comes from dry-run scripts (`_tokens`), so these run in a second and cost nothing.
 """
@@ -67,29 +67,29 @@ def test_a_limit_pauses_the_run_and_a_bigger_one_continues_it(repo, capsys):
     assert cli.main(["run", "two.yaml", "--dry-run", script(steps)]) == 1
     run_id = only_run().name
     assert status()["status"] == "limit"
-    assert f"wf resume {run_id} --limit" in capsys.readouterr().err
-    assert cli.main(["resume", run_id, "--limit", "tokens=10000"]) == 0
+    assert f"wf retry {run_id} --limit" in capsys.readouterr().err
+    assert cli.main(["retry", run_id, "--limit", "tokens=10000"]) == 0
     assert output() == {"said": "done", "tokens": 5010}  # a ran once, and its tokens counted once
     assert json.loads((only_run() / "run.json").read_text())["limits"] == {"tokens": 10000}
 
 
-def test_resuming_without_more_budget_says_so_and_changes_nothing(repo, capsys):
+def test_retrying_without_more_budget_says_so_and_changes_nothing(repo, capsys):
     write("two.yaml", TWO)
     steps = {"agents": {"a": [{"summary": "big", "_tokens": 5000}], "b": [{"summary": "done"}]}}
     cli.main(["run", "two.yaml", "--dry-run", script(steps)])
     run_id = only_run().name
     capsys.readouterr()
-    assert cli.main(["resume", run_id]) == 1
+    assert cli.main(["retry", run_id]) == 1
     assert "used 5,000 tokens, limit 1,000" in capsys.readouterr().err
-    assert cli.main(["resume", run_id, "--limit", "tokens=2000"]) == 1  # not enough either
+    assert cli.main(["retry", run_id, "--limit", "tokens=2000"]) == 1  # not enough either
     assert "--limit tokens=" in capsys.readouterr().err
     assert "limits" not in json.loads((only_run() / "run.json").read_text())
     assert status()["status"] == "limit"
-    assert cli.main(["resume", run_id, "--limit", "tokens=none"]) == 0  # no token limit at all
+    assert cli.main(["retry", run_id, "--limit", "tokens=none"]) == 0  # no token limit at all
     assert output()["said"] == "done"
 
 
-def test_a_raised_limit_holds_for_later_resumes(repo, capsys):
+def test_a_raised_limit_holds_for_later_retries(repo, capsys):
     write("ask.yaml", """
         version: 1
         name: ask
@@ -105,7 +105,7 @@ def test_a_raised_limit_holds_for_later_resumes(repo, capsys):
     steps = {"agents": {"a": [{"summary": "s", "_tokens": 5000}], "b": [{"summary": "done"}]}}
     cli.main(["run", "ask.yaml", "--dry-run", script(steps)])
     run_id = only_run().name
-    assert cli.main(["resume", run_id, "--limit", "tokens=10000"]) == 2  # now it waits for the person
+    assert cli.main(["retry", run_id, "--limit", "tokens=10000"]) == 2  # now it waits for the person
     Path("answers.json").write_text(json.dumps({status()["questions"][0]["key"]: {"go": True}}))
     assert cli.main(["answer", run_id, "answers.json"]) == 0  # still under the raised limit
     assert output() == {"said": "done"}
@@ -124,7 +124,7 @@ def test_an_attempt_the_limit_kept_from_retrying_gets_its_retry(repo):
     """)
     steps = {"agents": {"a": [{"_fail": "crashed", "_tokens": 5000}, {"summary": "second try"}]}}
     assert cli.main(["run", "flaky.yaml", "--dry-run", script(steps)]) == 1
-    assert cli.main(["resume", only_run().name, "--limit", "tokens=100000"]) == 0
+    assert cli.main(["retry", only_run().name, "--limit", "tokens=100000"]) == 0
     assert output() == {"said": "second try"}
     assert (only_run() / "nodes" / "a" / "1" / "attempt-2.log").exists()
 
@@ -153,7 +153,7 @@ def test_a_sub_workflow_the_limit_stopped_continues_where_it_stopped(repo):
     steps = {"agents": {"x": [{"summary": "x", "_tokens": 5000}], "y": [{"summary": "y done", "_tokens": 10}]}}
     assert cli.main(["run", "outer.yaml", "--dry-run", script(steps)]) == 1
     assert status()["status"] == "limit"
-    assert cli.main(["resume", only_run().name, "--limit", "tokens=10000"]) == 0
+    assert cli.main(["retry", only_run().name, "--limit", "tokens=10000"]) == 0
     assert output() == {"said": "y done", "tokens": 5010}
 
 
@@ -218,4 +218,8 @@ def test_a_paused_limit_names_the_limit_to_raise(repo, capsys):
     cli.main(["run", "two.yaml", "--dry-run", script(steps)])
     assert "--limit cost_usd=<more>" in capsys.readouterr().err
     cli.main(["status", only_run().name, "--json"])
-    assert json.loads(capsys.readouterr().out)["resume"] == f"wf resume {only_run().name} --limit cost_usd=<more>"
+    assert json.loads(capsys.readouterr().out)["retry"] == f"wf retry {only_run().name} --limit cost_usd=<more>"
+    cli.main(["status", only_run().name])
+    line = capsys.readouterr().out.strip()
+    assert ": paused at a limit: " in line
+    assert line.endswith(f"(wf retry {only_run().name} --limit cost_usd=<more>)")

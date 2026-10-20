@@ -108,13 +108,13 @@ def test_every_command_finds_runs_in_the_runs_folder_it_is_given(repo, tmp_path,
     assert not (repo / ".wf").exists()
 
 
-def test_resume_continues_a_failed_run_from_the_runs_folder(repo, tmp_path, capsys):
+def test_retry_continues_a_failed_run_from_the_runs_folder(repo, tmp_path, capsys):
     given = ["--runs-dir", str(tmp_path / "runs")]
     flag = tmp_path / "flag"
     assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={flag}", *given]) == 1
     (folder,) = runs.runs_folder(repo, tmp_path / "runs").iterdir()
     flag.touch()
-    assert cli.main(["resume", folder.name, *given]) == 0
+    assert cli.main(["retry", folder.name, *given]) == 0
     assert json.loads((folder / "status.json").read_text())["status"] == "succeeded"
 
 
@@ -160,17 +160,17 @@ def test_the_commands_wf_prints_for_a_run_find_its_runs_folder(repo, tmp_path, m
     assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={flag}", *given]) == 1
     (folder,) = runs.runs_folder(repo, tmp_path / "runs").iterdir()
     hint = capsys.readouterr().out.split("continue with: ")[1].strip()
-    assert hint == f"wf resume {folder.name} --runs-dir {(tmp_path / 'runs').resolve()}"
+    assert hint == f"wf retry {folder.name} --runs-dir {(tmp_path / 'runs').resolve()}"
     assert cli.main(["status", folder.name, "--json", *given]) == 0
-    assert json_out(capsys)["resume"] == hint
+    assert json_out(capsys)["retry"] == hint
     monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "runs"))  # the same, where it's typed without the setting too
     assert cli.main(["status", folder.name, "--json"]) == 0
-    assert json_out(capsys)["resume"] == hint
+    assert json_out(capsys)["retry"] == hint
     monkeypatch.delenv("WF_RUNS_DIR")
     flag.touch()
     assert cli.main(shlex.split(hint)[1:]) == 0  # the printed command works as it is
     assert cli.main(["run", write(tmp_path / "ask.yaml", ASK), "branch=fm/task", *given]) == 2
-    assert f"Answer with: wf resume {runs.all_runs(repo, tmp_path / 'runs')[-1].id} --runs-dir " in capsys.readouterr().out
+    assert f"Answer with: wf retry {runs.all_runs(repo, tmp_path / 'runs')[-1].id} --runs-dir " in capsys.readouterr().out
     assert cli.main(["status", runs.all_runs(repo, tmp_path / "runs")[-1].id, "--json", *given]) == 0
     assert json_out(capsys)["answer"].endswith(f"<answers.json> --runs-dir {(tmp_path / 'runs').resolve()}")
 
@@ -179,7 +179,7 @@ def test_a_run_in_the_repo_while_wf_runs_dir_points_elsewhere_says_how_to_find_i
     assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path / 'nope'}"]) == 1
     (run,) = runs.all_runs(repo)
     monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "runs"))
-    assert run.command("resume") == f"WF_RUNS_DIR= wf resume {run.id}"  # a blank WF_RUNS_DIR is no setting
+    assert run.command("retry") == f"WF_RUNS_DIR= wf retry {run.id}"  # a blank WF_RUNS_DIR is no setting
 
 
 def test_a_blank_runs_folder_setting_is_no_setting(repo, tmp_path, monkeypatch):

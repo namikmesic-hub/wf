@@ -176,15 +176,15 @@ def test_new_needs_a_repo_with_a_commit(tmp_path, monkeypatch, capsys):
     assert "`workspace: new` needs a git repo with at least one commit" in capsys.readouterr().err
 
 
-def test_a_resumed_retry_starts_from_the_commit_the_job_first_started_from(repo, monkeypatch, tmp_path):
+def test_an_attempt_after_wf_retry_starts_from_the_commit_the_job_first_started_from(repo, monkeypatch, tmp_path):
     def clean(cwd: Path):
-        assert not (cwd / "junk.txt").exists(), "the resumed retry should start from a clean worktree"
+        assert not (cwd / "junk.txt").exists(), "the attempt after wf retry should start from a clean worktree"
 
     use(monkeypatch, edits({"junk.txt": "half done\n"}), talk(), talk())  # attempt 1 never submits
     assert run("impl: {needs: [start], instruction: work, access: edit, workspace: new, retry: 0}",
                end='{branch: "{{ workspace.impl.branch }}"}') == 1
     use(monkeypatch, edits({"good.txt": "ok\n"}, {"summary": "done"}, check=clean))
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert git("ls-tree", "--name-only", output()["branch"]).splitlines() == ["README", "good.txt"]
 
 
@@ -357,21 +357,21 @@ def test_a_relative_signing_key_fails_the_run_at_its_start(repo, monkeypatch, ca
     assert fake.sent == []
 
 
-def test_a_resumed_run_checks_the_key_again_before_any_agent_works(repo, monkeypatch, tmp_path, capsys):
+def test_a_retried_run_checks_the_key_again_before_any_agent_works(repo, monkeypatch, tmp_path, capsys):
     fake = use(monkeypatch, *[talk()] * 6)  # both attempts end without a result
     assert run(IMPL) == 1
     sign_with(tmp_path / "missing.pub")
     sent = len(fake.sent)
-    assert cli.main(["resume", only_run().name]) == 1
-    assert "wf resume: git can't sign commits in" in capsys.readouterr().err
+    assert cli.main(["retry", only_run().name]) == 1
+    assert "wf retry: git can't sign commits in" in capsys.readouterr().err
     assert len(fake.sent) == sent
 
 
-def test_resuming_a_run_that_succeeded_says_so_without_checking_the_key(repo, monkeypatch, tmp_path, capsys):
+def test_retrying_a_run_that_succeeded_says_so_without_checking_the_key(repo, monkeypatch, tmp_path, capsys):
     use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
     assert run(IMPL) == 0
     sign_with(tmp_path / "missing.pub")
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert f"Run {only_run().name} already succeeded." in capsys.readouterr().out
 
 
@@ -402,29 +402,29 @@ def test_the_fix_for_an_openpgp_key_names_a_key_id(repo, tmp_path):
     assert str(error.value).endswith(f"git -C {repo} config user.signingkey <key id>")
 
 
-def test_a_resumed_run_without_its_run_json_checks_the_key_where_it_ran(repo, monkeypatch, tmp_path, capsys):
+def test_a_retried_run_without_its_run_json_checks_the_key_where_it_ran(repo, monkeypatch, tmp_path, capsys):
     fake = use(monkeypatch, *[talk()] * 6)
     assert run(IMPL) == 1
     (only_run() / "run.json").unlink()  # the run's checkpoints still say where it ran
     sign_with(tmp_path / "missing.pub")
     sent = len(fake.sent)
-    assert cli.main(["resume", only_run().name]) == 1
-    assert "wf resume: git can't sign commits in" in capsys.readouterr().err
+    assert cli.main(["retry", only_run().name]) == 1
+    assert "wf retry: git can't sign commits in" in capsys.readouterr().err
     assert len(fake.sent) == sent
 
 
-def test_a_resumed_run_checks_the_key_for_an_edit_agent_in_a_sub_workflow(repo, monkeypatch, tmp_path, capsys):
+def test_a_retried_run_checks_the_key_for_an_edit_agent_in_a_sub_workflow(repo, monkeypatch, tmp_path, capsys):
     Path("sub.yaml").write_text(SUB)
     fake = use(monkeypatch, *[talk()] * 6)
     assert run("build: {needs: [start], workflow: sub.yaml, workspace: new}") == 1
     sign_with(tmp_path / "missing.pub")
     sent = len(fake.sent)
-    assert cli.main(["resume", only_run().name]) == 1
-    assert "wf resume: git can't sign commits in" in capsys.readouterr().err
+    assert cli.main(["retry", only_run().name]) == 1
+    assert "wf retry: git can't sign commits in" in capsys.readouterr().err
     assert len(fake.sent) == sent
 
 
-def test_a_failed_commit_keeps_the_attempt_number_so_a_resume_starts_at_the_next_one(repo, monkeypatch):
+def test_a_failed_commit_keeps_the_attempt_number_so_wf_retry_starts_at_the_next_one(repo, monkeypatch):
     commit_all = workspaces.commit_all
 
     def full_disk(path, message):
@@ -435,7 +435,7 @@ def test_a_failed_commit_keeps_the_attempt_number_so_a_resume_starts_at_the_next
     assert run(IMPL) == 1  # attempt 1 fails, attempt 2 succeeds but can't commit
     monkeypatch.setattr(workspaces, "commit_all", commit_all)
     use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     events = [json.loads(line) for line in (only_run() / "events.jsonl").read_text().splitlines()]
     assert [e["attempt"] for e in events if e["event"] == "attempt_started"] == [2, 3]
 
@@ -771,7 +771,7 @@ def test_a_branch_name_git_or_wf_would_refuse_fails_the_node(repo, monkeypatch, 
     assert git("branch", "--list") == "* " + git("branch", "--show-current")  # no wf/ branch in its place
 
 
-def test_a_resumed_run_keeps_the_branch_it_made(repo, monkeypatch, tmp_path):
+def test_a_retried_run_keeps_the_branch_it_made(repo, monkeypatch, tmp_path):
     use(monkeypatch, edits({"half.txt": "x\n"}), talk(), talk())  # never submits
     write(NAMED.replace("workspace: new", "workspace: new, retry: 0"), inputs=BRANCH_INPUT,
           end='{branch: "{{ workspace.impl.branch }}"}')
@@ -779,7 +779,7 @@ def test_a_resumed_run_keeps_the_branch_it_made(repo, monkeypatch, tmp_path):
     shutil.rmtree(tmp_path / "home" / "worktrees")  # the branch outlives its worktree
     git("worktree", "prune")  # and git's record of it: only branches.json says the run made the branch
     use(monkeypatch, edits({"good.txt": "ok\n"}, {"summary": "done"}))
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert output() == {"branch": "fm/task"}
     assert git("ls-tree", "--name-only", "fm/task").splitlines() == ["README", "good.txt"]
 
@@ -791,7 +791,7 @@ def test_a_run_that_stopped_before_recording_its_branch_takes_it_up_again(repo, 
     assert cli.main(["run", "flow.yaml", "branch=fm/task"]) == 1
     (only_run() / "branches.json").unlink()  # as if the run had stopped between making the branch and recording it
     use(monkeypatch, edits({"good.txt": "ok\n"}, {"summary": "done"}))
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert output() == {"branch": "fm/task"}
     assert json.loads((only_run() / "branches.json").read_text())["impl"]["branch"] == "fm/task"
 
@@ -879,7 +879,7 @@ def test_discard_says_which_branches_git_would_not_delete(repo, monkeypatch, cap
 
 
 def test_discard_deletes_the_branch_a_run_made_without_recording_it(repo, monkeypatch):
-    use(monkeypatch, talk(), talk(), talk())  # never submits: the worktree stays for wf resume
+    use(monkeypatch, talk(), talk(), talk())  # never submits: the worktree stays for wf retry
     write(NAMED.replace("workspace: new", "workspace: new, retry: 0"), inputs=BRANCH_INPUT)
     assert cli.main(["run", "flow.yaml", "branch=fm/lost"]) == 1
     (only_run() / "branches.json").unlink()

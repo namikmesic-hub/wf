@@ -1,4 +1,4 @@
-"""wf run and wf resume, end to end, on command and human workflows.
+"""wf run and wf retry, end to end, on command and human workflows.
 
 Each test runs in a fresh git repo. No agents run, so these are cheap and
 deterministic; commands use small files as counters and switches.
@@ -232,7 +232,7 @@ def test_items_that_fail_can_be_skipped(repo, capsys):
     assert output(only_run()) == {"results": ["item-0\n", "item-2\n"], "failed": [1]}
 
 
-def test_a_failed_item_stops_the_run_and_resume_reruns_only_that_item(repo, capsys):
+def test_a_failed_item_stops_the_run_and_retry_reruns_only_that_item(repo, capsys):
     write("items.yaml", ITEMS % "fail")
     Path("broken-2").touch()
     assert cli.main(["run", "items.yaml"]) == 1
@@ -241,7 +241,8 @@ def test_a_failed_item_stops_the_run_and_resume_reruns_only_that_item(repo, caps
     assert "item 1: exited with code 1" in capsys.readouterr().err
 
     Path("broken-2").unlink()
-    assert cli.main(["resume", folder.name]) == 0
+    assert cli.main(["retry", folder.name]) == 0
+    assert f"Retrying run {folder.name}" in capsys.readouterr().out
     assert status(folder) == "succeeded"
     assert output(folder)["results"] == ["item-0\n", "item-1\n", "item-2\n"]
     assert [Path(f"ran-{i}").read_text().count("run") for i in (1, 2, 3)] == [1, 2, 1]
@@ -379,17 +380,17 @@ def test_a_human_node_asks_at_a_terminal(repo, monkeypatch, capsys):
     assert "answer yes or no" in out
 
 
-def test_without_a_terminal_a_human_node_pauses_and_resume_asks_later(repo, monkeypatch, capsys):
+def test_without_a_terminal_a_human_node_pauses_and_retry_asks_later(repo, monkeypatch, capsys):
     write("ask.yaml", ASK)
     assert cli.main(["run", "ask.yaml"]) == 2
     folder = only_run()
     assert status(folder) == "waiting"
-    assert f"wf resume {folder.name}" in capsys.readouterr().out
+    assert f"wf retry {folder.name}" in capsys.readouterr().out
 
-    assert cli.main(["resume", folder.name]) == 2  # still no terminal: still waiting
+    assert cli.main(["retry", folder.name]) == 2  # still no terminal: still waiting
 
     answers(monkeypatch, "no", "1", "not now")
-    assert cli.main(["resume", folder.name]) == 0
+    assert cli.main(["retry", folder.name]) == 0
     assert output(folder) == {"built": "nothing"}
     assert json.loads((folder / "nodes" / "approve" / "1" / "output.json").read_text()) == {
         "ok": False, "size": "small", "note": "not now",
@@ -450,32 +451,52 @@ def test_an_end_output_schema_that_requires_a_left_out_field_still_fails(repo, m
         assert output(only_run()) == {"note": None, "answer": result}
 
 
-# ---------- resume ----------
+# ---------- retry ----------
 
 
-def test_resume_of_a_finished_run_says_so(repo, capsys):
+def test_retry_of_a_finished_run_says_so(repo, capsys):
     write("chain.yaml", CHAIN)
     cli.main(["run", "chain.yaml", "who=a"])
     capsys.readouterr()
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
     assert "already succeeded" in capsys.readouterr().out
 
 
-def test_resume_of_an_unknown_run(repo, capsys):
-    assert cli.main(["resume", "nope"]) == 1
+def test_retry_of_an_unknown_run(repo, capsys):
+    assert cli.main(["retry", "nope"]) == 1
     assert "no run `nope`" in capsys.readouterr().err
 
 
-def test_resume_uses_the_copied_workflow(repo, capsys):
+def test_resume_is_not_a_command(repo, capsys):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["resume", "nope"])
+    assert stop.value.code == 1
+    assert "invalid choice: 'resume'" in capsys.readouterr().err
+
+
+def test_retry_has_its_help_and_all_its_options(repo, capsys):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["--help"])
+    assert stop.value.code == 0
+    assert "retry continue a failed or paused run from its last checkpoint" in " ".join(capsys.readouterr().out.split())
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["retry", "--help"])
+    assert stop.value.code == 0
+    usage = " ".join(capsys.readouterr().out.split())
+    for option in ("run-id", "--no-input", "--answers FILE", "--detach", "--json", "--limit NAME=VALUE", "--runs-dir DIR"):
+        assert option in usage
+
+
+def test_retry_uses_the_copied_workflow(repo, capsys):
     write("items.yaml", ITEMS % "fail")
     Path("broken-1").touch()
     assert cli.main(["run", "items.yaml"]) == 1
     Path("items.yaml").write_text("garbage: [")
     Path("broken-1").unlink()
-    assert cli.main(["resume", only_run().name]) == 0
+    assert cli.main(["retry", only_run().name]) == 0
 
 
-# ---------- stopping at a prompt, and limits on resume ----------
+# ---------- stopping at a prompt, and limits on retry ----------
 
 
 @pytest.mark.parametrize("error, code", [(EOFError, 2), (KeyboardInterrupt, 130)])
@@ -490,10 +511,10 @@ def test_no_answer_at_a_prompt_leaves_the_run_waiting(repo, monkeypatch, capsys,
     assert cli.main(["run", "ask.yaml"]) == code
     folder = only_run()
     assert status(folder) == "waiting"
-    assert f"wf resume {folder.name}" in capsys.readouterr().out
+    assert f"wf retry {folder.name}" in capsys.readouterr().out
 
 
-def test_resume_does_not_retry_past_a_limit(repo, capsys):
+def test_retry_does_not_rerun_past_a_limit(repo, capsys):
     write("limit.yaml", """
         version: 1
         name: limit
@@ -506,10 +527,10 @@ def test_resume_does_not_retry_past_a_limit(repo, capsys):
     assert cli.main(["run", "limit.yaml"]) == 1
     folder = only_run()
     assert status(folder) == "failed"
-    assert cli.main(["resume", folder.name]) == 1
+    assert cli.main(["retry", folder.name]) == 1
     assert status(folder) == "limit"
     assert Path("ran").read_text() == "x\n"  # not run again
-    assert cli.main(["resume", folder.name, "--limit", "duration=1h"]) == 1  # a bigger budget: it retries
+    assert cli.main(["retry", folder.name, "--limit", "duration=1h"]) == 1  # a bigger budget: it retries
     assert Path("ran").read_text() == "x\nx\n"
     assert status(folder) == "failed"
 
@@ -554,8 +575,8 @@ def test_a_crash_inside_the_graph_is_recorded_not_left_running(repo, monkeypatch
 
 
 @pytest.mark.parametrize("bad", ["../../etc", "a/b", ".."])
-def test_resume_refuses_run_ids_that_are_paths(repo, capsys, bad):
-    assert cli.main(["resume", bad]) == 1
+def test_retry_refuses_run_ids_that_are_paths(repo, capsys, bad):
+    assert cli.main(["retry", bad]) == 1
     assert "isn't a run id" in capsys.readouterr().err
 
 

@@ -47,7 +47,7 @@ def build(runs: list[Run]) -> dict:
             failures_at[status.get("node", "?")] += 1
         _routes_of(run, routes)
         seen, started, counted = set(), {}, {}  # counted: what each (node, pass) has reported spending
-        failed_pass: dict = {}  # node -> its pass that failed: a resume reruns it, timed from its next event
+        failed_pass: dict = {}  # node -> its pass that failed: `wf retry` reruns it, timed from its next event
         taken_here: Counter = Counter()  # by the route's key and the exact place (build[2]/review)
         for event in events:
             kind, name = event.get("event"), _name(event.get("node") or "")
@@ -55,7 +55,7 @@ def build(runs: list[Run]) -> dict:
                 continue
             node = nodes[name]
             raw = event.get("node")
-            if raw in failed_pass and kind not in ("node_started", "node_failed"):  # the resumed part of a pass
+            if raw in failed_pass and kind not in ("node_started", "node_failed"):  # the part of a pass that `wf retry` reruns
                 started.setdefault((raw, failed_pass.pop(raw)), event["time"])
             if kind == "node_started":
                 node["passes"] += 1
@@ -64,13 +64,13 @@ def build(runs: list[Run]) -> dict:
                     seen.add(name)
                     node["runs"] += 1
                 place = (event.get("node"), event.get("pass"))
-                if place in counted:  # started again: a sub-workflow attempt that starts over (a resumed
-                    counted[place] = (0, 0.0)  # pass reruns its jobs without a new node_started)
+                if place in counted:  # started again: a sub-workflow attempt that starts over (`wf retry`
+                    counted[place] = (0, 0.0)  # reruns the pass's jobs without a new node_started)
                 started[place] = event["time"]
             elif kind in ("node_finished", "node_failed"):
                 node["successes"] += kind == "node_finished"
                 node["final_failures"] += kind == "node_failed"
-                # A pass's spending so far: a pass that failed, was resumed and finished reports
+                # A pass's spending so far: a pass that failed, ran again after `wf retry` and finished reports
                 # twice, the second time including the first, so count what's new
                 place = (event.get("node"), event.get("pass"))
                 before = counted.get(place, (0, 0.0))

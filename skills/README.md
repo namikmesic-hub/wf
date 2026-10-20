@@ -7,7 +7,7 @@ Agent skills for working with wf, in the standard `SKILL.md` folder format.
 | [`wf-workflows`](wf-workflows/SKILL.md) | building, changing and improving workflow files: design patterns, the file format, dry runs, and improving from `wf report` evidence |
 
 The skill that teaches firstmate's first mate to *operate* wf runs (start,
-watch, answer, resume) is part of the firstmate integration:
+watch, answer, retry) is part of the firstmate integration:
 [`integrations/firstmate/wf/SKILL.md`](../integrations/firstmate/wf/SKILL.md).
 
 ## Installing
@@ -23,3 +23,4 @@ Copy or link the folder wherever your agent loads skills from:
   `wf-workflows/SKILL.md` from its instructions file (`AGENTS.md`).
 
 The skill expects `wf` on the agent's PATH (`uv tool install --editable /path/to/wf`).
+A link follows each wf update. A copy doesn't, so copy the folder again after you update wf.

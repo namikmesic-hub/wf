@@ -220,7 +220,7 @@ def test_a_pass_that_failed_and_then_finished_is_counted_once(repo, capsys, monk
     """)
     assert cli.main(["run", "one.yaml"]) == 1
     (run_id,) = run_ids()
-    assert cli.main(["resume", run_id]) == 0
+    assert cli.main(["retry", run_id]) == 0
     found = report(capsys, run_id)
     spent = found["nodes"]["think"]["tokens"]
     assert spent == found["runs"][0]["tokens"] and spent > 0

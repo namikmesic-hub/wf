@@ -13,7 +13,7 @@ run_job() never raises. A failure comes back as a Finished record with
 ok=False, so one failing job doesn't cancel the others running in the same
 step. The exception is interrupt() in human nodes, which LangGraph handles
 itself: it saves the run and stops the graph. When the run continues (right
-away at a terminal, or later with `wf resume`), LangGraph runs this job again
+away at a terminal, or later with `wf retry`), LangGraph runs this job again
 from the top, and this time interrupt() returns the person's answers.
 
 Agent nodes (_agent) go through the attempt loop the spec describes, written
@@ -59,14 +59,14 @@ agent in a worktree the runner made, a retry starts from the commit the job
 started from, and when the agent succeeds the runner commits what it left
 (`edit` agents are told not to commit themselves). A node's `branch` names
 its worktree's branch on its first pass; the run folder's branches.json
-records it, so later passes and `wf resume` keep using it, and no other node
+records it, so later passes and `wf retry` keep using it, and no other node
 or run can take it over. An item's `branch` renders on every pass, and must
 name the branch its index already has.
 
 Workflow nodes (_workflow) run their sub-workflow with the same graph, as a
 separate LangGraph thread in the run's checkpoints: one thread per attempt.
 So a sub-workflow that fails is just this job failing (retry, on_item_error
-and `wf resume` all work as for any node), and a retry starts a fresh thread.
+and `wf retry` all work as for any node), and a retry starts a fresh thread.
 The sub-workflow runs in a fresh contextvars.Context, so LangGraph doesn't
 take it for part of the parent's graph. When it pauses for a person, this job
 relays the questions with its own interrupt(); when the run continues, the
@@ -194,7 +194,7 @@ def _named_worktree(run: Run, repo: str, parts: list[str], base: str, branch: st
     if problem := workspaces.branch_problem(repo, branch):
         raise workspaces.WorkspaceError(f"can't name the branch `{branch}`: {problem}")
     made = run.branches()
-    if path in made:  # a later pass, or the run resumed
+    if path in made:  # a later pass, or `wf retry`
         if made[path] != branch:
             raise workspaces.WorkspaceError(f"`{path}` worked on branch `{made[path]}` in an earlier pass, and now names "
                                             f"`{branch}`: worktrees go by item index, so keep each item at its index")
@@ -370,7 +370,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
     async def attempt(number: int, name: str) -> dict:
         # Every attempt but the job's very first starts from the commit the job started from:
-        # retries, and attempts after a crash or `wf resume` (which may find half-done edits)
+        # retries, and attempts after a crash or `wf retry` (which may find half-done edits)
         if start and (number > job["attempt"] or entered_before):
             await _git(ctx, workspaces.reset, workspace["path"], start)
         access = wf.setting(node_id, "access")
@@ -459,7 +459,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     if commits:
         try:
             await _git(ctx, workspaces.commit_all, workspace["path"], f"wf: {node_id} ({ctx.run.id})")
-        except workspaces.WorkspaceError as error:  # attempt `number` ran: a resumed job starts at the next one
+        except workspaces.WorkspaceError as error:  # attempt `number` ran: `wf retry` starts the job at the next one
             raise _Failed(f"workspace: {error}", number) from error
     return result, number
 
@@ -536,8 +536,8 @@ async def _attached(uses, number: int):
 
 
 async def _start_commit(ctx: RunContext, folder: Path, workspace: dict) -> tuple[str, bool]:
-    """The commit this job started from, kept in its pass folder so a resumed or replayed job
-    goes back to the same one. Returns (commit, whether the job was entered before)."""
+    """The commit this job started from, kept in its pass folder so `wf retry` or a replay
+    takes the job back to the same one. Returns (commit, whether the job was entered before)."""
     record = folder / "start-commit"
     if record.exists():
         return record.read_text(encoding="utf-8").strip(), True

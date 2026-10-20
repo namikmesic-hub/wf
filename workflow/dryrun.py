@@ -40,7 +40,7 @@ mention really runs, and the run says which ones can before it starts.
 
 Worktrees are real, so commands can look at what `_files` wrote. A dry run that
 succeeds removes its worktrees and deletes its branches. The script is copied
-into the run folder with a record of what's been used, so `wf resume`
+into the run folder with a record of what's been used, so `wf retry`
 continues a dry run where it stopped.
 """
 
@@ -125,7 +125,7 @@ class Script:
         return script
 
     def keep(self, folder: Path) -> None:
-        """Copy the checked script into the run folder (dry-run/), for wf resume."""
+        """Copy the checked script into the run folder (dry-run/), for wf retry."""
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "script.json").write_text(json.dumps(self.entries, indent=2), encoding="utf-8")
         self.used_file = folder / "used.json"

@@ -18,7 +18,7 @@ or `wf-run:/abs/runs-dir/<repo key>/<id>` for a run kept in a runs folder
                      {status: "result", output: <the run's state as JSON>}, or "no-result"
     result.classify  wf-waiting, wf-failed, wf-stopped, wf-limit or wf-succeeded
     result.terminal  true once the run succeeded; the source then retires (a limit
-                     pauses a run: `wf resume --limit` continues it, so the source stays)
+                     pauses a run: `wf retry --limit` continues it, so the source stays)
     result.silent    always false: every state change is worth the first mate's attention
 
 firstmate copies the package into its home and checks its digest, so the
@@ -160,7 +160,7 @@ def _bounded(state: dict, more: str) -> str:
     text = json.dumps(slim, ensure_ascii=False, default=str)
     if len(text.encode("utf-8")) <= MAX_OUTPUT:
         return text
-    keep = ("run", "status", "seq", "dir", "workflow", "nodes", "answer", "resume")
+    keep = ("run", "status", "seq", "dir", "workflow", "nodes", "answer", "retry")
     return json.dumps({k: state[k] for k in keep if k in state} | {"more": more})
 
 

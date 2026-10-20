@@ -112,6 +112,20 @@ def test_a_detached_answer_and_a_consumer_cursor(repo, capsys):
     assert (state["status"], state["output"]) == ("succeeded", {"said": "held\n"})
 
 
+def test_retry_takes_an_answers_file_and_detaches_with_json_output(repo, capsys):
+    write("ask.yaml", ASK)
+    run_id = detached(capsys, "ask.yaml")
+    cli.main(["wait", run_id, "--timeout", "30"])
+    key = json_out(capsys)["questions"][0]["key"]
+    Path("answers.json").write_text(json.dumps({key: {"ok": True}}))
+    assert cli.main(["retry", run_id, "--answers", "answers.json", "--detach", "--json"]) == 0
+    started = json_out(capsys)
+    assert started["run"] == run_id and isinstance(started["pid"], int)
+    assert cli.main(["wait", run_id, "--timeout", "30"]) == 0
+    state = json_out(capsys)
+    assert (state["status"], state["output"]) == ("succeeded", {"said": "shipped\n"})
+
+
 def test_status_and_list(repo, capsys):
     write("ask.yaml", ASK)
     run_id = detached(capsys, "ask.yaml")
@@ -141,13 +155,13 @@ def test_only_one_process_drives_a_run(repo, capsys):
     deadline = time.monotonic() + 10
     while not operate.driven(folder) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert cli.main(["resume", run_id]) == 1
+    assert cli.main(["retry", run_id]) == 1
     assert "already running" in capsys.readouterr().err
     assert cli.main(["wait", run_id, "--timeout", "30"]) == 0
     assert json_out(capsys)["status"] == "succeeded"
 
 
-def test_a_run_whose_process_died_is_reported_stopped_and_can_be_resumed(repo, capsys, monkeypatch):
+def test_a_run_whose_process_died_is_reported_stopped_and_can_be_retried(repo, capsys, monkeypatch):
     monkeypatch.setattr(operate, "GRACE_SECONDS", 0)
     write("slow.yaml", SLOW)
     run_id = detached(capsys, "slow.yaml")
@@ -159,12 +173,15 @@ def test_a_run_whose_process_died_is_reported_stopped_and_can_be_resumed(repo, c
     assert cli.main(["wait", run_id, "--timeout", "10"]) == 0
     state = json_out(capsys)
     assert state["status"] == "stopped"
-    assert state["resume"] == f"wf resume {run_id}"
-    assert cli.main(["resume", run_id]) == 0
+    assert state["retry"] == f"wf retry {run_id}"
+    assert cli.main(["status", run_id]) == 0
+    line = capsys.readouterr().out.strip()
+    assert line.startswith(f"{run_id} [slow]: stopped: no wf process") and line.endswith(f"(wf retry {run_id})")
+    assert cli.main(["retry", run_id]) == 0
     assert json.loads((folder / "output.json").read_text()) == {"said": "done\n"}
 
 
-def test_a_failed_run_reports_why_and_resumes_in_the_background(repo, capsys):
+def test_a_failed_run_reports_why_and_retries_in_the_background(repo, capsys):
     write("flaky.yaml", """
         version: 1
         name: flaky
@@ -178,8 +195,13 @@ def test_a_failed_run_reports_why_and_resumes_in_the_background(repo, capsys):
     state = json_out(capsys)
     assert (state["status"], state["node"]) == ("failed", "check")
     assert "exited with code 1" in state["error"]
+    for command in (["status", run_id], ["list"]):
+        assert cli.main(command) == 0
+        line = capsys.readouterr().out.strip()
+        assert line.startswith(f"{run_id} [flaky]: failed: check: exited with code 1")
+        assert line.endswith(f"(wf retry {run_id})")
     Path("ready").touch()
-    assert cli.main(["resume", run_id, "--detach"]) == 0
+    assert cli.main(["retry", run_id, "--detach"]) == 0
     capsys.readouterr()
     assert cli.main(["wait", run_id, "--timeout", "30"]) == 0
     assert json_out(capsys)["status"] == "succeeded"
@@ -202,6 +224,7 @@ def test_questions_from_sub_workflows_are_answered_by_their_full_key(repo, capsy
     assert all("/" in q["key"] for q in questions)
     Path("answers.json").write_text(json.dumps({questions[0]["key"]: {"ok": True}, questions[1]["key"]: {"ok": False}}))
     assert cli.main(["answer", run_id, "answers.json"]) == 0
+    assert f"Continuing run {run_id}" in capsys.readouterr().out
     output = json.loads((Path(".wf/runs") / run_id / "output.json").read_text())
     assert output == {"said": ["shipped\n", "held\n"]}
 
@@ -209,7 +232,7 @@ def test_questions_from_sub_workflows_are_answered_by_their_full_key(repo, capsy
 def test_a_detached_run_is_locked_from_the_moment_it_is_started(repo, capsys):
     write("slow.yaml", SLOW)
     run_id = detached(capsys, "slow.yaml")  # the lock passes straight from this process to the driver
-    assert cli.main(["resume", run_id]) == 1
+    assert cli.main(["retry", run_id]) == 1
     assert "already running" in capsys.readouterr().err
     assert cli.main(["wait", run_id, "--timeout", "30"]) == 0
 

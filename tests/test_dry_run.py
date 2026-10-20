@@ -341,7 +341,7 @@ def test_questions_sharing_a_key_wait_for_a_person_if_the_script_is_short(repo, 
     assert json.loads((only_run() / "status.json").read_text())["status"] == "waiting"
 
 
-def test_a_resumed_dry_run_answers_from_its_script(repo, monkeypatch):
+def test_a_retried_dry_run_answers_from_its_script(repo, monkeypatch):
     Path("ask.yaml").write_text(dedent(ASK_EACH))
     real = runner._scripted_answers
     calls = []
@@ -354,7 +354,7 @@ def test_a_resumed_dry_run_answers_from_its_script(repo, monkeypatch):
 
     monkeypatch.setattr(runner, "_scripted_answers", crash_once)
     assert cli.main(["run", "ask.yaml", "--dry-run", script({"humans": {"ask": [{"ok": True}, {"ok": False}]}})]) == 130
-    assert cli.main(["resume", only_run().name, "--no-input"]) == 0
+    assert cli.main(["retry", only_run().name, "--no-input"]) == 0
     assert output() == {"oks": [True, False]}
 
 
@@ -393,12 +393,12 @@ def test_questions_from_items_are_named_by_item_and_scripts_can_key_them(repo, c
     assert output() == {"oks": [True, False]}
 
 
-def test_resuming_a_dry_run_whose_script_is_gone_says_so(repo, capsys):
+def test_retrying_a_dry_run_whose_script_is_gone_says_so(repo, capsys):
     Path("ask.yaml").write_text(dedent(ASK_EACH))
     cli.main(["run", "ask.yaml", "--dry-run", script({"humans": {"ask": [{"ok": True}]}})])
     shutil.rmtree(only_run() / "dry-run")
     capsys.readouterr()
-    assert cli.main(["resume", only_run().name]) == 1
+    assert cli.main(["retry", only_run().name]) == 1
     assert "can't read the dry run's script" in capsys.readouterr().err
 
 
