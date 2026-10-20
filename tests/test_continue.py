@@ -15,7 +15,7 @@ from textwrap import dedent
 import pytest
 
 from fakes import Fake, submit
-from workflow import cli, firstmate, harnesses, operate, progress, report, runner, runs, scheduler, spec, state, trace_view, validate, workspaces
+from workflow import cli, firstmate, harnesses, operate, progress, report, runner, runs, scheduler, spec, state, trace_view, ui, validate, workspaces
 from workflow.context import RunContext
 
 
@@ -536,6 +536,25 @@ def test_wf_report_counts_follow_ups_and_not_the_time_the_run_waited_for_them(re
     (run.dir / "events.jsonl").write_text("".join(json.dumps({**e, "time": t}) + "\n" for e, t in zip(logged, times)))
     (summary,) = report.build([run])["runs"]
     assert (summary["follow_ups"], summary["duration_s"]) == (1, 0)
+
+
+def test_wf_ui_reads_only_the_follow_up_into_the_view_of_a_run_it_has_shown(repo, capsys, monkeypatch):
+    run = ran(capsys)
+    assert ui.run_detail(run)["metrics"]["run"]["follow_ups"] == 0
+    assert cli.main(["continue", run.id, "more"]) == 0
+    logged = events(run)
+    later = next(i for i, e in enumerate(logged) if e["event"] == "follow_up")
+    parsed, real_parse = [], runs.parse_events
+    monkeypatch.setattr(runs, "parse_events", lambda lines: parsed.append(real_parse(lines)) or parsed[-1])
+    found = ui.run_detail(run)
+    assert [len(new) for new in parsed] == [len(logged) - later]  # the events of the follow-up
+    assert found["metrics"]["run"]["follow_ups"] == 1
+    assert found["metrics"]["nodes"] == report.build([run])["nodes"]
+    assert found["states"] == {"plan": "done", "work": "done", "check": "done"}
+    assert found["progress"] == progress.of(run)
+    times = ["2026-10-20T10:00:00+00:00"] * later + ["2026-10-21T10:00:00+00:00"] * (len(logged) - later)
+    (run.dir / "events.jsonl").write_text("".join(json.dumps({**e, "time": t}) + "\n" for e, t in zip(logged, times)))
+    assert ui.run_detail(run)["metrics"]["run"]["duration_s"] == 0  # the day the run waited for the follow-up doesn't count
 
 
 def test_wf_graph_shows_where_a_follow_up_comes_in(repo, capsys):
