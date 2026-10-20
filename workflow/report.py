@@ -69,6 +69,7 @@ class Tally:
         self.failed_pass: dict = {}  # node -> its pass that failed: `wf retry` reruns it, timed from its next event
         self.taken_here: Counter = Counter()  # by the route's key and the exact place (build[2]/review)
         self.attempting: set[str] = set()  # the nodes without items whose attempt runs now
+        self.attempt: dict[tuple, int] = {}  # (node, item) -> the number of its current attempt, when it isn't 1
         self.told: dict[tuple, tuple[int, float]] = {}  # an agent session -> what it last said its attempt has used
         self.spending: dict[str, tuple[int, float]] = {}  # node -> what its pass that runs has used so far, in its sub-workflow too
 
@@ -79,17 +80,22 @@ class Tally:
         name = _name(raw) if isinstance(raw, str) else ""
         if not name or kind == "override":  # run-level events (limit, warnings), and what an operator gave `wf retry`
             return
-        node, index = self.nodes[name], event.get("index")
+        node, index, when = self.nodes[name], event.get("index"), event.get("time")
+        if kind == "node_started":  # a new pass: not the one that `wf retry` reruns
+            self.failed_pass.pop(raw, None)
         if raw in self.failed_pass and kind not in ("node_started", "node_failed"):  # the part of a pass that `wf retry` reruns
-            self.started.setdefault((raw, self.failed_pass.pop(raw)), event["time"])
+            self.started.setdefault((raw, self.failed_pass.pop(raw)), when)
         if kind in ("node_started", "node_finished", "node_failed"):
             self._cut(f"{raw}/", f"{raw}[")
-        elif kind in ("attempt_started", "attempt_failed", "harness_unavailable", "item_failed"):
-            self._cut(f"{raw}/" if index is None else f"{raw}[{index}]/")
-        if index is None and "items" not in event:
-            if kind in ("node_started", "attempt_started"):
+        elif kind in ("attempt_failed", "harness_unavailable", "item_failed") or (
+                kind == "attempt_started" and event.get("attempt") != self.attempt.get((raw, index), 1)):
+            self._cut(f"{raw}/" if index is None else f"{raw}[{index}]/")  # an attempt with the same number goes on
+        if kind == "attempt_started":
+            self.attempt[(raw, index)] = event.get("attempt")
+        if index is None and "items" not in event:  # an attempt that waits for its agent slot hasn't started
+            if kind in ("node_started", "attempt_started", "slot_taken"):
                 self.attempting.add(raw)
-            elif kind in ("attempt_failed", "harness_unavailable", "node_finished", "node_failed"):
+            elif kind in ("attempt_failed", "harness_unavailable", "node_finished", "node_failed", "slot_waiting"):
                 self.attempting.discard(raw)
         if kind == "node_started":
             node["passes"] += 1
@@ -100,8 +106,9 @@ class Tally:
             place = (raw, event.get("pass"))
             if place in self.counted:  # started again: a sub-workflow attempt that starts over (`wf retry`
                 self.counted[place] = (0, 0.0)  # reruns the pass's jobs without a new node_started)
-            self.started[place] = event["time"]
+            self.started[place] = when
             self.spending.pop(raw, None)
+            self.attempt = {key: number for key, number in self.attempt.items() if key[0] != raw}
         elif kind in ("node_finished", "node_failed"):
             node["successes"] += kind == "node_finished"
             node["final_failures"] += kind == "node_failed"
@@ -119,10 +126,10 @@ class Tally:
                 self.cost_usd += cost
             begun = self.started.pop(place, None)
             if begun:
-                node["duration_s"] += _seconds(begun, event["time"])
+                node["duration_s"] += _seconds(begun, when)
             self.spending.pop(raw, None)
-            if kind == "node_failed":
-                self.failed_pass[raw] = event.get("pass")
+            if kind == "node_failed" and event.get("pass") is not None:  # no pass: the node failed before it started
+                self.failed_pass[raw] = event["pass"]
         elif kind == "attempt_failed":
             node["failed_attempts"] += 1
             node["failure_counts"][event.get("error", "")] += 1
@@ -156,6 +163,7 @@ class Tally:
         self.attempting = {node for node in self.attempting if not node.startswith(inside)}
         self.spending = {node: spent for node, spent in self.spending.items() if not node.startswith(inside)}
         self.told = {session: told for session, told in self.told.items() if not session[0].startswith(inside)}
+        self.attempt = {key: number for key, number in self.attempt.items() if not key[0].startswith(inside)}
 
     def used_up(self) -> set:
         """The routes that this run took as often as their `max` allows, in any one place."""

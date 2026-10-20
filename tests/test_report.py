@@ -257,7 +257,20 @@ def test_a_sub_workflow_attempt_that_starts_over_counts_both_attempts(repo, caps
     assert found["runs"][0]["tokens"] == 2700
 
 
-def test_a_pass_that_runs_adds_what_it_has_done_so_far_also_when_its_sub_workflow_starts_over(repo):
+T0 = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+
+
+def at(seconds: int, kind: str, node: str, **more) -> dict:
+    """An event `seconds` after T0, of pass 1 unless it says another."""
+    return {"time": (T0 + timedelta(seconds=seconds)).isoformat(), "event": kind, "node": node, "pass": 1, **more}
+
+
+def after(seconds: int) -> float:
+    return (T0 + timedelta(seconds=seconds)).timestamp()
+
+
+def nested_run() -> runs.Run:
+    """A run of outer.yaml: sub runs inner.yaml, build runs it for each item, and each is an agent for each item."""
     write("inner.yaml", """
         version: 1
         name: inner
@@ -270,26 +283,33 @@ def test_a_pass_that_runs_adds_what_it_has_done_so_far_also_when_its_sub_workflo
     write("outer.yaml", """
         version: 1
         name: outer
+        defaults: {harness: claude-code}
         start: {input: {}}
         nodes:
           sub: {needs: [start], workflow: inner.yaml, retry: 1}
+          build: {needs: [start], for_each: "[1, 2, 3]", workflow: inner.yaml}
+          each: {needs: [start], for_each: "[1, 2]", instruction: x}
         end: {output: {}}
     """)
-    run = runs.create(Path.cwd(), "outer", [Path("outer.yaml"), Path("inner.yaml")], Path("outer.yaml"), {})
-    start = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+    return runs.create(Path.cwd(), "outer", [Path("outer.yaml"), Path("inner.yaml")], Path("outer.yaml"), {})
 
-    def at(seconds: int, kind: str, node: str, **more) -> dict:
-        return {"time": (start + timedelta(seconds=seconds)).isoformat(), "event": kind, "node": node, "pass": 1, **more}
 
+def tally_of(run: runs.Run, events: list[dict]) -> Tally:
     tally = Tally(run)
-    for event in [at(0, "node_started", "sub"), at(0, "node_started", "sub/think"),
-                  at(10, "agent_usage", "sub/think", attempt=1, tokens=100, cost_usd=0.1),
-                  at(20, "agent_usage", "sub/think", attempt=1, tokens=300, cost_usd=0.3),
-                  at(30, "attempt_failed", "sub", attempt=1, error="timed out after 30s"),
-                  at(31, "attempt_started", "sub", attempt=2), at(31, "node_started", "sub/think"),
-                  at(40, "agent_usage", "sub/think", attempt=1, tokens=50, cost_usd=0.05)]:  # the same names again
+    for event in events:
         tally.add(event)
-    found = tally.report(now=(start + timedelta(seconds=60)).timestamp())
+    return tally
+
+
+def test_a_pass_that_runs_adds_what_it_has_done_so_far_also_when_its_sub_workflow_starts_over(repo):
+    run = nested_run()
+    tally = tally_of(run, [at(0, "node_started", "sub"), at(0, "node_started", "sub/think"),
+                           at(10, "agent_usage", "sub/think", attempt=1, tokens=100, cost_usd=0.1),
+                           at(20, "agent_usage", "sub/think", attempt=1, tokens=300, cost_usd=0.3),
+                           at(30, "attempt_failed", "sub", attempt=1, error="timed out after 30s"),
+                           at(31, "attempt_started", "sub", attempt=2), at(31, "node_started", "sub/think"),
+                           at(40, "agent_usage", "sub/think", attempt=1, tokens=50, cost_usd=0.05)])  # the same names again
+    found = tally.report(now=after(60))
     sub, think = found["nodes"]["sub"], found["nodes"]["sub/think"]
     assert (sub["attempts"], sub["tokens"], sub["cost_usd"], sub["duration_s"]) == (2, 350, 0.35, 60)  # 1 failed, 1 runs
     assert (think["passes"], think["attempts"], think["tokens"], think["duration_s"]) == (2, 1, 50, 29)  # the cut one ran out
@@ -298,6 +318,47 @@ def test_a_pass_that_runs_adds_what_it_has_done_so_far_also_when_its_sub_workflo
 
     tally.add(at(50, "attempt_failed", "sub", attempt=2, error="timed out after 30s"))
     tally.add(at(50, "node_failed", "sub", error="timed out after 30s", tokens=350, cost_usd=0.35))
-    ended = tally.report(now=(start + timedelta(seconds=600)).timestamp())  # think's attempt was cut: it runs no more
+    ended = tally.report(now=after(600))  # think's attempt was cut: it runs no more
     assert {k: ended["nodes"]["sub/think"][k] for k in ("attempts", "tokens", "duration_s")} == {"attempts": 0, "tokens": 0, "duration_s": 0}
     assert {k: ended["nodes"]["sub"][k] for k in ("attempts", "tokens", "duration_s")} == {"attempts": 2, "tokens": 350, "duration_s": 50}
+
+
+def test_a_sub_workflow_attempt_that_goes_on_keeps_the_time_and_spending_of_its_steps(repo):
+    second = [at(0, "node_started", "sub"), at(5, "attempt_failed", "sub", attempt=1, error="timed out after 5s"),
+              at(6, "attempt_started", "sub", attempt=2), at(6, "node_started", "sub/think"),
+              at(8, "agent_usage", "sub/think", attempt=1, tokens=100, cost_usd=0.1)]
+    # A limit paused attempt 2, and `wf retry` goes on with it: the same thread of the sub-workflow
+    goes_on = second + [at(9, "attempt_started", "sub", attempt=2), at(12, "agent_usage", "sub/think", attempt=1, tokens=300, cost_usd=0.3)]
+    tally = tally_of(nested_run(), goes_on)
+    assert tally.report(now=after(13))["nodes"]["sub"]["tokens"] == 300  # what the session said last, not 100 + 300
+    tally.add(at(14, "node_finished", "sub/think", tokens=300, cost_usd=0.3))
+    assert tally.report()["nodes"]["sub/think"]["duration_s"] == 8  # from its start in attempt 2, at 6 s
+
+
+def test_a_node_that_failed_before_it_started_adds_no_time_once_its_pass_ran(repo):
+    tally = tally_of(nested_run(), [at(0, "node_failed", "each", error="for_each: no such list", **{"pass": None}),
+                                    at(10, "node_started", "each", items=2), at(11, "node_finished", "each"),
+                                    {"time": (T0 + timedelta(seconds=20)).isoformat(), "event": "run_finished"}])
+    assert tally.report(now=after(20))["nodes"]["each"]["duration_s"] == tally.report()["nodes"]["each"]["duration_s"] == 1
+
+
+def test_the_spending_so_far_of_items_and_of_agents_inside_workflow_items_adds_up(repo):
+    tally = tally_of(nested_run(), [
+        at(0, "node_started", "each", items=2), at(0, "node_started", "build", items=3),
+        at(1, "agent_usage", "each", index=0, attempt=1, tokens=50, cost_usd=0.05),
+        at(2, "agent_usage", "each", index=1, attempt=1, tokens=70, cost_usd=0.07),
+        at(1, "node_started", "build[0]/think"), at(1, "node_started", "build[2]/think"),
+        at(3, "agent_usage", "build[0]/think", attempt=1, tokens=100, cost_usd=0.1),
+        at(4, "agent_usage", "build[2]/think", attempt=1, tokens=200, cost_usd=0.2)])
+    found = tally.report(now=after(10))
+    assert {name: found["nodes"][name]["tokens"] for name in ("each", "build", "build[]/think")} == {
+        "each": 120, "build": 300, "build[]/think": 300}
+    assert (found["runs"][0]["tokens"], found["runs"][0]["cost_usd"]) == (420, 0.42)  # build's items, counted once
+
+
+def test_an_agent_attempt_that_waits_for_its_slot_has_not_started(repo):
+    waiting = [at(0, "node_started", "sub"), at(0, "slot_waiting", "sub", attempt=1, harness="claude-code", max_agents=1)]
+    tally = tally_of(nested_run(), waiting)
+    assert tally.report(now=after(5))["nodes"]["sub"]["attempts"] == 0
+    tally.add(at(6, "slot_taken", "sub", attempt=1, harness="claude-code", waited_s=6))
+    assert tally.report(now=after(7))["nodes"]["sub"]["attempts"] == 1

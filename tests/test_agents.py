@@ -320,6 +320,10 @@ def test_a_timed_out_turn_still_counts_the_tokens_it_used(repo, monkeypatch):
     assert cli.main(["run", flow(PLAN + "  timeout: 1s\n", top="limits: {tokens: 400}")]) == 1
     assert status() == "limit"  # the 500 tokens count, so the retry doesn't start
     assert len(fake.specs) == 1
+    events = [json.loads(line) for line in (run_dir() / "events.jsonl").read_text().splitlines()]
+    kinds = [e["event"] for e in events]
+    assert [(e["attempt"], e["tokens"]) for e in events if e["event"] == "agent_usage"] == [(1, 500)]  # told as the session closes
+    assert kinds.index("agent_usage") < kinds.index("session_ended")
 
 
 def test_the_last_unavailable_harness_does_not_promise_another(repo, monkeypatch, capsys):

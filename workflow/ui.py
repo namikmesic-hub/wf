@@ -124,8 +124,11 @@ def run_list(source: Source) -> dict:
         item = {"id": key, "run": run.id, "workflow": state.get("workflow"), "status": state.get("status"),
                 "dry_run": state.get("dry_run"), "updated": state.get("updated")}
         if state.get("status") in MOVING:
-            with _viewing(run) as view:
-                estimate = view.progress(state["status"])
+            try:
+                with _viewing(run) as view:
+                    estimate = view.progress(state["status"])
+            except Exception:  # a damaged run: the list goes on without its progress, and its own page says why
+                estimate = None
             if estimate:
                 item["progress"] = {k: estimate[k] for k in ("step", "steps", "percent", "left_s")}
         found.append(item)
@@ -164,23 +167,26 @@ class _View:
     def __init__(self, run: Run):
         self.run, self.lock = run, threading.Lock()
         self.tally: report.Tally | None = None  # None until the first refresh
+        self.asked = time.monotonic()  # when a page last asked for the run
 
     def _start(self) -> None:
         run = self.run
         self.inode, self.offset, self.tail = None, 0, b""  # events.jsonl, read up to `offset`: the last line read is `tail`
         self.last: str | None = None  # the time of the last event
+        self.again = False  # the workflow files couldn't be read, but a later read may: start over at the next refresh
         try:
             self.workflow = spec.load(run.workflow_file)
             self.graph = diagram.layout(self.workflow)
             self.tracker = progress.Tracker(self.workflow, run.dir)
-        except (spec.SpecError, OSError, KeyError, ValueError):
+        except (spec.SpecError, OSError, KeyError, ValueError) as error:
             self.workflow = self.graph = self.tracker = None
+            self.again = progress.read_may_pass(error)
         self.tally = report.Tally(run)
         self.open = observe.Open(run)
         self.attempts = _Attempts(run)
 
     def refresh(self) -> None:
-        new = self._read() if self.tally is not None else None
+        new = self._read() if self.tally is not None and not self.again else None
         if new is None:  # the first refresh, or events.jsonl doesn't go on from what was read: start over
             self._start()
             new = self._read() or []
@@ -233,8 +239,9 @@ class _View:
         return {"run": found["runs"][0], "nodes": found["nodes"], "notes": found["notes"]}
 
 
-_VIEWS: dict[Path, _View] = {}  # run folder -> its _View
-_VIEWS_MOST = 64
+_VIEWS: dict[Path, _View] = {}  # run folder -> its _View, the one asked for last at the end
+_VIEWS_MOST = 64  # more stay while a page asks for them: the list asks for each run that moves
+_VIEWS_KEEP_SECONDS = 60
 _VIEWING = threading.Lock()  # wf ui asks from several threads
 
 
@@ -243,8 +250,9 @@ def _viewing(run: Run) -> Iterator[_View]:
     """The run's view, up to date, for this thread alone. A view that fails is made again at the next request."""
     with _VIEWING:
         view = _VIEWS.pop(run.dir, None) or _View(run)
+        view.asked = time.monotonic()
         _VIEWS[run.dir] = view
-        while len(_VIEWS) > _VIEWS_MOST:
+        while len(_VIEWS) > _VIEWS_MOST and view.asked - next(iter(_VIEWS.values())).asked > _VIEWS_KEEP_SECONDS:
             del _VIEWS[next(iter(_VIEWS))]
     with view.lock:
         try:

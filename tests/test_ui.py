@@ -223,6 +223,114 @@ def test_a_run_that_moves_shows_its_progress_in_the_run_list(repo):
     assert (only["status"], only["progress"]) == ("running", {"step": 1, "steps": 2, "percent": 0, "left_s": None})
 
 
+def test_a_damaged_run_leaves_out_only_its_own_progress_from_the_run_list(repo, monkeypatch):
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    healthy, damaged = (runs.create(Path.cwd(), "flow", [Path("flow.yaml")], Path("flow.yaml"), {}) for _ in range(2))
+    healthy.add_event({"event": "node_started", "node": "think", "pass": 1})
+    with (damaged.dir / "events.jsonl").open("a") as file:
+        file.write(json.dumps({"event": "node_started", "node": "think", "pass": 1}) + "\n")  # no time
+    found = {run["run"]: run for run in ui.run_list(ui.Source(Path.cwd()))["runs"]}
+    assert found[healthy.id]["progress"] == found[damaged.id]["progress"] == {"step": 1, "steps": 2, "percent": 0, "left_s": None}
+
+    real = ui._View.progress
+    monkeypatch.setattr(ui._View, "progress", lambda view, status: real(view, status) if view.run.dir == healthy.dir else 1 / 0)
+    found = {run["run"]: run for run in ui.run_list(ui.Source(Path.cwd()))["runs"]}
+    assert "progress" in found[healthy.id] and "progress" not in found[damaged.id] and found[damaged.id]["status"] == "running"
+
+
+def test_the_views_of_runs_that_a_page_asks_for_stay_when_more_than_64_move(repo, monkeypatch):
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    for _ in range(65):
+        runs.create(Path.cwd(), "flow", [Path("flow.yaml")], Path("flow.yaml"), {}).add_event(
+            {"event": "node_started", "node": "think", "pass": 1})
+    started, real = [], ui._View._start
+    monkeypatch.setattr(ui._View, "_start", lambda view: started.append(view.run.id) or real(view))
+    for _ in range(2):
+        listed = ui.run_list(ui.Source(Path.cwd()))["runs"]
+        assert len(listed) == 65 and all(run["progress"]["step"] == 1 for run in listed)
+    assert len(started) == 65  # each run read once: the second list read only what came since
+
+
+def test_a_workflow_file_that_can_t_be_read_for_now_is_read_at_the_next_refresh(repo, monkeypatch):
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    run = runs.create(Path.cwd(), "flow", [Path("flow.yaml")], Path("flow.yaml"), {})
+    run.add_event({"event": "node_started", "node": "think", "pass": 1})
+    copy, real, failed = run.workflow_file, Path.read_text, []
+
+    def read_text(path, *args, **kwargs):
+        if path == copy and not failed:
+            failed.append(path)
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    started, start = [], ui._View._start
+    monkeypatch.setattr(ui._View, "_start", lambda view: started.append(1) or start(view))
+    first = ui.run_detail(run)
+    assert first["graph"] is None and first["states"] == {}
+    found = ui.run_detail(run)
+    assert found["graph"] is not None and found["states"] == {"think": "running", "check": "waiting"}
+    ui.run_detail(run)
+    assert len(started) == 2  # read again once, then only the new events
+
+    gone = runs.create(Path.cwd(), "flow", [Path("flow.yaml")], Path("flow.yaml"), {})
+    gone.workflow_file.unlink()  # a damaged run folder stays so: no reason to read it all again
+    started.clear()
+    assert ui.run_detail(gone)["graph"] is None and ui.run_detail(gone)["graph"] is None and len(started) == 1
+
+
+def test_attempts_inside_workflow_items_end_with_their_item_or_their_attempt_and_not_a_sibling_s(repo, monkeypatch):
+    Path("inner.yaml").write_text(dedent("""
+        version: 1
+        name: inner
+        start: {input: {}}
+        nodes:
+          print: {needs: [start], command: "echo inner"}
+        end: {output: {}}
+    """).lstrip())
+    Path("outer.yaml").write_text(dedent("""
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          build: {needs: [start], for_each: "range(11) | list", workflow: inner.yaml, retry: 1}
+        end: {output: {}}
+    """).lstrip())
+    run = runs.create(Path.cwd(), "outer", [Path("outer.yaml"), Path("inner.yaml")], Path("outer.yaml"), {})
+
+    def printed(item: int, attempt: int) -> str:
+        folder = run.dir / "nodes" / "build" / "1" / str(item) / f"attempt-{attempt}" / "nodes" / "print" / "1"
+        folder.mkdir(parents=True)
+        (folder / "attempt-1.log").write_text("inner\n")
+        return (folder / "attempt-1.log").relative_to(run.dir).as_posix()
+
+    run.add_event({"event": "node_started", "node": "build", "pass": 1, "items": 11})
+    logs = {}
+    for item in (1, 10):
+        run.add_event({"event": "node_started", "node": f"build[{item}]/print", "pass": 1})
+        logs[item] = printed(item, 1)
+    assert [(a["node"], a["log"]) for a in ui.attempts(run)] == [("build[1]/print", logs[1]), ("build[10]/print", logs[10])]
+
+    checked, real = [], ui._is_file
+    monkeypatch.setattr(ui, "_is_file", lambda path: checked.append(path.relative_to(run.dir).as_posix()) or real(path))
+    run.add_event({"event": "item_failed", "node": "build", "index": 1, "error": "sub-workflow inner failed"})
+    ui.attempts(run)  # a last look in item 1, then none
+    checked.clear()
+    ui.attempts(run)
+    assert not [path for path in checked if path.startswith("nodes/build/1/1/")]
+    assert "nodes/build/1/10/attempt-1/nodes/print/1/output.json" in checked  # item 10 goes on
+
+    run.add_event({"event": "attempt_failed", "node": "build", "index": 10, "pass": 1, "attempt": 1, "error": "timed out"})
+    run.add_event({"event": "attempt_started", "node": "build", "index": 10, "pass": 1, "attempt": 2})
+    run.add_event({"event": "node_started", "node": "build[10]/print", "pass": 1})
+    logs["again"] = printed(10, 2)
+    assert [a["log"] for a in ui.attempts(run)] == [logs[1], logs[10], logs["again"]]
+    checked.clear()
+    ui.attempts(run)
+    assert not [path for path in checked if "/attempt-1/" in path]  # attempt 1 of item 10 ended, with what ran in it
+    assert "nodes/build/1/10/attempt-2/nodes/print/1/output.json" in checked
+
+
 def test_attempts_are_found_in_items_and_in_sub_workflows(repo, monkeypatch):
     fake = Fake("claude-code", *[submit({"summary": f"item {n}"}) for n in range(2)], submit({"summary": "inner"}))
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)

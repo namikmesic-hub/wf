@@ -170,6 +170,7 @@ class Tracker:
         self.inner: dict[str, Tracker] = {}  # rules, or build[2] for an item -> the sub-workflow of its current attempt
         self.attempt: dict[str, int] = {}  # rules, or build[2] -> the number of its current attempt
         self.ended: set[str] = set()  # rules, or build[2]: its attempt ended, so no step inside it runs any more
+        self.unread: dict[str, list[dict]] = {}  # rules, or build[2] -> the events of its sub-workflow, which can't be read now
         self.subs = {} if subs is None else subs  # (workflow file, node) -> its sub-workflow and shape, read once
 
     def add(self, event: dict) -> None:
@@ -182,9 +183,12 @@ class Tracker:
             self._play(node, event)
         elif (inside := re.fullmatch(r"([^/\[]+)(?:\[(\d+)\])?/(.+)", node)) and inside[1] in self.shape.topo.needs:
             outer, index = inside[1], int(inside[2]) if inside[2] else None
-            tracker = self.inner.get(_key(outer, index)) or self._begin(outer, index)
+            key, child = _key(outer, index), {**event, "node": inside[3]}
+            tracker = self.inner.get(key) or self._begin(outer, index)
             if tracker is not None:
-                tracker.add({**event, "node": inside[3]})
+                tracker.add(child)
+            elif key in self.unread:  # played once its sub-workflow can be read
+                self.unread[key].append(child)
 
     def _play(self, node: str, event: dict) -> None:
         found, topo, kind, index = self.trace, self.shape.topo, event.get("event"), event.get("index")
@@ -195,7 +199,7 @@ class Tracker:
             found.running[node] = event.get("time", "")
             found.passes[node] = event.get("pass") or found.passes.get(node, 0) + 1
             found.items[node] = event.get("items")
-            for keys in (self.inner, self.attempt):  # a new pass: its attempts and items start over
+            for keys in (self.inner, self.attempt, self.unread):  # a new pass: its attempts and items start over
                 for key in [k for k in keys if _outer(k) == node]:
                     del keys[key]
             self.ended = {k for k in self.ended if _outer(k) != node}
@@ -234,37 +238,55 @@ class Tracker:
             if node in found.failed:
                 found.failed.discard(node)
                 found.running[node] = event.get("time", "")
-            if kind == "attempt_started" and isinstance(event.get("attempt"), int):  # a sub-workflow's next attempt starts it over
-                self.attempt[_key(node, index)] = event["attempt"]
-                self.ended.discard(_key(node, index))
-                self._begin(node, index)
+            key = _key(node, index)
+            # A sub-workflow's next attempt starts it over. The same attempt again goes on: after a limit, a question or a crash
+            if kind == "attempt_started" and isinstance(event.get("attempt"), int):
+                self.ended.discard(key)
+                if event["attempt"] != self.attempt.get(key, 1):
+                    self.attempt[key] = event["attempt"]
+                    self.unread.pop(key, None)
+                    self._begin(node, index)
             elif kind in ("attempt_failed", "harness_unavailable"):
-                self.ended.add(_key(node, index))
+                self.ended.add(key)
 
     def _begin(self, node: str, index: int | None) -> "Tracker | None":
-        """A new tracker for the sub-workflow of a workflow node's attempt, or of its item's, if it has one."""
+        """A new tracker for the sub-workflow of a workflow node's attempt, or of its item's, if it has one.
+        When its file can't be read now, it keeps the events of that attempt until a later call can."""
+        key = _key(node, index)
         sub = self._sub(node)
         if sub is None:
+            if (self.workflow.path, node) not in self.subs:  # a read error that can pass
+                self.unread.setdefault(key, [])
             return None
-        key = _key(node, index)
         folder = None
         if self.folder is not None:
             folder = self.folder / "nodes" / node / str(self.trace.passes.get(node, 1))
             folder = (folder if index is None else folder / str(index)) / f"attempt-{self.attempt.get(key, 1)}"
-        self.inner[key] = Tracker(sub[0], folder, self.depth + 1, sub[1], self.subs)
-        return self.inner[key]
+        self.inner[key] = tracker = Tracker(sub[0], folder, self.depth + 1, sub[1], self.subs)
+        for event in self.unread.pop(key, []):
+            tracker.add(event)
+        return tracker
 
     def _sub(self, node: str) -> tuple[spec.Workflow, Shape] | None:
+        """The sub-workflow of a workflow node, read once. A read error that can pass isn't kept."""
         where = (self.workflow.path, node)
         if where not in self.subs:
-            self.subs[where] = None
+            found = None
             if self.depth < 10 and self.workflow.nodes[node].kind == "workflow":
                 try:
                     sub = spec.load(Path(self.workflow.path).parent / self.workflow.nodes[node].workflow)
-                    self.subs[where] = (sub, Shape(sub))
-                except (spec.SpecError, OSError, TypeError):
-                    pass
+                    found = (sub, Shape(sub))
+                except (spec.SpecError, OSError, TypeError) as error:
+                    if read_may_pass(error):
+                        return None
+            self.subs[where] = found
         return self.subs[where]
+
+    def _read_again(self) -> None:
+        """Read each sub-workflow that couldn't be read before, and play the events that it kept."""
+        for key in list(self.unread):
+            node, _, item = key.partition("[")
+            self._begin(node, int(item.rstrip("]")) if item else None)
 
     def _open(self, status: str | None) -> set[str]:
         """The nodes that run, wait to start, failed, or finished and wait for their route."""
@@ -275,6 +297,7 @@ class Tracker:
         """The state of each step, also of each step in a sub-workflow, by the name that `wf report` gives it.
         That is rules/print, or build[]/implement for the implement of each item together. With `cut`, the
         attempt of the workflow node around this one ended. So a step that ran in it failed."""
+        self._read_again()
         moving = status in ("running", None)
         ahead = self.shape.topo.reachable(self._open(status))
         own = {node: _state(node, self.trace, ahead, moving, cut) for node in self.shape.order}
@@ -283,13 +306,16 @@ class Tracker:
             node = _outer(key)
             ended = cut or key in self.ended or node not in self.trace.running
             name = f"{node}[]" if "[" in key else node
-            for path, state in tracker.states("running" if moving else "paused", ended).items():
+            # A workflow node that is done: the steps that its sub-workflow didn't reach, it skipped
+            inner = "succeeded" if own[node] == "done" else "running" if moving else "paused"
+            for path, state in tracker.states(inner, ended).items():
                 inside.setdefault(f"{name}/{path}", []).append("waiting" if own[node] == "waiting" else state)
         return own | {path: max(states, key=_RANK.index) for path, states in inside.items()}
 
     def estimate(self, status: str | None, learnt: Earlier | None = None, now: float | None = None) -> dict:
         """The progress of the run so far. It counts the items that finished in the folder. Without
         `now`, the time is now, or the last event's while the run does not move."""
+        self._read_again()
         moving = status in ("running", None)
         if now is None:
             now = _seconds(self.last) if not moving else time.time()
@@ -412,6 +438,13 @@ def _state(node: str, trace: _Trace, ahead: set[str], moving: bool, cut: bool = 
 
 
 _RANK = ["skipped", "done", "waiting", "failed", "paused", "running"]  # a step in several items has the state furthest on
+
+
+def read_may_pass(error: BaseException) -> bool:
+    """Is this an error in reading a file that a later read may not get? A file that is missing,
+    or damaged, stays so."""
+    cause = error.__cause__ if isinstance(error, spec.SpecError) else error
+    return isinstance(cause, OSError) and not isinstance(cause, (FileNotFoundError, NotADirectoryError))
 
 
 def _key(node: str, index: int | None) -> str:
