@@ -36,6 +36,7 @@ testpaths = ["tests"]
 pythonpath = [".", "tests"]
 markers = [
     "harness: runs a real coding agent, which costs money or quota. Opt in with `-m harness`.",
+    "docker: starts containers with Docker Compose. Skipped where Docker doesn't answer. Leave it out with `-m 'not docker'`.",
 ]
 addopts = "-m 'not harness'"
 

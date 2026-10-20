@@ -140,6 +140,7 @@ end:
 | `wf sessions [run-id]` | Lists the agent sessions that run now, in one run or in each run of the repo, with the last tool call of each. |
 | `wf watch <run-id>` | Prints the run's steps and tool calls as they come, until the run needs attention. |
 | `wf ui` | Serves a web page on `127.0.0.1` that shows the runs: the graph, the progress, the metrics of `wf report`, the events and the transcripts. |
+| `wf metrics up` | Starts the metrics stack in Docker, Grafana on ClickHouse, and prints the address of Grafana (see [Metrics in Grafana](#metrics-in-grafana)). |
 | `wf tools list` | Lists the tools agent nodes can use (see [docs/tools.md](tools.md)), how each signs in, and whether it's set up. |
 | `wf tools <name> setup [--write]` | Signs in to a tool once, in the browser or with a pasted token, and keeps the secret in the macOS Keychain. It asks Slack and Linear for read scopes only, unless `--write` is given. |
 | `wf tools <name> doctor`, `wf tools doctor` | Checks that a tool's sign-in is there and still good, and makes one harmless read call. Prints pass or fail with the next step. |
@@ -1478,6 +1479,49 @@ It is three plain files in `workflow/ui/`, with no build step and nothing from a
 | The server can't read a run that moves | The list shows that run without its progress, and the other runs with theirs. | `workflow/ui.py:130` | `test_a_damaged_run_leaves_out_only_its_own_progress_from_the_run_list` |
 | An item of a `for_each` workflow node ends, or its attempt does | The server stops looking for the files of the attempts inside it, and goes on for the other items. | `workflow/ui.py:350` | `test_attempts_inside_workflow_items_end_with_their_item_or_their_attempt_and_not_a_sibling_s` |
 
+### Metrics in Grafana
+
+`wf metrics up` starts the metrics stack of `metrics/compose.yaml` with `docker compose up -d --wait`, and prints the address of Grafana.
+The stack is part of wf's source, so wf must be installed from its checkout.
+It has three services, and each of them listens on `127.0.0.1` only:
+
+- An OpenTelemetry Collector takes OTLP from Claude Code and Codex on ports 4317 (gRPC) and 4318 (HTTP).
+  It writes the data into the ClickHouse database `otel`, and makes the tables of that database when it starts.
+- ClickHouse keeps the database `otel`, and the tables of wf runs in the database `wf`.
+  These are `runs`, `attempts`, `turns`, `tool_calls`, `routes` and `metric_points`, which `metrics/clickhouse/wf.sql` makes when the volume is empty.
+  `attempts` and `turns` keep the tokens of each kind: input, output, cache read, cache write and reasoning.
+  ClickHouse runs with small caches, a memory limit of 1 GiB, and no system log tables.
+- Grafana has a ClickHouse datasource, and its home page is the dashboard "wf runs".
+  Grafana has no login, so each user and program on this machine can use it as an admin.
+
+Before the Collector writes a record, it changes the record:
+
+- Of the spans of Codex, it keeps only `codex.sampling`, `session_task.turn` and `run_turn`.
+  A short Codex session sends about 1,000 spans, and nearly all of them are internal.
+- It removes `user.email`, `user.account_uuid`, `user.account_id` and `organization.id` from each record and from its resource.
+- It cuts the attributes `output`, `arguments` and `tool_input` to their first 512 bytes, because they can hold whole files.
+
+The dashboard has eight panels: runs by state, runs over time, errors and retries per model, and tokens and cost per model.
+The other four are tool calls per model, node duration, review problems per model, and problem states per pass.
+The last two read points that workflows write into `metric_points`.
+Each panel shows the time range, and the workflows that the variable `workflow` selects.
+wf doesn't write the tables of `wf` yet.
+
+`WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` and `WF_METRICS_OTLP_HTTP_PORT` move the ports, and 0 picks a free port.
+Each image and the ClickHouse plugin of Grafana have a fixed version.
+`docker compose -f metrics/compose.yaml down` stops the stack, and `down -v` also deletes its volumes.
+The tests named in the table are in `tests/test_metrics.py`.
+The tests of the stack start it in Docker, and pytest skips them where Docker doesn't answer.
+
+| Condition | Effect | Source line | Conformance assertion |
+|---|---|---|---|
+| `wf metrics up` | It runs `docker compose up -d --wait` on `metrics/compose.yaml`, and then prints the address that `docker compose port grafana 3000` gives. | `workflow/metrics.py:27`, `workflow/metrics.py:32` | `test_wf_metrics_up_starts_the_stack_and_prints_grafana_s_address` |
+| There's no `docker` on PATH, or no `metrics/compose.yaml` beside the package | `wf metrics up` says so and exits with code 1, before it runs Docker. | `workflow/metrics.py:19`, `workflow/metrics.py:22` | `test_wf_metrics_up_needs_docker_and_the_stack_s_files` |
+| `docker compose up` fails, or Docker doesn't give the port of Grafana | `wf metrics up` exits with code 1, and prints no address. When `docker compose up` fails, it names the variables that move the ports. | `workflow/metrics.py:28`, `workflow/metrics.py:34` | `test_wf_metrics_up_fails_when_docker_compose_fails_and_says_how_to_move_a_port`, `test_wf_metrics_up_fails_when_docker_doesn_t_say_where_grafana_listens`, `test_the_ports_that_wf_metrics_up_names_are_the_ports_of_the_compose_file` |
+| The stack starts with empty volumes, and then the tables of `wf` get rows | The six tables are there, and empty, before the rows. Then each panel shows rows, and only rows of the workflows that the variable `workflow` selects. | `metrics/compose.yaml:29`, `metrics/clickhouse/wf.sql:7` | `test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables` |
+| Claude Code and Codex send spans, log records and metric points | The Collector drops each Codex span that isn't on its list, removes the fields of the account, and cuts long tool text. | `metrics/collector/config.yaml:14`, `metrics/collector/config.yaml:22` | `test_the_collector_keeps_three_codex_spans_and_cuts_tool_text_and_account_ids` |
+| An image or the ClickHouse plugin in `metrics/compose.yaml` has no fixed version | A test fails. | `metrics/compose.yaml:12` | `test_each_image_and_plugin_names_its_version` |
+
 ## Validation
 
 `wf validate`, and `wf run` before it starts, check the following.
@@ -1587,6 +1631,7 @@ workflow/
   progress.py       how far a run is, as an estimate, for wf status
   observe.py        wf sessions and wf watch: the sessions that run now, and the event stream
   ui.py, ui/        wf ui: the server and the page
+  metrics.py        wf metrics up: the metrics stack of metrics/compose.yaml, in Docker
   steer.py          wf steer: a message into the live agent session of a running node
   cli.py            init, validate, graph, run, retry, tools
 ```

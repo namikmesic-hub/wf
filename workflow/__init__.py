@@ -51,5 +51,6 @@ Then the tools around runs, none of which LangGraph knows about:
     progress.py    how far a run is on its way from start to end, as an estimate (`wf status`)
     observe.py     the agent sessions that run now (`wf sessions`), and the event stream (`wf watch`)
     ui.py          `wf ui`: a web page on this machine (ui/: the page) with the graph, progress and transcripts
+    metrics.py     `wf metrics up`: Grafana on ClickHouse, in Docker (../metrics/compose.yaml)
     examples/      two complete workflows (`wf examples` copies them out)
 """

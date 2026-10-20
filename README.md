@@ -98,6 +98,20 @@ The address that `wf ui` prints holds a key, so other programs and users on the 
 
 ![wf ui: a run of implement.yaml at its tests for the second time](assets/wf-ui.png)
 
+## Metrics in Grafana
+
+`wf metrics up` starts the metrics stack of `metrics/compose.yaml` in Docker, and prints the address of Grafana.
+The stack has three services:
+- an OpenTelemetry Collector, which takes OTLP from Claude Code and Codex on ports 4317 and 4318
+- ClickHouse, which keeps that data in the database `otel`, and the tables of wf runs in the database `wf`
+- Grafana, whose home page is the dashboard "wf runs", on port 3000
+
+wf doesn't write the tables of `wf` yet, so the dashboard stays empty for now.
+`wf metrics up` needs Docker with Compose, and wf installed from its checkout, because the stack is part of wf's source.
+Each port listens on 127.0.0.1 only, and Grafana has no login.
+To move a port, set `WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` or `WF_METRICS_OTLP_HTTP_PORT`.
+`docker compose -f metrics/compose.yaml down` stops the stack, and `down -v` also deletes its data.
+
 ## Docs
 
 - [docs/workflow-spec.md](docs/workflow-spec.md): the file format, and how runs behave.
@@ -122,6 +136,9 @@ Tools attach to sessions on all three.
 uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
+
+Where Docker answers, `uv run pytest` also starts the metrics stack, in a compose project of its own, and removes it at the end.
+`-m 'not docker'` leaves those tests out.
 
 The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.
 The host has its own TypeScript checks: `npm ci && npm run check && npm test` in `workflow/harnesses/cursor_host`.

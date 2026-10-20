@@ -7,11 +7,34 @@
   config, so a global config that signs commits with a key that waits for a touch doesn't
   stop the tests' commits (the agents' git tool drops these variables, so it still reads
   your ~/.gitconfig);
-- the keyring is an empty one in memory, so no test reads or writes your real Keychain."""
+- the keyring is an empty one in memory, so no test reads or writes your real Keychain.
+
+A test marked docker is skipped where `docker info` or `docker compose version` fails."""
+
+import shutil
+import subprocess
 
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
+
+
+@pytest.hookimpl(trylast=True)  # after -m has deselected tests, so `-m 'not docker'` never runs docker
+def pytest_collection_modifyitems(items):
+    marked = [item for item in items if item.get_closest_marker("docker")]
+    if marked and not _docker_answers():
+        for item in marked:
+            item.add_marker(pytest.mark.skip(reason="needs Docker with Compose, and a Docker daemon that answers"))
+
+
+def _docker_answers() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return all(subprocess.run(["docker", *args], capture_output=True, timeout=30).returncode == 0
+                   for args in (["info"], ["compose", "version"]))
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 @pytest.fixture(autouse=True)

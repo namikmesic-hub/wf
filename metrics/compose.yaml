@@ -1,0 +1,71 @@
+# The wf metrics stack: Grafana on ClickHouse, on this machine.
+# `wf metrics up` starts it. `docker compose -f metrics/compose.yaml down` stops it, and `down -v` also deletes its data.
+# An OpenTelemetry Collector takes OTLP from Claude Code and Codex and writes it into the ClickHouse database otel.
+# ClickHouse keeps wf's own tables in the database wf, which clickhouse/wf.sql makes.
+# Grafana shows the dashboard "wf runs" with a ClickHouse datasource. It has no login, so keep it on 127.0.0.1.
+# Each port listens on 127.0.0.1 only. Set a WF_METRICS_*_PORT variable to move a port, or to 0 for a free one.
+
+name: wf-metrics
+
+services:
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    volumes:
+      - ./collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:${WF_METRICS_OTLP_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${WF_METRICS_OTLP_HTTP_PORT:-4318}:4318"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8.33.6
+    environment:
+      CLICKHOUSE_USER: wf
+      CLICKHOUSE_PASSWORD: wf
+    volumes:
+      - ./clickhouse/wf.sql:/docker-entrypoint-initdb.d/10-wf.sql:ro
+      - ./clickhouse/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+      - ./clickhouse/low-memory-profile.xml:/etc/clickhouse-server/users.d/low-memory-profile.xml:ro
+      - clickhouse:/var/lib/clickhouse
+    ports:
+      - "127.0.0.1:${WF_METRICS_CLICKHOUSE_PORT:-8123}:8123"
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      # The address of the container, not localhost: while ClickHouse runs wf.sql, it listens on localhost only.
+      test: ["CMD-SHELL", "clickhouse-client --host \"$$HOSTNAME\" --user wf --password wf --query 'SELECT 1'"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.0.11
+    environment:
+      GF_PLUGINS_PREINSTALL_SYNC: grafana-clickhouse-datasource@4.23.0
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/wf-runs.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${WF_METRICS_GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 150
+    restart: unless-stopped
+
+volumes:
+  clickhouse: {}
+  grafana: {}
