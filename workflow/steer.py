@@ -307,13 +307,16 @@ class Steering:
             self._opening.pop(path, None)
 
     @asynccontextmanager
-    async def live(self, spec: SessionSpec, attempt: int, harness: str, session: Session) -> AsyncIterator["Live"]:
-        """While an attempt's session is open. Enter it from the attempt's own task. When the attempt
-        ends with its result, a cancellation (the node's timeout) that comes while a hand-over
-        finishes cuts the hand-over, and the result stays."""
+    async def live(self, spec: SessionSpec, attempt: int, harness: str, session: Session,
+                   deadline: asyncio.Timeout | None = None) -> AsyncIterator["Live"]:
+        """While an attempt's session is open. Enter it from the attempt's own task, inside the
+        attempt's `deadline` (the node's timeout). When the attempt ends with its result, and the
+        deadline comes while a hand-over finishes, the hand-over is cut and the result stays. Any
+        other cancellation, such as Ctrl-C, goes on as it came."""
         live = Live(spec, attempt, harness, session)
         live.start()
         self._live[spec.where] = live
+        cancels = asyncio.current_task().cancelling()  # before the deadline can cancel this task
         returned = False
         try:
             yield live
@@ -323,7 +326,9 @@ class Steering:
             try:
                 await live.stop()
             except asyncio.CancelledError:
-                if not returned:
+                by_deadline_alone = (deadline is not None and deadline.expired()
+                                     and asyncio.current_task().cancelling() == cancels + 1)
+                if not (returned and by_deadline_alone):
                     raise
             finally:
                 live.end()

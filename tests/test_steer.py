@@ -13,12 +13,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import pytest
 
 from fakes import Fake, paused, submit, wait_at
 from steering import STEER, at_pause, left_in_mailbox, run_folder, steer_events
-from workflow import cli, harnesses, runner, runs, schemas, steer, workspaces
+from workflow import cli, harnesses, nodes, runner, runs, schemas, steer, workspaces
 from workflow.harnesses.base import SessionSpec, TurnEnd, Usage
 from workflow.output_tool import ResultTool
 from workflow.runs import write_json
@@ -553,8 +554,8 @@ def test_a_result_stays_when_the_nodes_timeout_comes_while_a_hand_over_finishes(
             await asyncio.sleep(60)
 
     async def attempt():
-        async with asyncio.timeout(0.3):  # the node's timeout, as nodes._attempts sets it
-            async with steer.Steering().live(a_spec(tmp_path, events), 1, "claude-code", Session()) as live:
+        async with asyncio.timeout(0.3) as deadline:  # the node's timeout, as nodes._attempts sets it
+            async with steer.Steering().live(a_spec(tmp_path, events), 1, "claude-code", Session(), deadline) as live:
                 answer = asyncio.get_running_loop().create_task(live.take(steer.Message("a", "A")))
                 await asyncio.sleep(0.05)  # the agent submits while the hand-over is under way
                 result = {"summary": "done"}
@@ -564,6 +565,38 @@ def test_a_result_stays_when_the_nodes_timeout_comes_while_a_hand_over_finishes(
     assert result == {"summary": "done"}
     assert (answer["status"], answer["reason"]) == ("unconfirmed", steer.CUT_OFF)
     assert [(e["status"], e["reason"]) for e in events] == [("unconfirmed", steer.CUT_OFF)]
+
+
+@pytest.mark.parametrize("deadline_too", [False, True])  # Ctrl-C alone, or as the node's timeout comes
+def test_a_cancellation_from_outside_during_a_hand_over_cancels_an_attempt_that_has_its_result(tmp_path, deadline_too):
+    ended, deadlines = [], []
+    record = SimpleNamespace(end=lambda outcome, error=None: ended.append((outcome, error)))
+    ctx = SimpleNamespace(workflow=SimpleNamespace(setting=lambda node, key: {"retry": 0, "timeout": "30s"}[key]),
+                          limit_reached=lambda: None, trace=SimpleNamespace(attempt=lambda *_, **__: record))
+
+    class Session:  # a harness that takes its time to take the message
+        async def steer(self, text, ident):
+            await asyncio.sleep(60)
+
+    async def attempt(number, harness, record, deadline):
+        deadlines.append(deadline)
+        async with steer.Steering().live(a_spec(tmp_path, []), number, "claude-code", Session(), deadline) as live:
+            asyncio.get_running_loop().create_task(live.take(steer.Message("a", "A")))
+            await asyncio.sleep(0.05)
+            return {"summary": "done"}  # the agent submitted while the hand-over is under way
+
+    async def main():
+        job = {"node": "ask", "attempt": 1, "pass_no": 1, "index": None}
+        task = asyncio.create_task(nodes._attempts(job, ctx, lambda event: None, attempt))
+        await asyncio.sleep(0.2)  # the attempt's teardown waits for the hand-over
+        if deadline_too:
+            deadlines[0].reschedule(asyncio.get_running_loop().time())
+        task.cancel()  # Ctrl-C, or a parent task
+        await asyncio.gather(task, return_exceptions=True)
+        return task
+
+    assert asyncio.run(main()).cancelled()
+    assert ended == [("cancelled", None)]
 
 
 def test_wf_steer_says_when_wf_cant_tell_whether_the_agent_read_the_message(repo, monkeypatch, capsys):

@@ -272,13 +272,15 @@ def _no_slot(number: int, harness: str | None) -> AbstractAsyncContextManager[No
     return nullcontext()
 
 
-async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str | None, Attempt], Awaitable[Any]],
+async def _attempts(job: Job, ctx: RunContext, emit,
+                    attempt: Callable[[int, str | None, Attempt, asyncio.Timeout], Awaitable[Any]],
                     harnesses: list[str | None] = [None],
                     slot: Callable[[int, str | None], AbstractAsyncContextManager[None]] = _no_slot) -> tuple[Any, int]:
     """Up to 1 + retry attempts on each harness in turn, each within the node's timeout.
-    The call attempt(number, harness, record) makes one, inside slot(number, harness): for
-    an agent, its agent slot (_agent_slot). The attempt's part of the trace, `record`, ends
-    here with how the attempt went. Returns (output, attempt number)."""
+    The call attempt(number, harness, record, deadline) makes one, inside slot(number, harness):
+    for an agent, its agent slot (_agent_slot). The attempt's part of the trace, `record`, ends
+    here with how the attempt went. `deadline` is the node's timeout for the attempt.
+    Returns (output, attempt number)."""
     node_id = job["node"]
     retry = ctx.workflow.setting(node_id, "retry")
     timeout = ctx.workflow.setting(node_id, "timeout")
@@ -301,7 +303,7 @@ async def _attempts(job: Job, ctx: RunContext, emit, attempt: Callable[[int, str
                     deadline = asyncio.timeout(seconds(timeout) if timeout else None)
                     try:
                         async with deadline:
-                            result = await attempt(number, harness, record)
+                            result = await attempt(number, harness, record, deadline)
                     except BaseException as failure:
                         record.end(*_ending(failure, deadline, timeout))
                         raise
@@ -420,7 +422,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     listed = None if ctx.root.script else wf.setting(node_id, "tools")  # None: the node doesn't list tools
     uses = listed or ()
 
-    async def attempt(number: int, name: str, record: Attempt) -> dict:
+    async def attempt(number: int, name: str, record: Attempt, deadline: asyncio.Timeout) -> dict:
         model, effort = chosen[name]
         source, why_not = _continue_from(previous, name, model) if continuing else (None, None)
         if source:  # Cursor can't fork: it loads the session itself
@@ -442,10 +444,10 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         except Unavailable as error:
             raise _Unavailable(str(error)) from error
         async with _attached(uses, number) as tools:
-            return await converse(number, name, agent, tools, record, source, why_not, session_facts)
+            return await converse(number, name, agent, tools, record, deadline, source, why_not, session_facts)
 
-    async def converse(number: int, name: str, agent, tools: list, record: Attempt, source: dict | None,
-                       why_not: str | None, session_facts: dict) -> dict:
+    async def converse(number: int, name: str, agent, tools: list, record: Attempt, deadline: asyncio.Timeout,
+                       source: dict | None, why_not: str | None, session_facts: dict) -> dict:
         """One session: the instruction, then reminders, until submit_result has a result.
         `source` is the session to continue, and `session_facts` the trace's record of it."""
         model, effort = chosen[name]
@@ -496,7 +498,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                    "log": _in_run(ctx, spec.log)})
         spent_before, spent = usage.cost_usd, Usage()
         try:
-            async with ctx.steering.live(spec, number, name, session) as live:
+            async with ctx.steering.live(spec, number, name, session, deadline) as live:
                 turn, sends, text, reminders = 1, "instruction", instruction, output_tool.REMINDERS
                 while True:
                     try:
@@ -651,7 +653,7 @@ async def _command(job, ctx: RunContext, folder: Path, variables: dict, workspac
     check = ctx.workflow.setting(node_id, "check")
     (folder / "instruction.md").write_text(command, encoding="utf-8")
 
-    async def attempt(number: int, harness: None, record: Attempt) -> dict:
+    async def attempt(number: int, harness: None, record: Attempt, _deadline) -> dict:
         log = folder / f"attempt-{number}.log"
         record.begin(command=command, cwd=workspace["path"], env={k: HIDDEN if k in secret else v for k, v in given.items()},
                      stdout=str(log.with_suffix(".stdout")), stderr=str(log.with_suffix(".stderr")), log=str(log))
@@ -762,7 +764,7 @@ async def _workflow(job: Job, ctx: RunContext, folder: Path, variables: dict, wo
             return  # the run's own, not the sub-workflow's: the top-level graph reports those
         emit({**event, "node": f"{label}/{event['node']}"} if "node" in event else event)
 
-    async def attempt(number: int, _harness, record: Attempt) -> dict:
+    async def attempt(number: int, _harness, record: Attempt, _deadline) -> dict:
         child = ctx.child(sub, folder / f"attempt-{number}", home, path, label, record.id, outputs)
         # The folder nests a level per pass and attempt at every depth, so it names the thread uniquely
         thread = f"{ctx.run.id}/{child.run.dir.relative_to(ctx.root.run.dir)}"
