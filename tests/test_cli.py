@@ -33,7 +33,11 @@ def test_the_starter_file_is_valid(here, capsys):
     cli.main(["init", "my-flow"])
     capsys.readouterr()
     assert cli.main(["validate", "my-flow.yaml"]) == 0
-    assert capsys.readouterr().out == "my-flow.yaml: valid\n"
+    assert capsys.readouterr().out.splitlines() == [
+        "my-flow.yaml: note: `wf continue` refuses the runs of this workflow, because it has no agent node with "
+        "`edit` or `full` access. Name a node that takes a follow-up request with `follow_up: {to: <node>}`",
+        "my-flow.yaml: valid",
+    ]
 
 
 def test_init_refuses_to_overwrite(here, capsys):
@@ -58,7 +62,9 @@ def test_validate_reports_warnings_and_passes(here, capsys):
     assert cli.main(["validate", "feature.yaml"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0].startswith("feature.yaml: warning: limits.cost_usd: codex doesn't report cost")
-    assert out[-1] == "feature.yaml: valid, 1 warning"
+    assert out[1] == ("feature.yaml: note: `wf continue` sends a follow-up request to `merge`, the first agent node "
+                      "with `edit` or `full` access. Name another node with `follow_up: {to: <node>}`")
+    assert out[-1] == "feature.yaml: valid, 1 warning"  # a note isn't a warning
 
 
 def test_validate_fails_on_errors(here, capsys):
@@ -113,6 +119,8 @@ flowchart TD
   n_build[/"build<br/>command · for each plan.tasks<br/>One per task"/]
   n_fix("fix<br/>agent · codex · edit · workspace: new")
   wf_end(["end"])
+  wf_follow_up(["follow-up"])
+  wf_follow_up -.-> n_fix
   wf_start --> n_plan
   n_plan --> n_approve
   n_approve -. "approve.ok" .-> n_build

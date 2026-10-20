@@ -16,6 +16,11 @@ The rules, in the order a run uses them:
 - add_pending(): pending nodes keep the order they became pending in
 - settled() and starts(): which pending nodes can start now, including the
   tie-break when they're all waiting on each other
+
+follow_up_targets() uses them to say where `wf continue` sends a follow-up
+request in a workflow without `follow_up`: to the agent node with `edit` or
+`full` access that a run starts first (first_starts). That follow-up keeps the
+outputs of the nodes that a run can reach before that node (reached_before).
 """
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -144,3 +149,45 @@ def starts(topo: Topology, pending: Sequence[str], running: Iterable[str]) -> li
     if ready or running or not pending:
         return ready
     return [pending[0]]
+
+
+# ---------- follow-ups ----------
+
+
+def follow_up_targets(workflow: Workflow, topo: Topology | None = None) -> tuple[str, ...]:
+    """The nodes where `wf continue` sends a follow-up request: those that `follow_up` names, or else the agent
+    node with `edit` or `full` access that a run starts first (first_starts). Of two such nodes that start in the
+    same step, the first in the file takes it. Empty when the workflow has neither."""
+    if workflow.follow_up is not None:
+        return workflow.follow_up.targets
+    if START in workflow.nodes or END in workflow.nodes:
+        return ()  # validate refuses a node with such a name
+    editors = [node_id for node_id, node in workflow.nodes.items()
+               if node.kind == "agent" and workflow.setting(node_id, "access") in ("edit", "full")]
+    step = first_starts(topo or Topology.of(workflow)) if editors else {}
+    started = [node_id for node_id in editors if node_id in step]  # start leads to it
+    return (min(started, key=step.__getitem__),) if started else ()
+
+
+def first_starts(topo: Topology) -> dict[str, int]:
+    """The step in which a run first starts each node that start leads to, by the rules of starts() and
+    add_pending(). Each job finishes in the step that starts it, and each route leads to all of its targets.
+    Each node starts once, so the steps end for each graph, and they keep no stack."""
+    found: dict[str, int] = {}
+    pending, step = add_pending(topo, [], topo.successors[START]), 0
+    while pending:
+        step += 1
+        started = starts(topo, pending, ())
+        pending = [node for node in pending if node not in started]
+        for node in started:
+            found[node] = step
+        for node in started:  # a route to a node that doesn't exist, in a file that validate refuses, leads nowhere
+            new = [n for n in topo.successors[node] if n in topo.needs and n not in found]
+            pending = add_pending(topo, pending, new)
+    return found
+
+
+def reached_before(topo: Topology, node: str) -> set[str]:
+    """The nodes that a run can reach before `node`: those that a path from start leads to without passing
+    through `node`. On its first pass, `node` can find only their outputs."""
+    return topo.reachable(topo.successors[START], avoiding=node)

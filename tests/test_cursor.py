@@ -612,11 +612,11 @@ FOLLOW_UP = """
     """
 
 
-def follow_up_run() -> runs.Run:
-    """A run of FOLLOW_UP that succeeded, in a repo with a commit."""
+def follow_up_run(workflow: str = FOLLOW_UP) -> runs.Run:
+    """A run of the workflow that succeeded, in a repo with a commit."""
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
                    check=True)
-    Path("flow.yaml").write_text(dedent(FOLLOW_UP))
+    Path("flow.yaml").write_text(dedent(workflow))
     assert cli.main(["run", "flow.yaml"]) == 0
     (run,) = runs.all_runs(Path.cwd())
     return run
@@ -641,6 +641,20 @@ def test_a_follow_up_continues_the_agent_that_the_run_ended_with(repo, monkeypat
     assert resumed["agentId"] == last["agentId"] == session_id(run, "work")
     assert last["text"].startswith("Follow-up: add a flag")
     assert "work: continuing the last pass's session" in capsys.readouterr().out
+
+
+def test_a_follow_up_without_follow_up_continues_the_agent_that_takes_the_request(repo, monkeypatch, cursor_host):
+    log = use(monkeypatch, repo, cursor_host, [GOOD], [GOOD], [GOOD])
+    run = follow_up_run(FOLLOW_UP.replace("    follow_up: {to: work}\n", "").replace(
+        "instruction: \"{% if follow_up %}Follow-up: {{ follow_up.request }}{% else %}Do it{% endif %}\"",
+        "instruction: Do it\n        access: full"))
+    saved = workspaces.saved_sessions(run.dir, "cursor-sdk")
+    assert [folder.name for folder in saved.iterdir()] == [session_id(run, "work")]
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    (resumed,) = entries(log, "resume")
+    last = entries(log, "send")[-1]
+    assert resumed["agentId"] == last["agentId"] == session_id(run, "work")
+    assert "## Follow-up request" in last["text"] and "add a flag" in last["text"]
 
 
 def test_wf_discard_removes_the_saved_sessions_of_a_run(repo, monkeypatch, cursor_host):

@@ -682,9 +682,9 @@ def _parse(raw: str, field: dict):
 
 def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, as_json: bool = False,
               limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
-    """`wf continue`: give a run that succeeded a follow-up request. Then drive it again from the nodes that its
-    workflow's `follow_up` names. `limit_pairs` (--limit) give the follow-up a budget of its own. With `detach`,
-    check and prepare everything here, then let a background `wf retry` drive it.
+    """`wf continue`: give a run that succeeded a follow-up request. Then drive it again from the nodes that take
+    the request (scheduler.follow_up_targets). `limit_pairs` (--limit) give the follow-up a budget of its own.
+    With `detach`, check and prepare everything here, then let a background `wf retry` drive it.
 
     The run's lock is taken before anything is checked, and nothing changes until every check passed. Then the
     worktrees come back, status.json says the follow-up runs, and one write of the checkpoints holds the
@@ -775,9 +775,11 @@ def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapsho
         return f"run {run.id} stopped before it ended: continue it with {run.command('retry')}"
     if status != "succeeded":
         return f"run {run.id} hasn't succeeded (its status is {status}), and only a run that succeeded takes a follow-up"
-    if workflow.follow_up is None:
+    if not scheduler.follow_up_targets(workflow):
         return (f"workflow `{workflow.name}` has no `follow_up`, which names the node that takes a follow-up request. "
-                "A run keeps the workflow files it started with, so only a run of a file that has `follow_up` takes one")
+                "And it has no agent node with `edit` or `full` access to take it by default. Add "
+                "`follow_up: {to: <node>}` to name one. A run keeps the workflow files it started with, so only the "
+                "runs that start after that change take a follow-up")
     if not _ended(run, state) or (state.values or {}).get("status") != "succeeded":
         return f"run {run.id} has no checkpoint of its end to continue from: {run.command('retry')} says where it stands"
     return None
@@ -786,8 +788,8 @@ def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapsho
 def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | None:
     """Why the follow-up can't work in the run's `repo` workspace, or None. It can't when a node that the
     follow-up can reach works there, and that checkout is now on another branch than the run's."""
-    kinds = set()
-    for node in scheduler.Topology.of(workflow).reachable(workflow.follow_up.targets):
+    kinds, topo = set(), scheduler.Topology.of(workflow)
+    for node in topo.reachable(scheduler.follow_up_targets(workflow, topo)):
         seen = set()
         while workflow.setting(node, "workspace") in workflow.nodes and node not in seen:
             seen.add(node)
@@ -802,11 +804,9 @@ def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | N
 
 def _follow_up_sessions(workflow: spec.Workflow, values: dict) -> set[str]:
     """The ids of the agent sessions that a follow-up may continue: the last session of each node that it
-    can reach, and those of their sub-workflows. None without `follow_up`."""
-    if workflow.follow_up is None:
-        return set()
-    sessions = values.get("sessions") or {}
-    reached = scheduler.Topology.of(workflow).reachable(workflow.follow_up.targets)
+    can reach, and those of their sub-workflows. None when no node takes a follow-up."""
+    sessions, topo = values.get("sessions") or {}, scheduler.Topology.of(workflow)
+    reached = topo.reachable(scheduler.follow_up_targets(workflow, topo))
     return {ident for node in reached for ident in _session_ids(sessions.get(node))}
 
 
@@ -876,6 +876,6 @@ def _run_record(ctx: RunContext, values: dict, answers: dict | None) -> dict:
 
 
 def _follow_up_hint(ctx: RunContext, status: str) -> str:
-    if status != "succeeded" or ctx.workflow.follow_up is None:
+    if status != "succeeded" or not scheduler.follow_up_targets(ctx.workflow, ctx.topo):
         return ""
     return f" Give it a follow-up with: {ctx.run.command('continue', '<request>')}"

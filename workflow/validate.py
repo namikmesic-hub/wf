@@ -2,7 +2,8 @@
 
 check(path) loads a workflow file and every sub-workflow it uses, and returns a
 Report: errors (wf run refuses to start) and warnings (it starts, but something
-looks risky). Nothing here runs a node.
+looks risky). Its notes tell what isn't a problem: where `wf continue` sends a
+follow-up request when the file has no `follow_up`. Nothing here runs a node.
 
 The checks run in this order, because later ones lean on earlier ones:
 1. structure: node ids, `needs` and route targets, reachability, loops
@@ -55,6 +56,7 @@ class Report:
     problems: list[Problem]
     workflow: Workflow | None = None  # the parsed top-level file, if it parsed
     files: list[Path] = field(default_factory=list)  # it and every sub-workflow it uses
+    notes: list[str] = field(default_factory=list)  # information about a file without errors, not a problem
 
     @property
     def errors(self) -> list[Problem]:
@@ -68,7 +70,20 @@ class Report:
 def check(path: Path | str) -> Report:
     """Check a workflow file and every sub-workflow it uses."""
     result = _check(Path(path).resolve(), (), frozenset(), {})
-    return Report(list(dict.fromkeys(result.problems)), result.workflow, list(dict.fromkeys(result.files)))
+    problems = list(dict.fromkeys(result.problems))
+    valid = result.workflow is not None and not any(p.level == "error" for p in problems)
+    return Report(problems, result.workflow, list(dict.fromkeys(result.files)), _notes(result.workflow) if valid else [])
+
+
+def _notes(workflow: Workflow) -> list[str]:
+    """Where `wf continue` sends a follow-up request, for a workflow without `follow_up`."""
+    if workflow.follow_up is not None:
+        return []
+    if targets := scheduler.follow_up_targets(workflow):
+        return [f"`wf continue` sends a follow-up request to `{targets[0]}`, the first agent node with `edit` or "
+                "`full` access. Name another node with `follow_up: {to: <node>}`"]
+    return ["`wf continue` refuses the runs of this workflow, because it has no agent node with `edit` or `full` "
+            "access. Name a node that takes a follow-up request with `follow_up: {to: <node>}`"]
 
 
 @dataclass
@@ -275,7 +290,7 @@ class _Checker:
             "workspace": fields({n: per_pass(n, _WORKSPACE) for n in self.nodes}),
             "errors": fields({n: {"type": "array", "items": _ERROR_ITEM} for n in self.nodes}),
             "run": _RUN,
-            "session": _SESSION, **({"follow_up": _FOLLOW_UP} if self.wf.follow_up else {}),
+            "session": _SESSION, **({"follow_up": _FOLLOW_UP} if scheduler.follow_up_targets(self.wf, self.topo) else {}),
         }
 
     # ---------- 3. sub-workflows ----------

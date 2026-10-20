@@ -1,7 +1,8 @@
 """wf continue: a follow-up request for a run that succeeded, as a new pass of the same run.
 
 The workflow's `follow_up` names the nodes that take the request, and `follow_up.request` brings it
-into their templates. The run goes back to running on its own branches, with its sessions, fresh
+into their templates. Without `follow_up`, the first agent node that can change files takes it, and
+wf adds the request to its instruction. The run goes back to running on its own branches, with its sessions, fresh
 route counters and a budget of its own.
 """
 
@@ -12,12 +13,12 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from textwrap import dedent
+from textwrap import dedent, indent
 
 import pytest
 
-from fakes import Fake, submit
-from workflow import cli, firstmate, harnesses, operate, progress, report, runner, runs, scheduler, spec, state, trace_view, ui, validate, workspaces
+from fakes import Fake, ends, submit
+from workflow import cli, diagram, firstmate, harnesses, nodes, operate, output_tool, progress, report, runner, runs, scheduler, spec, state, trace_view, ui, validate, workspaces
 from workflow.context import RunContext
 
 
@@ -367,12 +368,14 @@ def test_a_run_that_still_runs_is_refused(repo, capsys):
     assert f"only a run that succeeded takes a follow-up. Follow it with: wf wait {run.id}" in error
 
 
-def test_a_workflow_without_follow_up_is_refused(repo, capsys):
+def test_a_workflow_without_follow_up_or_an_agent_that_changes_files_is_refused(repo, capsys):
     run = ran(capsys, FLOW.replace("follow_up: {to: work}\n", "").replace(
         "{{ follow_up.request if follow_up else start.task }}", "{{ start.task }}").replace(
         "{{ follow_up.number if follow_up else 0 }}", "0"))
     assert cli.main(["continue", run.id, "more"]) == 1
-    assert "workflow `flow` has no `follow_up`, which names the node that takes a follow-up request" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert ("workflow `flow` has no `follow_up`, which names the node that takes a follow-up request. And it has no "
+            "agent node with `edit` or `full` access to take it by default. Add `follow_up: {to: <node>}` to name one") in error
     assert run.status()["status"] == "succeeded"
 
 
@@ -466,6 +469,423 @@ def test_the_request_can_come_from_stdin(repo, monkeypatch, capsys):
     monkeypatch.setattr(sys, "stdin", io.StringIO("from stdin"))
     assert cli.main(["continue", run.id, "--file", "-"]) == 0
     assert run.output()["notes"].splitlines()[-1] == "from stdin (check is none)"
+
+
+# ---------- a workflow without follow_up ----------
+
+
+def editing(nodes_yaml: str, top: str = "") -> spec.Workflow:
+    text = f"version: 1\nname: edits\nstart: {{input: {{}}}}\n{top}nodes:\n{indent(dedent(nodes_yaml).strip(), '  ')}\nend: {{output: {{}}}}\n"
+    return spec.parse(text)
+
+
+@pytest.mark.parametrize("nodes_yaml, top, found", [
+    # Read-only agents and commands don't take it, and an agent with `edit` or `full` access does
+    ("""
+     plan: {needs: [start], instruction: plan}
+     test: {needs: [plan], command: "true"}
+     merge: {needs: [test], instruction: merge, access: full}
+     """, "", ("merge",)),
+    # The access that `defaults` gives counts, for agent nodes only
+    ("""
+     plan: {needs: [start], instruction: plan}
+     build: {needs: [plan], instruction: build}
+     """, "defaults: {access: edit}\n", ("plan",)),
+    ("""
+     test: {needs: [start], command: "true"}
+     ask: {needs: [test], human: "ok?", output: {ok: {type: boolean}}}
+     implement: {needs: [ask], instruction: implement}
+     """, "defaults: {access: edit}\n", ("implement",)),
+    # Of two nodes at the same step, the first in the file takes it
+    ("""
+     plan: {needs: [start], instruction: plan}
+     docs: {needs: [plan], instruction: docs, access: edit}
+     code: {needs: [plan], instruction: code, access: edit}
+     """, "", ("docs",)),
+    # The earliest step goes first, whatever the order in the file: a join runs after the longest path to it
+    ("""
+     polish: {needs: [setup, implement], instruction: polish, access: edit}
+     setup: {needs: [start], command: "true"}
+     plan: {needs: [start], instruction: plan}
+     implement: {needs: [plan], instruction: implement, access: edit}
+     """, "", ("implement",)),
+    # A route that goes back doesn't move a node to a later step
+    ("""
+     fix: {instruction: fix, access: full}
+     implement: {needs: [start], instruction: implement, access: edit}
+     check:
+       needs: [implement]
+       command: "true"
+       routes: [{when: "check.exit_code != 0", to: fix, max: 1}, {to: implement, max: 2}, {to: end}]
+     """, "", ("implement",)),
+    # `needs` decides the order, also for a node that comes first in the file, and that a route leads back to
+    ("""
+     implement: {needs: [start, plan], instruction: implement, access: edit}
+     check: {needs: [implement], command: "true", routes: [{to: plan, max: 1}, {to: end}]}
+     plan: {needs: [start], instruction: plan, access: edit}
+     """, "", ("plan",)),
+    # A route that a run might not take doesn't change the order: it is the same for each run
+    ("""
+     classify: {needs: [start], command: "true", routes: [{when: "classify.exit_code == 0", to: bugfix}, {to: prepare}]}
+     bugfix: {instruction: fix, access: edit}
+     prepare: {command: "true", routes: [{to: feature}]}
+     feature: {instruction: build, access: edit}
+     """, "", ("bugfix",)),
+    # A route target counts as any node
+    ("""
+     plan: {needs: [start], instruction: plan}
+     check: {needs: [plan], command: "true", routes: [{when: "check.exit_code != 0", to: fix}, {to: end}]}
+     fix: {instruction: fix, access: edit}
+     """, "", ("fix",)),
+    # Without such a node, no node takes it
+    ("""
+     plan: {needs: [start], instruction: plan}
+     test: {needs: [plan], command: "true"}
+     """, "", ()),
+    # A node that start doesn't lead to, in a file that validate refuses, doesn't take it
+    ("""
+     orphan: {instruction: work, access: edit}
+     work: {needs: [start], instruction: work, access: edit}
+     """, "", ("work",)),
+    # Nor does any node of a file with a node named `start`
+    ("""
+     start: {instruction: work, access: edit}
+     """, "", ()),
+    ("""
+     a: {needs: [start], instruction: a, access: edit}
+     start: {needs: [a], command: x}
+     """, "", ()),
+    # `follow_up` wins
+    ("""
+     plan: {needs: [start], instruction: plan}
+     implement: {needs: [plan], instruction: implement, access: edit}
+     """, "follow_up: {to: plan}\n", ("plan",)),
+])
+def test_without_follow_up_the_first_agent_that_can_change_files_takes_the_request(nodes_yaml, top, found):
+    workflow = editing(nodes_yaml, top)
+    assert scheduler.follow_up_targets(workflow) == found
+    if not found:
+        assert "wf_follow_up" not in diagram.mermaid(workflow)
+
+
+def test_the_node_that_takes_a_request_is_found_in_a_workflow_longer_than_the_limit_on_recursion():
+    count = sys.getrecursionlimit() + 100
+    chain = "".join(f"c{i}: {{needs: [{f'c{i - 1}' if i else 'start'}], command: 'true'}}\n" for i in range(count))
+    workflow = editing(chain + f"edit: {{needs: [c{count - 1}], instruction: x, access: edit}}\n")
+    assert scheduler.follow_up_targets(workflow) == ("edit",)
+    assert "  wf_follow_up -.-> n_edit\n" in diagram.mermaid(workflow)
+
+
+@pytest.mark.parametrize("nodes_yaml, error", [
+    ("start: {instruction: work, access: edit}", "nodes.start: `start` is a reserved name"),
+    ("a: {needs: [start], instruction: a, access: edit}\nstart: {needs: [a], command: x}", "nodes.start: `start` is a reserved name"),
+])
+def test_validate_reports_a_node_named_start_with_an_agent_that_changes_files(repo, nodes_yaml, error):
+    write("bad.yaml", f"version: 1\nname: bad\nstart: {{input: {{}}}}\nnodes:\n{indent(nodes_yaml, '  ')}\nend: {{output: {{}}}}\n")
+    report = validate.check("bad.yaml")
+    assert any(str(p) == f"bad.yaml: {error}" for p in report.errors) and report.notes == []
+
+
+PLAIN = """
+version: 1
+name: plain
+defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+start: {input: {}}
+nodes:
+  plan: {needs: [start], instruction: Plan the change}
+  implement: {needs: [plan], access: edit, workspace: new, instruction: "Build {{ plan.summary }}"}
+  check:
+    needs: [implement]
+    workspace: implement
+    command: "true"
+    routes: [{to: implement, max: 1}, {to: end}]
+end: {output: {}}
+"""
+
+
+def planned(monkeypatch, capsys, text: str = PLAIN) -> tuple[runs.Run, Fake]:
+    """A run of `text` that succeeded: plan once, then implement twice, as check sends it back once."""
+    fake = Fake("claude-code", submit({"summary": "the plan"}), *[submit({"summary": f"pass {n}"}) for n in range(1, 5)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    before = {run.id for run in runs.all_runs(Path.cwd())}
+    write("plain.yaml", text)
+    assert cli.main(["run", "plain.yaml"]) == 0
+    capsys.readouterr()
+    (run,) = [run for run in runs.all_runs(Path.cwd()) if run.id not in before]
+    return run, fake
+
+
+def test_a_follow_up_goes_to_the_first_agent_that_can_change_files_with_the_request_in_its_instruction(repo, monkeypatch, capsys):
+    run, fake = planned(monkeypatch, capsys)
+    assert len(fake.sent) == 3
+    assert "Follow-up request" not in "".join(fake.sent)
+
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    (given,) = [e for e in events(run) if e["event"] == "follow_up"]
+    assert given["to"] == ["implement"]
+    # The first pass in the follow-up finds the request in a section of its own, and a later pass doesn't
+    first, later = fake.sent[3:]
+    assert first == "\n\n".join(["Build the plan", nodes.FOLLOW_UP, nodes.AFTER_A_PASS, "add a flag", nodes.DONT_COMMIT,
+                                  output_tool.FINISH])
+    assert later == "\n\n".join(["Build the plan", nodes.DONT_COMMIT, output_tool.FINISH])
+    assert (run.dir / "nodes" / "implement" / "3" / "instruction.md").read_text() == first
+    assert sorted(p.name for p in (run.dir / "nodes" / "plan").iterdir()) == ["1"]
+    # A second follow-up brings its own request, on each attempt of the first pass and not on a later pass
+    fake.turns += [ends("failed", "it broke"), *[submit({"summary": f"pass {n}"}) for n in (5, 6)]]
+    assert cli.main(["continue", run.id, "and a test"]) == 0
+    assert [text.count("## Follow-up request") for text in fake.sent[5:]] == [1, 1, 0]
+    assert "and a test" in fake.sent[5] and "add a flag" not in fake.sent[5]
+
+
+LOOP_NODES = {
+    "plan": '{needs: [start], command: "echo planned"}',
+    "implement": '{needs: [plan], access: edit, instruction: "Build {{ plan.stdout | trim }}"}',
+    "check": '{needs: [implement], command: "true", routes: [{to: plan, max: 1}, {to: end}]}',
+}
+
+
+@pytest.mark.parametrize("order, implement", [
+    (("plan", "implement", "check"), LOOP_NODES["implement"]),
+    # The file names implement first, so a walk from start in file order meets it before plan
+    (("implement", "check", "plan"), LOOP_NODES["implement"].replace("needs: [plan]", "needs: [start, plan]")),
+])
+def test_a_follow_up_keeps_the_outputs_before_its_node_also_of_a_node_that_a_loop_leads_back_to(repo, monkeypatch, capsys,
+                                                                                                order, implement):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 5)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    given = {**LOOP_NODES, "implement": implement}
+    write("loop.yaml", "version: 1\nname: loop\ndefaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}\n"
+                       "start: {input: {}}\nnodes:\n" + "".join(f"  {name}: {given[name]}\n" for name in order) +
+                       "end: {output: {}}\n")
+    assert validate.check("loop.yaml").problems == []
+    assert cli.main(["run", "loop.yaml"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    # implement reads what plan gave last, as on a pass of the run from implement, and plan runs again in the loop
+    first, later = fake.sent[2:]
+    assert first.startswith(f"Build planned\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag\n\n")
+    assert later.startswith("Build planned\n\nWhen you're done")
+    assert sorted(p.name for p in (run.dir / "nodes" / "plan").iterdir()) == ["1", "2", "3"]
+
+
+def test_a_follow_up_keeps_the_output_of_the_route_that_the_run_took_before_its_node(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 5)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("routed.yaml", """
+        version: 1
+        name: routed
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {kind: {type: string}}}
+        nodes:
+          classify:
+            needs: [start]
+            command: "echo {{ start.kind | quote }}"
+            routes: [{when: "classify.stdout | trim == 'a'", to: plan_a}, {to: plan_b}]
+          plan_a: {command: "echo plan a"}
+          plan_b: {command: "echo plan b"}
+          implement:
+            needs: [plan_a, plan_b]
+            access: edit
+            max_parallel: 1
+            for_each: "[plan_a.stdout] if plan_a else ([plan_b.stdout] if plan_b else [])"
+            instruction: "Build {{ item | trim }}"
+          check: {needs: [implement], command: "true", routes: [{to: classify, max: 1}, {to: end}]}
+        end: {output: {}}
+    """)
+    assert validate.check("routed.yaml").problems == []
+    assert cli.main(["run", "routed.yaml", "kind=b"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    # plan_b starts before implement, so it keeps its output, and implement's first pass has its item and the request
+    first, later = fake.sent[2:]
+    assert first.startswith(f"Build plan b\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag\n\n")
+    assert later.startswith("Build plan b\n\nWhen you're done")
+    assert sorted(p.name for p in (run.dir / "nodes" / "plan_b").iterdir()) == ["1", "2", "3"]
+
+
+def test_a_follow_up_keeps_the_output_of_a_planner_that_a_route_chose_before_its_node(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 3)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("planned.yaml", """
+        version: 1
+        name: planned
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {size: {type: string}}}
+        nodes:
+          triage:
+            needs: [start]
+            command: "echo {{ start.size | quote }}"
+            routes: [{when: "triage.stdout | trim == 'big'", to: plan}, {to: implement}]
+          plan: {command: "echo step one", routes: [{to: implement}]}
+          implement:
+            access: edit
+            max_parallel: 1
+            for_each: "[plan.stdout] if plan else []"
+            instruction: "Build {{ item | trim }}"
+          review:
+            needs: [implement]
+            command: "echo done"
+            routes: [{when: "review.stdout | trim == 'again'", to: plan, max: 1}, {to: end}]
+        end: {output: {}}
+    """)
+    assert validate.check("planned.yaml").problems == []
+    assert cli.main(["run", "planned.yaml", "size=big"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    # implement ran after plan in the run, so its pass in the follow-up has plan's item and the request
+    (sent,) = fake.sent[1:]
+    assert sent.startswith(f"Build step one\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag\n\n")
+    assert sorted(p.name for p in (run.dir / "nodes" / "plan").iterdir()) == ["1"]
+
+
+def test_the_request_goes_to_the_first_pass_with_a_job_when_a_for_each_pass_has_no_items(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 4)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("fix.yaml", """
+        version: 1
+        name: fix
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {}}
+        nodes:
+          fix:
+            needs: [start]
+            access: edit
+            max_parallel: 1
+            for_each: "[check.stdout] if check else []"
+            instruction: "Fix {{ item | trim }}"
+          check: {needs: [fix], command: "echo broken", routes: [{to: fix, max: 1}, {to: end}]}
+        end: {output: {}}
+    """)
+    assert validate.check("fix.yaml").problems == []
+    assert cli.main(["run", "fix.yaml"]) == 0
+    run = only_run()
+    assert len(fake.sent) == 1
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    # The first pass of fix in the follow-up has no items, so the next pass, after check, gets the request
+    (sent,) = fake.sent[1:]
+    assert sent.startswith(f"Fix broken\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag\n\n")
+    assert sorted(p.name for p in (run.dir / "nodes" / "fix").iterdir()) == ["2", "4"]
+
+
+def test_a_follow_up_goes_to_the_first_agent_in_the_order_of_the_graph_and_says_when_it_never_ran(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 4)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("branch.yaml", """
+        version: 1
+        name: branch
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {kind: {type: string}}}
+        nodes:
+          classify:
+            needs: [start]
+            command: "echo {{ start.kind | quote }}"
+            routes: [{when: "classify.stdout | trim == 'bug'", to: bugfix}, {to: feature}]
+          bugfix: {access: edit, instruction: Fix the bug}
+          feature: {access: edit, instruction: Build the feature}
+        end: {output: {}}
+    """)
+    assert validate.check("branch.yaml").notes == [
+        "`wf continue` sends a follow-up request to `bugfix`, the first agent node with `edit` or `full` access. "
+        "Name another node with `follow_up: {to: <node>}`"]
+    assert cli.main(["run", "branch.yaml", "kind=feature"]) == 0
+    run = only_run()
+    # The request goes to bugfix in each run, also in one that took the route to feature
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    (given,) = [e for e in events(run) if e["event"] == "follow_up"]
+    assert given["to"] == ["bugfix"]
+    assert fake.sent[1].startswith(f"Fix the bug\n\n{nodes.FOLLOW_UP}\n\n{nodes.FIRST_PASS}\n\nadd a flag\n\n")
+    assert sorted(p.name for p in (run.dir / "nodes" / "feature").iterdir()) == ["1"]
+    # The node that takes the request didn't run either in this run
+    write("tests.yaml", """
+        version: 1
+        name: tests
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {}}
+        nodes:
+          tests: {needs: [start], command: "true", check: false, routes: [{when: "tests.exit_code != 0", to: fix}, {to: end}]}
+          fix: {access: edit, instruction: "Fix {{ tests.stdout }}"}
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "tests.yaml"]) == 0
+    (other,) = [r for r in runs.all_runs(Path.cwd()) if r.id != run.id]
+    assert cli.main(["continue", other.id, "add a test"]) == 0
+    assert fake.sent[2].startswith(f"Fix\n\n{nodes.FOLLOW_UP}\n\n{nodes.FIRST_PASS}\n\nadd a test\n\n")
+
+
+def test_an_instruction_that_reads_follow_up_itself_is_left_as_it_is(repo, monkeypatch, capsys):
+    text = PLAIN.replace('"Build {{ plan.summary }}"',
+                         '"{% if follow_up %}Now: {{ follow_up.request }}{% else %}Build {{ plan.summary }}{% endif %}"')
+    write("plain.yaml", text)
+    assert validate.check("plain.yaml").problems == []  # a node takes follow-ups, so a template can read `follow_up`
+    run, fake = planned(monkeypatch, capsys, text)
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    assert [sent.split("\n\n")[0] for sent in fake.sent[3:]] == ["Now: add a flag", "Now: add a flag"]
+    assert "Follow-up request" not in "".join(fake.sent)
+
+
+def test_a_workflows_own_follow_up_wins_and_its_nodes_get_no_section(repo, monkeypatch, capsys):
+    text = PLAIN.replace("start: {input: {}}\n", "start: {input: {}}\nfollow_up: {to: check}\n").replace(
+        'command: "true"', 'command: "echo {% if follow_up %}{{ follow_up.request | quote }}{% endif %}"')
+    run, fake = planned(monkeypatch, capsys, text)
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    (given,) = [e for e in events(run) if e["event"] == "follow_up"]
+    assert given["to"] == ["check"]
+    # check sends the run back to implement once, as in each pass, and wf adds nothing to its instruction
+    assert fake.sent[3] == "\n\n".join(["Build the plan", nodes.DONT_COMMIT, output_tool.FINISH])
+    assert len(fake.sent) == 4
+    # A named node whose instruction doesn't read `follow_up` gets nothing either, and validate still warns
+    named = PLAIN.replace("start: {input: {}}\n", "start: {input: {}}\nfollow_up: {to: implement}\n")
+    write("named.yaml", named)
+    assert [p.where for p in validate.check("named.yaml").problems] == ["follow_up"]
+    assert validate.check("named.yaml").notes == []
+    run, fake = planned(monkeypatch, capsys, named)
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    assert "Follow-up request" not in "".join(fake.sent)
+
+
+def test_validate_says_where_a_follow_up_goes_and_doesnt_warn(repo, capsys):
+    write("plain.yaml", PLAIN)
+    assert validate.check("plain.yaml").problems == []
+    assert cli.main(["validate", "plain.yaml"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "plain.yaml: note: `wf continue` sends a follow-up request to `implement`, the first agent node with `edit` "
+        "or `full` access. Name another node with `follow_up: {to: <node>}`",
+        "plain.yaml: valid",
+    ]
+    write("read.yaml", PLAIN.replace("access: edit, ", ""))
+    assert validate.check("read.yaml").problems == []
+    assert validate.check("read.yaml").notes == [
+        "`wf continue` refuses the runs of this workflow, because it has no agent node with `edit` or `full` access. "
+        "Name a node that takes a follow-up request with `follow_up: {to: <node>}`"]
+    # A file with errors gets no note
+    write("broken.yaml", PLAIN.replace("needs: [plan], access", "needs: [plann], access"))
+    assert validate.check("broken.yaml").errors and validate.check("broken.yaml").notes == []
+    # A sub-workflow's own default isn't the run's: only the file that runs gets a note
+    write("parent.yaml", """
+        version: 1
+        name: parent
+        start: {input: {}}
+        nodes:
+          build: {needs: [start], workflow: plain.yaml}
+        end: {output: {}}
+    """)
+    assert validate.check("parent.yaml").notes == [
+        "`wf continue` refuses the runs of this workflow, because it has no agent node with `edit` or `full` access. "
+        "Name a node that takes a follow-up request with `follow_up: {to: <node>}`"]
+
+
+def test_wf_retry_of_a_run_that_succeeded_says_how_to_give_it_a_follow_up(repo, monkeypatch, capsys):
+    run, _ = planned(monkeypatch, capsys)
+    assert cli.main(["retry", run.id]) == 0
+    assert f"Give it a follow-up with: wf continue {run.id} <request>" in capsys.readouterr().out
+    write("flow.yaml", FLOW.replace("follow_up: {to: work}\n", "").replace(
+        "{{ follow_up.request if follow_up else start.task }}", "{{ start.task }}").replace(
+        "{{ follow_up.number if follow_up else 0 }}", "0"))
+    assert cli.main(["run", "flow.yaml", "task=hello"]) == 0
+    (other,) = [r for r in runs.all_runs(Path.cwd()) if r.id != run.id]
+    capsys.readouterr()
+    assert cli.main(["retry", other.id]) == 0
+    assert "Give it a follow-up" not in capsys.readouterr().out
 
 
 # ---------- an operator without a terminal ----------
@@ -563,6 +983,10 @@ def test_wf_graph_shows_where_a_follow_up_comes_in(repo, capsys):
     write("flow.yaml", FLOW)
     assert cli.main(["graph", "flow.yaml"]) == 0
     assert '  wf_follow_up(["follow-up"])\n  wf_follow_up -.-> n_work\n' in capsys.readouterr().out
+    # Without `follow_up`, the arrow goes to the node that takes the request, also in a file that validate refuses
+    write("plain.yaml", PLAIN.replace("{to: end}", "{to: ending}"))
+    assert cli.main(["graph", "plain.yaml"]) == 0
+    assert '  wf_follow_up(["follow-up"])\n  wf_follow_up -.-> n_implement\n' in capsys.readouterr().out
 
 
 # ---------- validation ----------
@@ -1011,7 +1435,7 @@ def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
     assert (taken["taken"], taken["sessions"]["a"]["streak"], taken["history"]) == ({}, 0, {"a": [{}, {}]})
     assert taken["sessions"]["sub"] == {"sessions": {"inner": {**saved["sessions"]["sub"]["sessions"]["inner"], "streak": 0}}}
     assert (taken["status"], taken["output"]) == ("running", None)
-    assert taken["follow_up"] == {"request": "more", "number": 1, "limits": {},
+    assert taken["follow_up"] == {"request": "more", "number": 1, "limits": {}, "to": ["a", "b"],
                                   "from": {"cost_usd": 1.5, "tokens": 300, "elapsed_s": 42.0}}
     assert events == [{"event": "follow_up", "number": 1, "to": ["a", "b"]}]
     assert progress.vars()["follow_up"] == {"request": "more", "number": 1}

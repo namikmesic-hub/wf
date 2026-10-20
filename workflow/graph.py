@@ -28,7 +28,8 @@ four nodes, and the workflow's own graph lives in the state:
 `wf continue` gives a run that reached END a follow-up request. It writes the
 request into the state as an input of the graph, so the run's next step is
 schedule again. That step takes it in (state.Progress.follow_up), and starts
-the nodes that the workflow's `follow_up` names.
+the nodes that take the request: those that the workflow's `follow_up` names,
+or else the first agent node that can change files (scheduler.follow_up_targets).
 
 LangGraph runs in steps ("supersteps"): every task started in a step finishes
 before the next step begins. So schedule runs once per step, after all of that

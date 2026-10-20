@@ -41,6 +41,13 @@ submit_result call. It starts fresh instead, with an event saying why, when
 the harness or model differs from the last pass, the fork fails, or the two
 passes before it both continued.
 
+In a follow-up (`wf continue`) of a workflow without `follow_up`, the node
+that takes the request (scheduler.follow_up_targets) finds it in a section of its
+own after its instruction, on its first pass in the follow-up that has a job.
+The section says whether an earlier pass of the node did the task. An
+instruction that reads `follow_up` itself gets no such section
+(state.Progress._adds_request).
+
 An agent session tells events.jsonl what its attempt has used so far, in an
 `agent_usage` event, when that changed. It looks after each turn, and when the
 session ends. While a turn runs, it looks every USAGE_SECONDS, at what the
@@ -411,13 +418,15 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     node_id, wf = job["node"], ctx.workflow
     commits = _runner_commits(ctx, node_id, workspace)
     note = [DONT_COMMIT] if commits and wf.setting(node_id, "access") == "edit" else []
+    request = _follow_up_request(job, variables)
     continuing = wf.setting(node_id, "session") == "continue" and job["index"] is None  # items always start fresh
     previous = job.get("session")  # the last pass's session, for session: continue
 
     def render(continued: bool) -> str:
         text = ctx.trace.render(job, "instruction", wf.nodes[node_id].instruction,
                                 {**variables, "session": {"continued": continued}}, continued=continued)
-        return "\n\n".join([text.rstrip(), *note, *([output_tool.NEW_RESULT] if continued else []), output_tool.FINISH])
+        return "\n\n".join([text.rstrip(), *request, *note, *([output_tool.NEW_RESULT] if continued else []),
+                            output_tool.FINISH])
 
     fresh = render(False)
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
@@ -596,6 +605,18 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
 
 DONT_COMMIT = "Don't commit: the runner commits your changes when you're done."
+FOLLOW_UP = "## Follow-up request"
+AFTER_A_PASS = "An earlier pass of this step did the task above. Now do this request for more work on that result:"
+FIRST_PASS = "This step didn't run before in this run. Do the task above, and this request with it:"
+
+
+def _follow_up_request(job: Job, variables: dict) -> list[str]:
+    """The follow-up request as a section of the instruction, when the job's pass gets it (Progress._adds_request).
+    It says whether an earlier pass of the node did the task."""
+    if not job.get("follow_up_section"):
+        return []
+    intro = AFTER_A_PASS if variables["history"].get(job["node"]) else FIRST_PASS
+    return [f"{FOLLOW_UP}\n\n{intro}\n\n{variables['follow_up']['request']}"]
 
 
 def _in_run(ctx: RunContext, path: Path) -> str:
