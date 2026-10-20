@@ -53,7 +53,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, settings, spec, steer, validate, workspaces
+from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, settings, shape, spec, steer, validate, workspaces
 from .context import RunContext
 from .harnesses.base import short
 
@@ -682,8 +682,8 @@ def _parse(raw: str, field: dict):
 
 def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, as_json: bool = False,
               limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
-    """`wf continue`: give a run that succeeded a follow-up request. Then drive it again from the nodes that its
-    workflow's `follow_up` names. `limit_pairs` (--limit) give the follow-up a budget of its own. With `detach`,
+    """`wf continue`: give a run that succeeded a follow-up request. Then drive it again from the nodes that take
+    the request (shape.follow_up_targets). `limit_pairs` (--limit) give the follow-up a budget of its own. With `detach`,
     check and prepare everything here, then let a background `wf retry` drive it.
 
     The run's lock is taken before anything is checked, and nothing changes until every check passed. Then the
@@ -775,9 +775,11 @@ def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapsho
         return f"run {run.id} stopped before it ended: continue it with {run.command('retry')}"
     if status != "succeeded":
         return f"run {run.id} hasn't succeeded (its status is {status}), and only a run that succeeded takes a follow-up"
-    if workflow.follow_up is None:
-        return (f"workflow `{workflow.name}` has no `follow_up`, which names the node that takes a follow-up request. "
-                "A run keeps the workflow files it started with, so only a run of a file that has `follow_up` takes one")
+    if not shape.follow_up_targets(workflow):
+        return (f"workflow `{workflow.name}` has no `follow_up`, which names the node that takes a follow-up request, "
+                "and no agent node with `edit` or `full` access to take it by default. Add `follow_up: {to: <node>}` "
+                "to name one. A run keeps the workflow files it started with, so only the runs that start after that "
+                "change take a follow-up")
     if not _ended(run, state) or (state.values or {}).get("status") != "succeeded":
         return f"run {run.id} has no checkpoint of its end to continue from: {run.command('retry')} says where it stands"
     return None
@@ -787,7 +789,7 @@ def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | N
     """Why the follow-up can't work in the run's `repo` workspace, or None. It can't when a node that the
     follow-up can reach works there, and that checkout is now on another branch than the run's."""
     kinds = set()
-    for node in scheduler.Topology.of(workflow).reachable(workflow.follow_up.targets):
+    for node in scheduler.Topology.of(workflow).reachable(shape.follow_up_targets(workflow)):
         seen = set()
         while workflow.setting(node, "workspace") in workflow.nodes and node not in seen:
             seen.add(node)
@@ -876,6 +878,6 @@ def _run_record(ctx: RunContext, values: dict, answers: dict | None) -> dict:
 
 
 def _follow_up_hint(ctx: RunContext, status: str) -> str:
-    if status != "succeeded" or ctx.workflow.follow_up is None:
+    if status != "succeeded" or not shape.follow_up_targets(ctx.workflow, ctx.topo):
         return ""
     return f" Give it a follow-up with: {ctx.run.command('continue', '<request>')}"

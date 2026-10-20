@@ -341,6 +341,8 @@ def _validate(args) -> int:
     result = validate.check(args.file)
     for problem in result.problems:
         print(problem)
+    for note in result.notes:
+        print(f"{args.file.name}: note: {note}")
     print(f"{args.file.name}: {summary(result)}")
     return 1 if result.errors else 0
 
@@ -740,7 +742,8 @@ def _continue_command(commands, no_input: dict, runs_dir: dict) -> None:
     following = commands.add_parser(
         "continue", help="give a run that succeeded a follow-up request, and run it again from its follow-up node",
         description="Give a run that succeeded a follow-up request. The run goes on from the node that its "
-                    "workflow's `follow_up` names, on the same branches, with each `session: continue` node's "
+                    "workflow's `follow_up` names, or else from its first agent node with edit or full access "
+                    "(wf validate names it), on the same branches, with each `session: continue` node's "
                     "last session, fresh route counters, and a budget of its own. A run that runs, waits or failed "
                     "is refused: wf retry and wf answer continue those.")
     following.add_argument("run_id", metavar="run-id")

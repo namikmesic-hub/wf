@@ -26,7 +26,7 @@ import operator
 from collections.abc import Callable
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from . import scheduler, schemas, templates
+from . import scheduler, schemas, shape, templates
 from .scheduler import START, Topology
 from .spec import Workflow
 
@@ -205,10 +205,10 @@ class Progress:
 
     def follow_up(self, elapsed_s: float) -> None:
         """Take in the request that `wf continue` gave a run that succeeded: a new pass of the run, from the
-        nodes that the workflow's `follow_up` names. Every node they can lead to reads none until it runs
-        again, and the others keep their outputs. Routes count from zero again, the limits count from
+        nodes that take the request (shape.follow_up_targets). Every node they can lead to reads none until it
+        runs again, and the others keep their outputs. Routes count from zero again, the limits count from
         `from`, and the next pass of a `session: continue` node continues its last session."""
-        targets, given = list(self.wf.follow_up.targets), self.s["follow_up"]
+        targets, given = list(shape.follow_up_targets(self.wf, self.topo)), self.s["follow_up"]
         usage = self.s["usage"]
         self.s["follow_up"] = {**{k: v for k, v in given.items() if k != "pending"},
                                "from": {"cost_usd": usage["cost_usd"], "tokens": usage["tokens"], "elapsed_s": elapsed_s}}

@@ -127,6 +127,7 @@ wf continue <run-id> --file <request.md> --detach --json
 ```
 
 The run goes on from the node that its workflow's `follow_up` names.
+Without `follow_up`, it goes on from the first agent node that can change files, and wf adds the request to the instruction of that node.
 It works on the same branches, with the same agent sessions where the harness keeps them.
 Its routes count from zero again, so its review loop gets all of its rounds again.
 The follow-up has a budget of its own: the limits of the workflow file, or `--limit` values that you give.
@@ -144,7 +145,8 @@ Each wake then carries `follow_up`, and you handle its states as for any run.
 
 `wf continue` takes only a run that succeeded.
 It refuses a run that runs, waits, failed, stopped or is at a limit, and names the command for it: `wf answer` or `wf retry`.
-It also refuses a run whose workflow file had no `follow_up` when the run started, and a run whose branch is gone.
+It also refuses a run whose branch is gone.
+And it refuses a run whose workflow has no `follow_up` and no agent node with `edit` or `full` access.
 When a node of the follow-up works in the project folder itself, the folder must be on the branch that the run worked on.
 Then take the request to the captain.
 

@@ -3,6 +3,11 @@
 progress.py uses it to say how far a run is, and diagram.layout() to put the
 boxes of `wf ui` in rows. Nothing here reads a run.
 
+follow_up_targets() says where `wf continue` sends a follow-up request. A
+workflow without `follow_up` sends it to the agent node with `edit` or `full`
+access at the earliest step. Of two such nodes at the same step, the first in
+the file takes it.
+
 A walk from start, depth first and in file order, finds the route edges that
 go back. Each of them closes a loop. Without them the graph has no cycles. A
 node's step is the number of nodes on the longest path from start to it. The
@@ -31,8 +36,8 @@ class Loop:
 
 
 class Shape:
-    def __init__(self, workflow: Workflow):
-        self.topo = topo = Topology.of(workflow)
+    def __init__(self, workflow: Workflow, topo: Topology | None = None):
+        self.topo = topo = topo or Topology.of(workflow)
         self.order = topo.order
         self.forward: dict[str, list[str]] = {node: [] for node in (START, *topo.order)}
         self.edges: list[tuple[str, str, str, int | None]] = []  # (from, to, needs | route | loop, route index)
@@ -113,7 +118,22 @@ class Shape:
         return Loop(first, last, index, most, body)
 
 
+def follow_up_targets(workflow: Workflow, topo: Topology | None = None) -> tuple[str, ...]:
+    """The nodes where `wf continue` sends a follow-up request: those that `follow_up` names, or else the agent
+    node with `edit` or `full` access at the earliest step. Empty when the workflow has neither."""
+    if workflow.follow_up is not None:
+        return workflow.follow_up.targets
+    editors = [node_id for node_id, node in workflow.nodes.items()
+               if node.kind == "agent" and workflow.setting(node_id, "access") in ("edit", "full")]
+    if not editors:
+        return ()
+    step = Shape(workflow, topo).step
+    return (min(editors, key=step.__getitem__),)  # the first in the file of those at the earliest step
+
+
 def _out(topo: Topology, node: str) -> list[tuple[int | None, str]]:
-    """The edges from a node, in file order: its needs edges (index None), then its routes."""
+    """The edges from a node, in file order: its needs edges (index None), then its routes. A route to a node
+    that doesn't exist, in a file that validate refuses, leads nowhere."""
     edges = [(None, target) for target in topo.dependents.get(node, ())]
-    return edges + [(i, target) for i, route in enumerate(topo.routes.get(node, ())) for target in route.targets]
+    return edges + [(i, target) for i, route in enumerate(topo.routes.get(node, ())) for target in route.targets
+                    if target == END or target in topo.needs]
