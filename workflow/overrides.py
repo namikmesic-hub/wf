@@ -13,15 +13,16 @@ A target is an agent node of the run's own workflow, for all of its items, or
 one item, `node[index]`. An item's override wins over the override of its node.
 An override runs its target on one harness only: the harness that --harness
 names, else the node's own harness. That is the one harness that the node names.
-A job is an item, or a node without for_each. For a target that is one job of
-the pass in progress, it can also be the harness that the template gives the
-job. Finished nodes and items don't run again: the override applies to the
-attempts still to come.
+A job is an item, or a node without for_each. For a target that is one job
+still to run in the pass in progress, it can also be the harness that the
+template gives the job. Finished nodes and items don't run again: the override
+applies to the attempts still to come.
 
 The functions job_harnesses() and job_setting() choose the harness, model and
 effort of an agent job. Each attempt uses them (nodes._agent). So does check(),
-for each job of the pass in progress, with the job's own variables
-(job_variables). So the check sees the harness and model that the next attempt gets.
+for each job of the target still to run in the pass in progress, with the job's
+own variables (job_variables). So the check sees the harness and model that the
+next attempt gets, and skips a finished job, which won't run again.
 
 A setting that the override leaves out comes from the workflow file, for the
 harness of the override. But a model that the workflow gives for the node's own
@@ -34,7 +35,8 @@ It refuses a target that isn't an agent node of the run's workflow, or an item
 that the node doesn't have. It also refuses a harness that the node may not use.
 After every other check, available() opens each harness as a run does, in a
 folder outside the run. So it also refuses a harness that isn't installed or
-signed in, and a model that Cursor doesn't list. Only then does the runner keep
+signed in, and a model that Cursor doesn't list. It removes that folder, and
+refuses when it can't, so the check leaves nothing behind. Only then does the runner keep
 the overrides, with their events first (runner._keep). A later override for the
 same target replaces the earlier one. Each override goes into events.jsonl as an
 `override` event, with the last error of its target:
@@ -49,6 +51,7 @@ attempt, and why.
 """
 
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -158,15 +161,15 @@ def _rendered(workflow: Workflow, node_id: str, harness: str, name: str, variabl
 
 def job_variables(values: dict, node_id: str, key: str) -> dict | None:
     """The template variables of a job of the node's pass in progress, as nodes.run_job makes them. The key is
-    "-", or an item's index. None when wf can't tell: no pass in progress, or a job with no workspace yet."""
+    "-", or an item's index. A job with no workspace yet, as when making it failed, gets none of its own, so a
+    template that reads it can't render. None when the node has no pass in progress."""
     active = (values.get("active") or {}).get(node_id)
     if active is None:
         return None
-    workspace = ((active.get("failed") or {}).get(key) or {}).get("workspace") or (active.get("workspaces") or {}).get(key)
-    if workspace is None:
-        return None
+    own = ((active.get("failed") or {}).get(key) or {}).get("workspace") or (active.get("workspaces") or {}).get(key)
+    workspace = {name: value for name, value in active["vars"]["workspace"].items() if name != node_id}
     item = {} if key == "-" else {"item": active["items"][int(key)], "index": int(key)}
-    return {**active["vars"], **item, "workspace": {**active["vars"]["workspace"], node_id: workspace}}
+    return {**active["vars"], **item, "workspace": workspace if own is None else {**workspace, node_id: own}}
 
 
 # ---------- checks ----------
@@ -186,7 +189,7 @@ def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: d
     for key, settings in given.items():
         node_id, index = split(key)
         problem = _target(key, node_id, index, workflows, values)
-        jobs = _jobs(workflow, values, node_id, index) if problem is None else {}
+        jobs = _jobs(values, node_id, index) if problem is None else {}
         harness = None
         if problem is None:
             harness, problem = _harness(key, node_id, index, settings, workflow, jobs)
@@ -234,8 +237,9 @@ def _items(values: dict, node: str) -> int | None:
     return len(done) + len((values.get("errors") or {}).get(node) or []) if isinstance(done, list) else None
 
 
-def _jobs(workflow: Workflow, values: dict, node_id: str, index: int | None) -> dict[str, dict]:
-    """The target's jobs in the node's pass in progress whose variables wf knows, by key ("-" or an index)."""
+def _jobs(values: dict, node_id: str, index: int | None) -> dict[str, dict]:
+    """The target's jobs still to run in the node's pass in progress, with their variables, by key ("-" or an
+    index). A finished job doesn't run again (state.Progress.retry), so its settings don't matter."""
     active = (values.get("active") or {}).get(node_id)
     if active is None:
         return {}
@@ -243,7 +247,7 @@ def _jobs(workflow: Workflow, values: dict, node_id: str, index: int | None) -> 
         keys = [str(index)]
     else:
         keys = ["-"] if active.get("items") is None else [str(i) for i in range(len(active["items"]))]
-    return {key: variables for key in keys if (variables := job_variables(values, node_id, key)) is not None}
+    return {key: job_variables(values, node_id, key) for key in keys if key not in active["outputs"]}
 
 
 def _harness(key: str, node_id: str, index: int | None, settings: dict[str, str], workflow: Workflow,
@@ -273,8 +277,9 @@ def _harness(key: str, node_id: str, index: int | None, settings: dict[str, str]
 
 
 def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict[str, dict]) -> str | None:
-    """The one harness that the node names. When the target is one job of the pass in progress, also the harness
-    that the node's template gives that job, as nodes._agent renders it. None for a list, or when wf can't tell."""
+    """The one harness that the node names. When the target is one job still to run in the pass in progress, also
+    the harness that the node's template gives that job, as nodes._agent renders it. None for a list, or when wf
+    can't tell."""
     own = workflow.setting(node_id, "harness")
     if isinstance(own, list):
         return None
@@ -297,16 +302,22 @@ def _for_harness(where: str | None, harness: str) -> bool:
 def _models(key: str, node_id: str, override: dict, workflow: Workflow,
             jobs: dict[str, dict]) -> tuple[set[str] | None, str | None]:
     """The models of the target's jobs on the override's harness, as far as wf knows them now, or why one
-    of them can't run. A job of the pass in progress renders its settings as its next attempt will. Else wf
-    takes the override's model, or the workflow's model when it isn't a template."""
+    of them can't run. A job still to run in the pass in progress renders its settings as its next attempt
+    will. Else wf takes the override's model, or the workflow's model when it isn't a template."""
     harness = override["harness"]
     if jobs:
         models = set()
-        for variables in jobs.values():
+        for job, variables in jobs.items():
             try:
                 model, _ = job_setting(workflow, node_id, harness, override, variables)
-            except (templates.TemplateError, SettingError) as error:
+            except SettingError as error:
                 return None, f"{key}: {error}"
+            except templates.TemplateError as error:
+                if node_id in variables["workspace"]:
+                    return None, f"{key}: {error}"
+                name = f"`{node_id}`" if job == "-" else f"item {job} of `{node_id}`"
+                return None, (f"{key}: {error}. {name} has no workspace yet, so a template can't read it: "
+                              f"give the setting with --model {key}=ID or --effort {key}=LEVEL")
             if model is not None:
                 models.add(model)
         return models, None
@@ -317,21 +328,32 @@ def _models(key: str, node_id: str, override: dict, workflow: Workflow,
 async def available(checked: Checked) -> list[str]:
     """Open each harness that the overrides name, as a run does, and ask it about the models of each target.
     Returns what can't run on this machine: a harness that isn't installed or signed in, or a model it doesn't have.
-    The harnesses open in a folder of their own, so the run's folder stays as it was."""
+    The harnesses open in a folder of their own, so the run's folder stays as it was. That folder is removed
+    after, with the folder that Cursor makes by its name, and one that stays is a problem too."""
     by_harness: dict[str, list[str]] = {}
     for key, override in checked.found.items():
         by_harness.setdefault(override["harness"], []).append(key)
+    try:
+        folder = Path(tempfile.mkdtemp(prefix="wf-check-"))
+    except OSError as error:
+        return [f"wf can't make a folder to open the harnesses in: {error.strerror or error}"]
     problems = []
     try:
-        with tempfile.TemporaryDirectory(prefix="wf-check-", ignore_cleanup_errors=True) as folder:
-            try:
-                for name, keys in by_harness.items():
-                    problems += await _open(name, keys, checked.models, Path(folder))
-            finally:
-                shutil.rmtree(workspaces.temp_root(Path(folder).name), ignore_errors=True)  # Cursor's, by folder name
-    except OSError as error:  # no folder to open them in
-        return [f"wf can't make a folder to open the harnesses in: {error.strerror or error}"]
+        for name, keys in by_harness.items():
+            problems += await _open(name, keys, checked.models, folder)
+    finally:
+        problems += [problem for made in (folder, workspaces.temp_root(folder.name)) if (problem := _remove(made))]
     return problems
+
+
+def _remove(folder: Path) -> str | None:
+    """Remove a folder that opening the harnesses made, if it is there. Returns why it stays, or None."""
+    try:
+        shutil.rmtree(folder)
+    except OSError as error:
+        if os.path.lexists(folder):
+            return f"wf can't remove {folder}, which the harness check made: {error.strerror or error}"
+    return None
 
 
 async def _open(name: str, keys: list[str], models: dict[str, set[str]], folder: Path) -> list[str]:

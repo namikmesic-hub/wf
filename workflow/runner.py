@@ -39,10 +39,14 @@ stops, so each `run` record has its `run_stopped` record.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
+import signal
 import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -279,7 +283,8 @@ def _refused(name: str, problems: list[str]) -> int:
 def _keep(run: runs.Run, values: dict, found: dict, new_limits: dict) -> None:
     """Record checked overrides in events.jsonl, each with the last error of its target. Then keep them and the
     new limits in run.json, in one write. If that write fails, the events go again: events.jsonl and run.json
-    always agree, and either everything changes or nothing does. Raises OSError."""
+    always agree, and either everything changes or nothing does. Ctrl-C and the stop signals wait for both
+    writes, so they can't stop wf between them. Raises OSError."""
     if not found and not new_limits:
         return
     events = []
@@ -288,13 +293,36 @@ def _keep(run: runs.Run, values: dict, found: dict, new_limits: dict) -> None:
         error = overrides.last_error(values, node, index)
         events.append({"event": "override", "node": node, **({"index": index} if index is not None else {}),
                        **override, **({"last_error": error} if error else {})})
-    size = run.add_events(events) if events else None
+    with _holding_signals():
+        size = run.add_events(events) if events else None
+        try:
+            run.keep(new_limits, found)
+        except BaseException:
+            if size is not None:
+                run.take_back_events(size)
+            raise
+
+
+@contextlib.contextmanager
+def _holding_signals() -> Iterator[None]:
+    """Inside this block, Ctrl-C, SIGTERM and a lost terminal (SIGHUP) wait. Each takes effect when the block
+    ends, as it would have before, so the block never stops half done. Main thread only, as for every signal
+    handler. A handler that Python didn't set can't be put back, so its signal doesn't wait."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    held: list[int] = []
+    before = {signum: handler for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+              if (handler := signal.getsignal(signum)) is not None}
+    for signum in before:
+        signal.signal(signum, lambda signum, frame: held.append(signum))
     try:
-        run.keep(new_limits, found)
-    except OSError:
-        if size is not None:
-            run.take_back_events(size)
-        raise
+        yield
+    finally:
+        for signum, handler in before.items():
+            signal.signal(signum, handler)
+        for signum in held:
+            signal.raise_signal(signum)
 
 
 def _note_uncommitted(workflows: list[spec.Workflow], read_by_wf: list[Path]) -> None:

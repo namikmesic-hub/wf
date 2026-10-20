@@ -6,7 +6,10 @@ log. The tests that check whether a harness can run here use fake harnesses (fak
 """
 
 import json
+import shutil
+import signal
 import subprocess
+import tempfile
 from pathlib import Path
 from textwrap import dedent
 
@@ -560,6 +563,94 @@ def test_a_model_that_a_template_gives_the_failed_item_on_the_new_harness_is_che
     assert [spec.model for spec in cursor.specs] == ["grok", "grok"]
 
 
+def test_a_node_override_checks_only_the_items_that_run_again(repo, monkeypatch):
+    """Item 0 finished on opus, which Cursor doesn't have. Only item 1 runs again, so only its model is checked."""
+    claude = Fake("claude-code", submit({"summary": "a"}))
+    codex = Fake("codex", ends("failed", "overloaded"), ends("failed", "overloaded"))
+    cursor = Fake("cursor", submit({"summary": "b"}), models={"grok"})
+    for fake in (claude, codex, cursor):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    write("fan.yaml", """
+        version: 1
+        name: fan
+        defaults:
+          harness: claude-code
+          harnesses: {claude-code: {model: "{{ item.model }}"}, codex: {model: "{{ item.model }}"}, cursor: {model: "{{ item.model }}"}}
+        start: {input: {}}
+        nodes:
+          review:
+            needs: [start]
+            for_each: "[{'harness': 'claude-code', 'model': 'opus'}, {'harness': 'codex', 'model': 'grok'}]"
+            harness: "{{ item.harness }}"
+            instruction: Review the change
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "fan.yaml"]) == 1
+    assert cli.main(["retry", only_run().name, "--harness", "review=cursor"]) == 0
+    assert [spec.model for spec in claude.specs] == ["opus"]
+    assert [spec.model for spec in cursor.specs] == ["grok"]
+
+
+TAKEN = """
+version: 1
+name: fan
+defaults:
+  harness: claude-code
+  harnesses: {claude-code: {model: "{{ item.model }}"}, cursor: {model: "{{ item.model }}"}}
+start: {input: {}}
+nodes:
+  review:
+    needs: [start]
+    for_each: "[{'model': 'grok', 'branch': 'fm/free'}, {'model': 'opus', 'branch': 'fm/taken'}]"
+    workspace: new
+    branch: "{{ item.branch }}"
+    instruction: Review the change
+end: {output: {}}
+"""
+
+
+def git(*args: str) -> None:
+    subprocess.run(["git", *args], check=True, capture_output=True)
+
+
+def test_an_item_that_failed_before_it_had_a_workspace_has_its_model_checked(repo, monkeypatch, capsys):
+    """An item fails before it has a workspace when wf can't make one, as on a branch that the run didn't make.
+    The check still renders the model that the item's template gives it."""
+    claude = Fake("claude-code", submit({"summary": "a"}))
+    cursor = Fake("cursor", submit({"summary": "b"}), models={"grok"})
+    for fake in (claude, cursor):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    git("branch", "fm/taken")
+    write("fan.yaml", TAKEN)
+    assert cli.main(["run", "fan.yaml"]) == 1
+    assert json.loads((only_run() / "status.json").read_text())["error"].startswith("item 1: workspace: ")
+    before = record()
+    capsys.readouterr()
+    assert cli.main(["retry", only_run().name, "--harness", "review[1]=cursor"]) == 1  # its model is opus
+    assert "review[1]: cursor has no model `opus`" in capsys.readouterr().err
+    assert record() == before
+    git("branch", "-D", "fm/taken")
+    assert cli.main(["retry", only_run().name, "--harness", "review[1]=cursor", "--model", "review[1]=grok"]) == 0
+    assert [spec.model for spec in cursor.specs] == ["grok"]
+
+
+def test_a_setting_that_reads_a_workspace_the_item_doesnt_have_yet_must_be_given(repo, no_real_harness, capsys):
+    write("fan.yaml", TAKEN.replace('{claude-code: {model: "{{ item.model }}"}',
+                                    '{claude-code: {model: "{{ item.model }}", effort: "{{ workspace.review.branch }}"}'))
+    git("branch", "fm/taken")
+    steps = {"agents": {"review[0]": [{"summary": "a"}], "review[1]": [{"summary": "b"}]}}
+    assert cli.main(["run", "fan.yaml", "--dry-run", script(steps)]) == 1  # item 1 has no workspace
+    before = record()
+    capsys.readouterr()
+    assert cli.main(["retry", only_run().name, "--model", "review[1]=sonnet"]) == 1
+    assert ("item 1 of `review` has no workspace yet, so a template can't read it: give the setting with "
+            "--model review[1]=ID or --effort review[1]=LEVEL") in capsys.readouterr().err
+    assert record() == before
+    git("branch", "-D", "fm/taken")
+    assert cli.main(["retry", only_run().name, "--model", "review[1]=sonnet", "--effort", "review[1]=max"]) == 0
+    assert given(only_run() / "nodes" / "review" / "1" / "1" / "attempt-2.log") == ("claude-code", "sonnet", "max")
+
+
 def test_a_harness_template_that_reads_the_jobs_own_workspace_gives_its_harness(repo, no_real_harness):
     write("one.yaml", """
         version: 1
@@ -597,11 +688,34 @@ def test_no_folder_to_open_the_harnesses_in_changes_nothing(repo, monkeypatch, c
     def full_disk(*args, **options):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(overrides.tempfile, "TemporaryDirectory", full_disk)
+    monkeypatch.setattr(overrides.tempfile, "mkdtemp", full_disk)
     capsys.readouterr()
     assert cli.main(["retry", run_id, "--harness", "plan=codex"]) == 1
     assert "wf can't make a folder to open the harnesses in: No space left on device" in capsys.readouterr().err
     assert record() == before
+
+
+def test_a_check_folder_that_stays_changes_nothing(repo, monkeypatch, tmp_path_factory, capsys):
+    """The check leaves nothing behind, as a Codex log in its folder. When it can't remove its folder, it says so."""
+    codex = Fake("codex", models={"gpt-6"})
+    run_id = failed_run(monkeypatch, codex)
+    before = record()
+    temp = tmp_path_factory.mktemp("temp")
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    removed = shutil.rmtree
+
+    def stuck(path, *args, **options):
+        if Path(path).parent == temp:
+            raise PermissionError(13, "Permission denied")
+        removed(path, *args, **options)
+
+    monkeypatch.setattr(shutil, "rmtree", stuck)
+    capsys.readouterr()
+    assert cli.main(["retry", run_id, "--harness", "plan=codex"]) == 1
+    (folder,) = temp.iterdir()
+    assert f"wf can't remove {folder}, which the harness check made: Permission denied" in capsys.readouterr().err
+    assert record() == before
+    assert codex.opened == 1
 
 
 def test_an_override_never_applies_without_its_event(repo, no_real_harness, monkeypatch, capsys):
@@ -617,6 +731,24 @@ def test_an_override_never_applies_without_its_event(repo, no_real_harness, monk
     assert cli.main(["retry", only_run().name, "--model", "write=sonnet"]) == 1
     assert "can't keep the new settings in" in capsys.readouterr().err
     assert record() == before
+
+
+def test_ctrl_c_waits_until_an_override_and_its_event_are_both_kept(repo, no_real_harness, monkeypatch):
+    write("loop.yaml", LOOP)
+    assert cli.main(["run", "loop.yaml", "--dry-run", script({"agents": {"write": [{"_unavailable": "out"}, {"summary": "done"}]}})]) == 1
+    added = runs.Run.add_events
+
+    def interrupted(self, events):
+        size = added(self, events)
+        signal.raise_signal(signal.SIGINT)  # Ctrl-C between the two writes
+        return size
+
+    monkeypatch.setattr(runs.Run, "add_events", interrupted)
+    assert cli.main(["retry", only_run().name, "--model", "write=sonnet"]) == runner.STOPPED
+    assert [e["model"] for e in events("override")] == ["sonnet"]
+    assert json.loads((only_run() / "run.json").read_text())["overrides"]["write"]["model"] == "sonnet"
+    assert not (only_run() / "nodes" / "write" / "1" / "attempt-2.log").exists()  # wf stopped before the run went on
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
 
 
 def test_a_detached_retry_hands_the_override_to_its_background_process(repo, capsys):

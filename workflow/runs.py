@@ -263,7 +263,7 @@ class Run:
         try:
             with path.open("a", encoding="utf-8") as file:
                 file.write(lines)
-        except OSError:
+        except BaseException:
             self.take_back_events(size)
             raise
         return size
