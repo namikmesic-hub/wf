@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from claude_agent_sdk import ResultMessage, UserMessage
 from fake_claude import FakeClaude
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, runner, schemas
@@ -288,3 +289,67 @@ end:
     assert "periwinkle" not in out["kept_out"].lower()  # and not one with the field off, whose instruction still did
     log = [json.loads(line) for line in (folder / "nodes" / "kept_out" / "1" / "attempt-1.log").read_text().splitlines()]
     assert not any(e["kind"] == "tool" and "CLAUDE.md" in json.dumps(e["input"]) for e in log)  # it didn't read the file either
+
+
+class _Stream:
+    """A client whose messages come from a queue the test fills, and whose writes can fail later."""
+
+    def __init__(self, session, fail_after: float | None = None):
+        self.session, self.fail_after, self.out = session, fail_after, asyncio.Queue()
+
+    async def query(self, prompt):
+        async for message in prompt:
+            if self.fail_after is not None:
+                await asyncio.sleep(self.fail_after)
+                raise OSError("Claude Code is gone")
+
+    async def receive_messages(self):
+        while True:
+            yield await self.out.get()
+
+
+def _result():
+    return ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1, session_id="s")
+
+
+def test_a_message_claude_code_reads_during_its_write_is_recorded_once_as_delivered(tmp_path):
+    events = []
+    session = ClaudeSession(spec(tmp_path))
+    session.spec.emit = events.append
+    session._working = session._repeats = True
+    stream = session._client = _Stream(session)
+
+    async def read_at_once(prompt):  # Claude Code reads it, and says so, before the write returns
+        async for message in prompt:
+            stream.out.put_nowait(UserMessage(content="Stop", uuid=message["uuid"]))
+            await asyncio.sleep(0.05)
+
+    stream.query = read_at_once
+
+    async def drive():
+        reading = asyncio.get_running_loop().create_task(session._read("the prompt"))
+        status = await session.steer("Stop", "id-1")
+        stream.out.put_nowait(_result())
+        await asyncio.wait_for(reading, 2)
+        return status
+
+    assert asyncio.run(drive()) == "delivered"
+    assert events == [] and session._held == []  # steer.py records it once, from the answer
+
+
+def test_a_write_that_fails_after_the_turns_result_doesnt_leave_the_turn_waiting(tmp_path):
+    session = ClaudeSession(spec(tmp_path))
+    session._working = session._repeats = True
+    session._client = _Stream(session, fail_after=0.2)
+
+    async def drive():
+        writing = asyncio.get_running_loop().create_task(session.steer("Stop", "id-1"))
+        await asyncio.sleep(0.05)  # the write is under way when the turn's result comes
+        session._client.out.put_nowait(_result())
+        status = await asyncio.wait_for(session._read("the prompt"), 2)
+        with pytest.raises(OSError):
+            await writing
+        return status
+
+    assert asyncio.run(drive()) == ("done", "")
+    assert session._held == []

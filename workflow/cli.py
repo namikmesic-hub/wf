@@ -445,13 +445,15 @@ def _message(args) -> str:
     """wf steer's message: the argument, or what --file holds. Raises ValueError."""
     if (args.message is None) == (args.file is None):
         raise ValueError("give the message, or --file, but not both")
+    most = steer.MAX_CHARACTERS + 1  # enough to tell that it's too long
     if args.file is None:
         text = args.message
     elif str(args.file) == "-":
-        text = sys.stdin.read()
+        text = sys.stdin.read(most)
     else:
         try:
-            text = args.file.read_text(encoding="utf-8")
+            with args.file.open(encoding="utf-8") as file:
+                text = file.read(most)
         except OSError as error:
             raise ValueError(f"can't read {args.file}: {error.strerror or error}") from error
         except UnicodeDecodeError as error:

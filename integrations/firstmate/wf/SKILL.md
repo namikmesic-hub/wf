@@ -140,7 +140,7 @@ wf steer <run-id> <node> --item <index> --file <message.md>
   Cursor gets it as its next turn, when its turn ends.
   A turn often ends only when the agent submits its result, and then the message is dropped.
   A `steer` event in `events.jsonl` says when the message was delivered, or why it was dropped.
-  For Codex, `queued` means that Codex didn't answer, and the event says `unconfirmed`.
+  An `unconfirmed` event means that the harness may have the message, but wf can't tell whether the agent read it.
 
 no live session
 : Exit code 1, and nothing was sent.

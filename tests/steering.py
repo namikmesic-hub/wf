@@ -64,5 +64,5 @@ def steer_lines(node: str = "ask", attempt: int = 1) -> list[dict]:
 
 def left_in_mailbox() -> list[str]:
     """Files left in the run's mailbox (steer.mailbox): none, once every message has its answer."""
-    folder = workspaces.mailbox(run_folder().name)
+    folder = workspaces.mailbox(run_folder())
     return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []

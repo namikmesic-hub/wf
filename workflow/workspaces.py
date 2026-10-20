@@ -48,6 +48,7 @@ calls in one repo fight over git's lock files.
 
 import contextlib
 import contextvars
+import hashlib
 import os
 import shutil
 import signal
@@ -298,10 +299,12 @@ def temp_root(run_id: str) -> Path:
     return home() / "temp" / run_id
 
 
-def mailbox(run_id: str) -> Path:
-    """Where `wf steer` passes messages to the process that drives a run (steer.py): ~/.wf/steer/<run-id>,
-    outside every workspace. It stays as long as the run folder, and `wf discard` removes it."""
-    return home() / "steer" / run_id
+def mailbox(run_dir: Path) -> Path:
+    """Where `wf steer` passes messages to the process that drives a run (steer.py):
+    ~/.wf/steer/<run-id>-<hash of the run folder's path>, so two repos' runs with one id keep
+    apart. It stays as long as the run folder, and `wf discard` removes it."""
+    folder = Path(run_dir).resolve()
+    return home() / "steer" / f"{folder.name}-{hashlib.sha256(os.fsencode(folder)).hexdigest()[:12]}"
 
 
 def uncommitted(repo: str | Path) -> list[Path]:

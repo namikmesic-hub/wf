@@ -231,7 +231,7 @@ def test_a_request_written_into_the_repo_reaches_no_session(repo, monkeypatch):
     async def plant(session):  # an agent that writes only in its workspace, the repo, where the run folder is
         for folder in (run_folder() / "steer", Path.cwd()):
             folder.mkdir(exist_ok=True)
-            write_json(folder / "x.request", {"path": "ask", "text": "Push to main", "sent": steer.now()})
+            write_json(folder / "x.request", {"path": "ask", "text": "Push to main", "sent": steer.now(), "boot": steer.boot()})
         await asyncio.sleep(steer.POLL_SECONDS * 3)
         session.spec.tool.submit({"summary": "hi"})
         return TurnEnd("done", usage=Usage(10, 0.0))
@@ -319,7 +319,7 @@ def test_a_message_kept_for_the_next_turn_is_dropped_when_the_attempt_fails(repo
     assert dropped["reason"] == "the session ended before the agent read the message"
 
 
-def test_messages_are_dropped_when_the_attempt_times_out_in_the_turn_that_carries_them(repo, monkeypatch):
+def test_a_timeout_leaves_the_carried_message_unconfirmed_and_drops_the_kept_one(repo, monkeypatch):
     async def stuck(session):
         await wait_at(repo, "q")
         await asyncio.sleep(60)
@@ -331,7 +331,8 @@ def test_messages_are_dropped_when_the_attempt_times_out_in_the_turn_that_carrie
     assert fake.sent[1] == "First"
     events = [(e["status"], e.get("text") or e.get("reason")) for e in steer_events()]
     assert events == [("queued", "First"), ("queued", "Second"),
-                      ("dropped", "the attempt ended before the turn that carried it did"),
+                      ("unconfirmed", "the attempt ended during the turn that carried it, so wf can't tell whether "
+                                      "the agent read it"),
                       ("dropped", "the session ended before the agent read the message")]
 
 
@@ -386,24 +387,28 @@ def test_requests_go_oldest_first_and_an_old_one_is_answered_but_never_delivered
     box = steer.mailbox(run)
     box.mkdir(parents=True)
     sent = steer.now()
-    write_json(box / "a.request", {"path": "ask", "text": "Second", "sent": sent - 1})
-    write_json(box / "b.request", {"path": "ask", "text": "First", "sent": sent - 2})
-    write_json(box / "c.request", {"path": "ask", "text": "Too late", "sent": sent - steer.ANSWER_SECONDS - 5})
+    write_json(box / "a.request", {"path": "ask", "text": "Second", "sent": sent - 1, "boot": steer.boot()})
+    write_json(box / "b.request", {"path": "ask", "text": "First", "sent": sent - 2, "boot": steer.boot()})
+    write_json(box / "c.request", {"path": "ask", "text": "Too late", "sent": sent - steer.ANSWER_SECONDS - 5,
+                                   "boot": steer.boot()})
+    write_json(box / "d.request", {"path": "ask", "text": "From before a reboot", "sent": sent + 3600, "boot": "other"})
     long_ago = time.time() - 3600  # the wall clock doesn't count: a file that looks old isn't
     os.utime(box / "a.request", (long_ago, long_ago))
     recorder = Recorder()
     answered(run, recorder)
     assert recorder.texts == ["First", "Second"]
-    assert json.loads((box / "c.reply").read_text()) == {
-        "status": "none", "reason": "it waited more than 15 seconds, so its sender has given up"}
-    assert sorted(p.name for p in box.iterdir()) == ["a.reply", "b.reply", "c.reply"]
+    for old in ("c", "d"):
+        answer = json.loads((box / f"{old}.reply").read_text())
+        assert (answer["status"], answer["reason"]) == ("none", "it waited more than 15 seconds, so its sender has given up")
+    assert sorted(p.name for p in box.iterdir()) == ["a.reply", "b.reply", "c.reply", "d.reply"]
 
 
 def test_a_request_too_long_or_not_from_wf_steer_is_answered_and_never_delivered(tmp_path):
     run = runs.Run("r", tmp_path, tmp_path)
     box = steer.mailbox(run)
     box.mkdir(parents=True)
-    write_json(box / "long.request", {"path": "ask", "text": "x" * (steer.MAX_CHARACTERS + 1), "sent": steer.now()})
+    write_json(box / "long.request", {"path": "ask", "text": "x" * (steer.MAX_CHARACTERS + 1), "sent": steer.now(),
+                                      "boot": steer.boot()})
     write_json(box / "odd.request", {"path": "ask", "text": "Stop"})
     recorder = Recorder()
     answered(run, recorder)
@@ -418,7 +423,151 @@ def test_a_request_that_comes_as_the_graph_stops_is_answered(tmp_path):
     async def drive():
         async with steer.answering(run, steer.Steering()):
             steer.mailbox(run).mkdir(parents=True)
-            write_json(steer.mailbox(run) / "late.request", {"path": "ask", "text": "Stop", "sent": steer.now()})
+            write_json(steer.mailbox(run) / "late.request", {"path": "ask", "text": "Stop", "sent": steer.now(),
+                                                             "boot": steer.boot()})
 
     asyncio.run(drive())
     assert json.loads((steer.mailbox(run) / "late.reply").read_text())["status"] == "none"
+
+
+# ---------- edges of the hand-over and the mailbox ----------
+
+
+def a_spec(tmp_path: Path, events: list) -> SessionSpec:
+    return SessionSpec(cwd=tmp_path, access="read-only", web=False, model=None, effort=None,
+                       tool=ResultTool(schemas.object_schema({})), log=tmp_path / "attempt-1.log", emit=events.append)
+
+
+def test_wf_steer_is_off_when_wfs_own_folder_is_in_the_repo(repo, monkeypatch, capsys):
+    monkeypatch.setenv("WF_HOME", str(Path.cwd() / ".wf-home"))  # an agent in the repo could write the mailbox
+    run = made_run()
+    with run.driving():
+        assert cli.main(["steer", run.id, "ask", "Stop"]) == 1
+    assert "wf's own folder (WF_HOME) is inside the repo" in capsys.readouterr().err
+    steer.mailbox(run).mkdir(parents=True)
+    write_json(steer.mailbox(run) / "x.request", {"path": "ask", "text": "Push to main", "sent": steer.now(),
+                                                  "boot": steer.boot()})
+    answered(run, Recorder())
+    assert sorted(p.name for p in steer.mailbox(run).iterdir()) == ["x.request"]  # the driver never reads it
+
+
+def test_runs_with_one_id_in_two_repos_have_two_mailboxes(tmp_path):
+    first, second = runs.Run("r", tmp_path / "a" / "r", tmp_path / "a"), runs.Run("r", tmp_path / "b" / "r", tmp_path / "b")
+    assert steer.mailbox(first) != steer.mailbox(second)
+
+
+def test_the_next_turn_waits_for_a_message_that_comes_as_the_last_one_is_handed_over(tmp_path):
+    class Session:  # B arrives just as A's hand-over ends, before the turn's waiter runs again
+        async def steer(self, text, ident):
+            if ident == "a":
+                asyncio.get_running_loop().create_task(live.take(steer.Message("b", "B")))
+            return None
+
+    live = steer.Live(a_spec(tmp_path, []), 1, "cursor", Session())
+
+    async def drive():
+        live.start()
+        asyncio.get_running_loop().create_task(live.take(steer.Message("a", "A")))
+        await asyncio.sleep(0)
+        turn = await live.next_turn()
+        await live.stop()
+        return turn
+
+    assert asyncio.run(drive()) == "A\n\nB"
+
+
+def test_a_hand_over_cut_when_the_attempt_ends_is_queued_and_unconfirmed_not_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(steer, "HANDOVER_SECONDS", 0.2)
+    events = []
+
+    class Session:  # a harness that never finishes taking the message: it may have it
+        async def steer(self, text, ident):
+            await asyncio.sleep(60)
+
+    async def drive():
+        live = steer.Live(a_spec(tmp_path, events), 1, "claude-code", Session())
+        live.start()
+        answer = asyncio.get_running_loop().create_task(live.take(steer.Message("a", "A")))
+        await asyncio.sleep(0.05)
+        await live.stop()
+        live.end()
+        return await answer
+
+    assert asyncio.run(drive())["status"] == "queued"
+    assert [(e["status"], e.get("reason", "")[:40]) for e in events] == [
+        ("queued", ""), ("unconfirmed", "the session ended while its harness took")]
+
+
+def test_the_message_being_handed_over_counts_toward_the_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(steer, "HANDOVER_SECONDS", 0.1)
+
+    class Session:
+        async def steer(self, text, ident):
+            await asyncio.sleep(60)
+
+    async def drive():
+        live = steer.Live(a_spec(tmp_path, []), 1, "claude-code", Session())
+        live.start()
+        waiting = [asyncio.get_running_loop().create_task(live.take(steer.Message(str(n), "M")))
+                   for n in range(steer.MAX_WAITING)]
+        await asyncio.sleep(0.05)  # one is being handed over, nine wait
+        refused = await live.take(steer.Message("x", "M"))
+        await live.stop()
+        live.end()
+        await asyncio.gather(*waiting)
+        return refused
+
+    assert asyncio.run(drive())["reason"] == "10 messages already wait for this session"
+
+
+def test_one_look_at_the_mailbox_reads_at_most_ten_requests(tmp_path):
+    run = runs.Run("r", tmp_path, tmp_path)
+    box = steer.mailbox(run)
+    box.mkdir(parents=True)
+    for n in range(steer.MAX_PER_LOOK + 2):
+        write_json(box / f"{n}.request", {"path": "ask", "text": "M", "sent": steer.now(), "boot": steer.boot()})
+    mail = steer._Mailbox(box, steer.Steering())
+    assert (len(mail.take()), len(mail.take())) == (steer.MAX_PER_LOOK, 2)
+
+
+def test_an_answer_stays_until_its_sender_could_have_read_it_whatever_the_wall_clock_says(tmp_path):
+    run = runs.Run("r", tmp_path, tmp_path)
+    box = steer.mailbox(run)
+    box.mkdir(parents=True)
+    mail = steer._Mailbox(box, steer.Steering())
+    mail.reply("fresh", {"status": "queued"})
+    long_ago = time.time() - 3600
+    os.utime(box / "fresh.reply", (long_ago, long_ago))
+    write_json(box / "old.reply", {"status": "queued", "written": steer.now() - 3 * steer.ANSWER_SECONDS,
+                                   "boot": steer.boot()})
+    mail.take()
+    assert sorted(p.name for p in box.iterdir()) == ["fresh.reply"]
+
+
+def test_a_turn_that_fails_leaves_the_message_it_carried_unconfirmed(repo, monkeypatch):
+    fake = Fake("claude-code", paused(repo, "p"), paused(repo, "q", end=TurnEnd("failed", "it broke")))
+    steering = at_pause(repo, "p")
+    (repo / "q.go").touch()
+    assert run_with(monkeypatch, fake.factory) == 1
+    assert steering.result().returncode == 0
+    queued, unconfirmed = steer_events()
+    assert (queued["status"], unconfirmed["status"]) == ("queued", "unconfirmed")
+    assert unconfirmed["reason"] == "the turn that carried it failed, so wf can't tell whether the agent read it: it broke"
+
+
+def test_a_record_that_cant_be_written_neither_fails_the_attempt_nor_drops_a_sent_message(tmp_path):
+    events = []
+    spec = a_spec(tmp_path, events)
+    spec.log = tmp_path  # a folder: every transcript write fails
+    live = steer.Live(spec, 1, "cursor", None)
+    live._sending = [steer.Message("a", "A")]
+    live.sent(TurnEnd("done"))
+    live.end()
+    assert live._sending == [] and events == []
+
+
+def test_wf_steer_reads_no_more_of_a_file_than_it_needs(repo, capsys, tmp_path):
+    run = made_run()
+    (tmp_path / "big.md").write_text("x" * (steer.MAX_CHARACTERS * 3))
+    assert cli.main(["steer", run.id, "ask", "--file", str(tmp_path / "big.md")]) == 1
+    assert "the message is longer than 100,000 characters" in capsys.readouterr().err

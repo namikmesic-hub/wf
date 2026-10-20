@@ -407,7 +407,7 @@ def discard(run: Run, branches: bool) -> dict[str, str]:
             r["branch"] == b and r.get("left") and r["left"] == workspaces.tip(repo, b) for r in records)]
         workspaces.remove_run(repo, run.id)
         shutil.rmtree(workspaces.temp_root(run.id), ignore_errors=True)
-        shutil.rmtree(workspaces.mailbox(run.id), ignore_errors=True)
+        shutil.rmtree(workspaces.mailbox(run.dir), ignore_errors=True)
         kept = {b: NOT_OURS for b in named if b not in ours and workspaces.branch_exists(repo, b)}
         if branches:  # git keeps a branch that's checked out somewhere: say so
             kept |= {b: f"git couldn't delete it ({why})" for b, why in workspaces.delete_branches(repo, run.id, ours).items()}

@@ -507,7 +507,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                         raise
                     except Exception as error:  # the SDK or the agent process broke
                         raise _AttemptFailed(f"{name}: {type(error).__name__}: {error}") from error
-                    live.sent()
+                    live.sent(end)
                     usage.add(end.usage)
                     spent.add(end.usage)
                     ctx.add_usage(end.usage)  # live, so limits apply before the next attempt

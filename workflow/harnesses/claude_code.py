@@ -235,6 +235,9 @@ class ClaudeSession:
         self._working = False  # is a send() in progress?
         self._repeats = False  # has Claude Code repeated a message it read (REPLAY)?
         self._held: list[str] = []  # ids of messages from wf steer that Claude Code hasn't read yet
+        self._writing: set[str] = set()  # ids of messages from wf steer being written now
+        self._written = asyncio.Event()  # no message from wf steer is being written
+        self._written.set()
 
     async def start(self) -> None:
         self._client = ClaudeSDKClient(options(self.spec))
@@ -253,12 +256,22 @@ class ClaudeSession:
         if not self._working or not self._repeats:
             return None
         self._held.append(ident)  # first: Claude Code can read it, and say so, before the write returns
+        self._writing.add(ident)
+        self._written.clear()
         try:
             await self._say(text, ident)
-        except BaseException:
-            self._held.remove(ident)
+        except BaseException as error:
+            if ident not in self._held:  # read already, so the write got through
+                if isinstance(error, Exception):
+                    return "delivered"
+            else:
+                self._held.remove(ident)
             raise
-        return "queued"
+        finally:
+            self._writing.discard(ident)
+            if not self._writing:
+                self._written.set()
+        return "queued" if ident in self._held else "delivered"  # read during the write: steer.py records it
 
     async def send(self, text: str) -> TurnEnd:
         transcript(self.spec.log, "sent", text=text)
@@ -295,7 +308,8 @@ class ClaudeSession:
                 self._repeats = True
             elif isinstance(item, UserMessage) and item.uuid in self._held:
                 self._held.remove(item.uuid)
-                steered(self.spec, item.uuid, "delivered")
+                if item.uuid not in self._writing:  # else steer() says it was delivered, and steer.py records that
+                    steered(self.spec, item.uuid, "delivered")
             elif isinstance(item, AssistantMessage):
                 if item.usage and item.message_id not in self._seen:  # several messages can share one response
                     self._seen.add(item.message_id)
@@ -338,6 +352,8 @@ class ClaudeSession:
                 if item.is_error and status == "done":
                     reason = item.result or ", ".join(item.errors or []) or item.subtype
                     status, message = ("unavailable" if _login_problem(item) else "failed"), f"Claude Code: {reason}"
+                while self._writing:  # whether a message being written gets a turn of its own depends on the write
+                    await self._written.wait()
                 if not self._held or status != "done" or submitted:
                     break
                 # a message from wf steer came after the agent's last step: its own turn follows
