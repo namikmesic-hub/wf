@@ -18,7 +18,7 @@ from textwrap import dedent, indent
 import pytest
 
 from fakes import Fake, ends, submit
-from workflow import cli, firstmate, harnesses, nodes, operate, output_tool, progress, report, runner, runs, scheduler, shape, spec, state, trace_view, ui, validate, workspaces
+from workflow import cli, diagram, firstmate, harnesses, nodes, operate, output_tool, progress, report, runner, runs, scheduler, shape, spec, state, trace_view, ui, validate, workspaces
 from workflow.context import RunContext
 
 
@@ -474,9 +474,9 @@ def test_the_request_can_come_from_stdin(repo, monkeypatch, capsys):
 # ---------- a workflow without follow_up ----------
 
 
-def targets(nodes_yaml: str, top: str = "") -> tuple[str, ...]:
+def editing(nodes_yaml: str, top: str = "") -> spec.Workflow:
     text = f"version: 1\nname: edits\nstart: {{input: {{}}}}\n{top}nodes:\n{indent(dedent(nodes_yaml).strip(), '  ')}\nend: {{output: {{}}}}\n"
-    return shape.follow_up_targets(spec.parse(text))
+    return spec.parse(text)
 
 
 @pytest.mark.parametrize("nodes_yaml, top, found", [
@@ -486,11 +486,16 @@ def targets(nodes_yaml: str, top: str = "") -> tuple[str, ...]:
      test: {needs: [plan], command: "true"}
      merge: {needs: [test], instruction: merge, access: full}
      """, "", ("merge",)),
-    # The access that `defaults` gives counts
+    # The access that `defaults` gives counts, for agent nodes only
     ("""
      plan: {needs: [start], instruction: plan}
      build: {needs: [plan], instruction: build}
      """, "defaults: {access: edit}\n", ("plan",)),
+    ("""
+     test: {needs: [start], command: "true"}
+     ask: {needs: [test], human: "ok?", output: {ok: {type: boolean}}}
+     implement: {needs: [ask], instruction: implement}
+     """, "defaults: {access: edit}\n", ("implement",)),
     # Of two nodes at the same step, the first in the file takes it
     ("""
      plan: {needs: [start], instruction: plan}
@@ -524,6 +529,19 @@ def targets(nodes_yaml: str, top: str = "") -> tuple[str, ...]:
      plan: {needs: [start], instruction: plan}
      test: {needs: [plan], command: "true"}
      """, "", ()),
+    # A node that start doesn't lead to, in a file that validate refuses, doesn't take it
+    ("""
+     orphan: {instruction: work, access: edit}
+     work: {needs: [start], instruction: work, access: edit}
+     """, "", ("work",)),
+    # Nor does any node of a file with a node named `start`
+    ("""
+     start: {instruction: work, access: edit}
+     """, "", ()),
+    ("""
+     a: {needs: [start], instruction: a, access: edit}
+     start: {needs: [a], command: x}
+     """, "", ()),
     # `follow_up` wins
     ("""
      plan: {needs: [start], instruction: plan}
@@ -531,7 +549,45 @@ def targets(nodes_yaml: str, top: str = "") -> tuple[str, ...]:
      """, "follow_up: {to: plan}\n", ("plan",)),
 ])
 def test_without_follow_up_the_first_agent_that_can_change_files_takes_the_request(nodes_yaml, top, found):
-    assert targets(nodes_yaml, top) == found
+    workflow = editing(nodes_yaml, top)
+    assert shape.follow_up_targets(workflow) == found
+    if not found:
+        assert "wf_follow_up" not in diagram.mermaid(workflow)
+
+
+def test_the_node_that_takes_a_request_is_found_in_a_workflow_longer_than_the_limit_on_recursion():
+    count = sys.getrecursionlimit() + 100
+    chain = "".join(f"c{i}: {{needs: [{f'c{i - 1}' if i else 'start'}], command: 'true'}}\n" for i in range(count))
+    workflow = editing(chain + f"edit: {{needs: [c{count - 1}], instruction: x, access: edit}}\n")
+    assert shape.follow_up_targets(workflow) == ("edit",)
+    assert "  wf_follow_up -.-> n_edit\n" in diagram.mermaid(workflow)
+
+
+@pytest.mark.parametrize("nodes_yaml, error", [
+    ("start: {instruction: work, access: edit}", "nodes.start: `start` is a reserved name"),
+    ("a: {needs: [start], instruction: a, access: edit}\nstart: {needs: [a], command: x}", "nodes.start: `start` is a reserved name"),
+])
+def test_validate_reports_a_node_named_start_with_an_agent_that_changes_files(repo, nodes_yaml, error):
+    write("bad.yaml", f"version: 1\nname: bad\nstart: {{input: {{}}}}\nnodes:\n{indent(nodes_yaml, '  ')}\nend: {{output: {{}}}}\n")
+    report = validate.check("bad.yaml")
+    assert any(str(p) == f"bad.yaml: {error}" for p in report.errors) and report.notes == []
+
+
+def test_the_request_goes_to_the_first_of_those_agents_that_the_run_ran():
+    workflow = editing("""
+        classify:
+          needs: [start]
+          command: "true"
+          routes: [{when: "classify.exit_code == 0", to: bugfix}, {to: feature}]
+        bugfix: {instruction: fix, access: edit}
+        feature: {instruction: build, access: edit}
+        polish: {needs: [bugfix, feature], instruction: polish, access: edit}
+    """)
+    assert shape.follow_up_candidates(workflow) == ("bugfix", "feature", "polish")
+    assert shape.follow_up_targets(workflow, ran={"classify": 1, "feature": 1, "polish": 1}) == ("feature",)
+    assert shape.follow_up_targets(workflow, ran={"classify": 1, "bugfix": 1, "polish": 1}) == ("bugfix",)
+    assert shape.follow_up_targets(workflow, ran={"classify": 1}) == ("bugfix",)  # it ran none of them
+    assert shape.follow_up_targets(workflow) == ("bugfix",)
 
 
 PLAIN = """
@@ -573,7 +629,8 @@ def test_a_follow_up_goes_to_the_first_agent_that_can_change_files_with_the_requ
     assert given["to"] == ["implement"]
     # The first pass in the follow-up finds the request in a section of its own, and a later pass doesn't
     first, later = fake.sent[3:]
-    assert first == "\n\n".join(["Build the plan", nodes.FOLLOW_UP, "add a flag", nodes.DONT_COMMIT, output_tool.FINISH])
+    assert first == "\n\n".join(["Build the plan", nodes.FOLLOW_UP, nodes.AFTER_A_PASS, "add a flag", nodes.DONT_COMMIT,
+                                  output_tool.FINISH])
     assert later == "\n\n".join(["Build the plan", nodes.DONT_COMMIT, output_tool.FINISH])
     assert (run.dir / "nodes" / "implement" / "3" / "instruction.md").read_text() == first
     assert sorted(p.name for p in (run.dir / "nodes" / "plan").iterdir()) == ["1"]
@@ -582,6 +639,77 @@ def test_a_follow_up_goes_to_the_first_agent_that_can_change_files_with_the_requ
     assert cli.main(["continue", run.id, "and a test"]) == 0
     assert [text.count("## Follow-up request") for text in fake.sent[5:]] == [1, 1, 0]
     assert "and a test" in fake.sent[5] and "add a flag" not in fake.sent[5]
+
+
+def test_a_follow_up_keeps_the_outputs_before_its_node_also_of_a_node_that_a_loop_leads_back_to(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 5)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("loop.yaml", """
+        version: 1
+        name: loop
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {}}
+        nodes:
+          plan: {needs: [start], command: "echo planned $(ls nodes 2>/dev/null | wc -l)"}
+          implement: {needs: [plan], access: edit, instruction: "Build {{ plan.stdout | trim }}"}
+          check:
+            needs: [implement]
+            command: "true"
+            routes: [{to: plan, max: 1}, {to: end}]
+        end: {output: {}}
+    """)
+    assert validate.check("loop.yaml").problems == []
+    assert cli.main(["run", "loop.yaml"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    # implement reads what plan gave last, as on a pass of the run from implement, and plan runs again in the loop
+    first, later = fake.sent[2:]
+    assert first.startswith(f"Build planned 0\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag\n\n")
+    assert later.startswith("Build planned 0\n\nWhen you're done")
+    assert sorted(p.name for p in (run.dir / "nodes" / "plan").iterdir()) == ["1", "2", "3"]
+
+
+def test_a_follow_up_goes_to_the_agent_that_the_run_ran_and_says_when_it_never_ran(repo, monkeypatch, capsys):
+    fake = Fake("claude-code", *[submit({"summary": f"pass {n}"}) for n in range(1, 4)])
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    write("branch.yaml", """
+        version: 1
+        name: branch
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {kind: {type: string}}}
+        nodes:
+          classify:
+            needs: [start]
+            command: "echo {{ start.kind | quote }}"
+            routes: [{when: "classify.stdout | trim == 'bug'", to: bugfix}, {to: feature}]
+          bugfix: {access: edit, instruction: Fix the bug}
+          feature: {access: edit, instruction: Build the feature}
+        end: {output: {}}
+    """)
+    assert validate.check("branch.yaml").notes == [
+        "`wf continue` sends a follow-up request to the first of these agent nodes with `edit` or `full` access "
+        "that the run ran, or else to `bugfix`: `bugfix`, `feature`. `follow_up: {to: <node>}` names another node"]
+    assert cli.main(["run", "branch.yaml", "kind=feature"]) == 0
+    run = only_run()
+    assert cli.main(["continue", run.id, "add a flag"]) == 0
+    (given,) = [e for e in events(run) if e["event"] == "follow_up"]
+    assert given["to"] == ["feature"]
+    assert fake.sent[1].startswith(f"Build the feature\n\n{nodes.FOLLOW_UP}\n\n{nodes.AFTER_A_PASS}\n\nadd a flag")
+    # A run that ran none of the agents that change files sends the request to the first of them
+    write("tests.yaml", """
+        version: 1
+        name: tests
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {}}
+        nodes:
+          tests: {needs: [start], command: "true", check: false, routes: [{when: "tests.exit_code != 0", to: fix}, {to: end}]}
+          fix: {access: edit, instruction: "Fix {{ tests.stdout }}"}
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "tests.yaml"]) == 0
+    (other,) = [r for r in runs.all_runs(Path.cwd()) if r.id != run.id]
+    assert cli.main(["continue", other.id, "add a test"]) == 0
+    assert fake.sent[2].startswith(f"Fix\n\n{nodes.FOLLOW_UP}\n\n{nodes.FIRST_PASS}\n\nadd a test\n\n")
 
 
 def test_an_instruction_that_reads_follow_up_itself_is_left_as_it_is(repo, monkeypatch, capsys):
@@ -620,7 +748,7 @@ def test_validate_says_where_a_follow_up_goes_and_doesnt_warn(repo, capsys):
     assert validate.check("plain.yaml").problems == []
     assert cli.main(["validate", "plain.yaml"]) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "plain.yaml: note: `wf continue` sends a follow-up request to `implement`, the first agent node with `edit` "
+        "plain.yaml: note: `wf continue` sends a follow-up request to `implement`, the agent node with `edit` "
         "or `full` access. `follow_up: {to: <node>}` names another node",
         "plain.yaml: valid",
     ]
@@ -1207,7 +1335,7 @@ def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
     assert (taken["taken"], taken["sessions"]["a"]["streak"], taken["history"]) == ({}, 0, {"a": [{}, {}]})
     assert taken["sessions"]["sub"] == {"sessions": {"inner": {**saved["sessions"]["sub"]["sessions"]["inner"], "streak": 0}}}
     assert (taken["status"], taken["output"]) == ("running", None)
-    assert taken["follow_up"] == {"request": "more", "number": 1, "limits": {},
+    assert taken["follow_up"] == {"request": "more", "number": 1, "limits": {}, "to": ["a", "b"],
                                   "from": {"cost_usd": 1.5, "tokens": 300, "elapsed_s": 42.0}}
     assert events == [{"event": "follow_up", "number": 1, "to": ["a", "b"]}]
     assert progress.vars()["follow_up"] == {"request": "more", "number": 1}

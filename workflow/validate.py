@@ -79,9 +79,15 @@ def _notes(workflow: Workflow) -> list[str]:
     """Where `wf continue` sends a follow-up request, for a workflow without `follow_up`."""
     if workflow.follow_up is not None:
         return []
-    if targets := shape.follow_up_targets(workflow):
-        return [f"`wf continue` sends a follow-up request to `{targets[0]}`, the first agent node with `edit` or "
-                "`full` access. `follow_up: {to: <node>}` names another node"]
+    candidates = shape.follow_up_candidates(workflow)
+    if len(candidates) == 1:
+        return [f"`wf continue` sends a follow-up request to `{candidates[0]}`, the agent node with `edit` or `full` "
+                "access. `follow_up: {to: <node>}` names another node"]
+    if candidates:
+        listed = ", ".join(f"`{node}`" for node in candidates)
+        return [f"`wf continue` sends a follow-up request to the first of these agent nodes with `edit` or `full` "
+                f"access that the run ran, or else to `{candidates[0]}`: {listed}. `follow_up: {{to: <node>}}` names "
+                "another node"]
     return ["`wf continue` refuses the runs of this workflow, because it has no agent node with `edit` or `full` "
             "access. `follow_up: {to: <node>}` names a node that takes a follow-up request"]
 

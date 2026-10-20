@@ -42,9 +42,10 @@ the harness or model differs from the last pass, the fork fails, or the two
 passes before it both continued.
 
 In a follow-up (`wf continue`) of a workflow without `follow_up`, the node
-that takes the request by default (shape.follow_up_targets) finds it in a
-section of its own after its instruction, on its first pass in the follow-up.
-An instruction that reads `follow_up` itself gets no such section.
+that takes the request (shape.follow_up_targets) finds it in a section of its
+own after its instruction, on its first pass in the follow-up. The section
+says whether an earlier pass of the node did the task. An instruction that
+reads `follow_up` itself gets no such section (state.Progress._adds_request).
 
 An agent session tells events.jsonl what its attempt has used so far, in an
 `agent_usage` event, when that changed. It looks after each turn, and when the
@@ -117,7 +118,7 @@ from typing import Any
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
-from . import capacity, dryrun, output_tool, overrides, schemas, shape, templates, workspaces
+from . import capacity, dryrun, output_tool, overrides, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
 from .harnesses import SessionSpec, StartFailed, Unavailable, Usage, reaches_keychain
@@ -416,7 +417,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     node_id, wf = job["node"], ctx.workflow
     commits = _runner_commits(ctx, node_id, workspace)
     note = [DONT_COMMIT] if commits and wf.setting(node_id, "access") == "edit" else []
-    request = _follow_up_request(ctx, node_id, variables)
+    request = _follow_up_request(job, variables)
     continuing = wf.setting(node_id, "session") == "continue" and job["index"] is None  # items always start fresh
     previous = job.get("session")  # the last pass's session, for session: continue
 
@@ -603,21 +604,18 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
 
 DONT_COMMIT = "Don't commit: the runner commits your changes when you're done."
-FOLLOW_UP = ("## Follow-up request\n\n"
-             "An earlier pass of this step did the task above. Now do this request for more work on that result:")
+FOLLOW_UP = "## Follow-up request"
+AFTER_A_PASS = "An earlier pass of this step did the task above. Now do this request for more work on that result:"
+FIRST_PASS = "This step didn't run before in this run. Do the task above, and this request with it:"
 
 
-def _follow_up_request(ctx: RunContext, node_id: str, variables: dict) -> list[str]:
-    """The follow-up request as a section of the instruction, on the first pass in a follow-up of the node that
-    takes the request by default: the workflow has no `follow_up`, and the instruction doesn't read it itself."""
-    wf, given = ctx.workflow, variables.get("follow_up")
-    if given is None or variables.get(node_id) is not None or wf.follow_up is not None:
-        return []  # no follow-up, a later pass of the node in it, or a workflow that brings the request in itself
-    if node_id not in shape.follow_up_targets(wf, ctx.topo):
+def _follow_up_request(job: Job, variables: dict) -> list[str]:
+    """The follow-up request as a section of the instruction, when the job's pass gets it (Progress._adds_request).
+    It says whether an earlier pass of the node did the task."""
+    if not job.get("follow_up_section"):
         return []
-    if any(ref.name == "follow_up" for ref in templates.references(wf.nodes[node_id].instruction)):
-        return []
-    return [f"{FOLLOW_UP}\n\n{given['request']}"]
+    intro = AFTER_A_PASS if variables["history"].get(job["node"]) else FIRST_PASS
+    return [f"{FOLLOW_UP}\n\n{intro}\n\n{variables['follow_up']['request']}"]
 
 
 def _in_run(ctx: RunContext, path: Path) -> str:

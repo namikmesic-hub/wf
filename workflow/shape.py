@@ -4,15 +4,17 @@ progress.py uses it to say how far a run is, and diagram.layout() to put the
 boxes of `wf ui` in rows. Nothing here reads a run.
 
 follow_up_targets() says where `wf continue` sends a follow-up request. A
-workflow without `follow_up` sends it to the agent node with `edit` or `full`
-access at the earliest step. Of two such nodes at the same step, the first in
-the file takes it.
+workflow without `follow_up` sends it to one of its agent nodes with `edit` or
+`full` access that start leads to (follow_up_candidates). They go in the order
+of their steps, and in file order at a step. The request goes to the first of
+them that the run ran, or else to the first of them.
 
 A walk from start, depth first and in file order, finds the route edges that
-go back. Each of them closes a loop. Without them the graph has no cycles. A
-node's step is the number of nodes on the longest path from start to it. The
-straight path is the longest path from start to end, and its length is the
-number of steps.
+go back. Each of them closes a loop. Without them the graph has no cycles. The
+walk keeps its own stack, so a long workflow doesn't reach the limit of Python
+on recursion. A node's step is the number of nodes on the longest path from
+start to it. The straight path is the longest path from start to end, and its
+length is the number of steps.
 
 A loop repeats the nodes on the paths from the node it goes back to (`first`)
 to the node whose route goes back (`last`). It can go back as many times as
@@ -20,6 +22,7 @@ the `max` of that route. When that route has no `max`, the smallest `max` of
 another route inside the loop bounds it: validate puts a `max` on each loop.
 """
 
+from collections.abc import Container
 from dataclasses import dataclass
 
 from .scheduler import END, START, Topology
@@ -45,22 +48,29 @@ class Shape:
         state: dict[str, int] = {}  # 1 while the walk is inside the node, 2 once it left it
         finished: list[str] = []
 
-        def visit(node: str) -> None:
-            state[node] = 1
-            for index, target in _out(topo, node):
-                if target == END:
-                    self.edges.append((node, END, "route", index))
-                elif state.get(target) == 1:
-                    back.append((node, index, target))
-                    self.edges.append((node, target, "loop", index))
+        def visit(root: str) -> None:
+            state[root] = 1
+            stack = [(root, iter(_out(topo, root)))]  # each node that the walk is inside, with its edges still to walk
+            while stack:
+                node, edges = stack[-1]
+                for index, target in edges:
+                    if target == END:
+                        self.edges.append((node, END, "route", index))
+                    elif state.get(target) == 1:
+                        back.append((node, index, target))
+                        self.edges.append((node, target, "loop", index))
+                    else:
+                        self.edges.append((node, target, "needs" if index is None else "route", index))
+                        if target not in self.forward[node]:
+                            self.forward[node].append(target)
+                        if target not in state:
+                            state[target] = 1
+                            stack.append((target, iter(_out(topo, target))))
+                            break
                 else:
-                    self.edges.append((node, target, "needs" if index is None else "route", index))
-                    if target not in self.forward[node]:
-                        self.forward[node].append(target)
-                    if target not in state:
-                        visit(target)
-            state[node] = 2
-            finished.append(node)
+                    state[node] = 2
+                    finished.append(node)
+                    stack.pop()
 
         for node in (START, *topo.order):  # validate makes each node reachable from start: the others guard a damaged copy
             if node not in state:
@@ -118,17 +128,29 @@ class Shape:
         return Loop(first, last, index, most, body)
 
 
-def follow_up_targets(workflow: Workflow, topo: Topology | None = None) -> tuple[str, ...]:
-    """The nodes where `wf continue` sends a follow-up request: those that `follow_up` names, or else the agent
-    node with `edit` or `full` access at the earliest step. Empty when the workflow has neither."""
+def follow_up_targets(workflow: Workflow, topo: Topology | None = None, ran: Container[str] = ()) -> tuple[str, ...]:
+    """The nodes where `wf continue` sends a follow-up request: those that `follow_up` names, or else the first
+    of follow_up_candidates() that the run ran (`ran`, such as its passes), or else the first of them. Empty
+    when the workflow has neither."""
     if workflow.follow_up is not None:
         return workflow.follow_up.targets
-    editors = [node_id for node_id, node in workflow.nodes.items()
-               if node.kind == "agent" and workflow.setting(node_id, "access") in ("edit", "full")]
+    candidates = follow_up_candidates(workflow, topo)
+    return next(((node,) for node in candidates if node in ran), candidates[:1])
+
+
+def follow_up_candidates(workflow: Workflow, topo: Topology | None = None) -> tuple[str, ...]:
+    """The agent nodes with `edit` or `full` access that start leads to, by their steps, and in file order at a
+    step. In a workflow without `follow_up`, one of them takes a follow-up request."""
+    if START in workflow.nodes or END in workflow.nodes:
+        return ()  # validate refuses a node with such a name, and the file has no steps
+    topo = topo or Topology.of(workflow)
+    reached = topo.reachable([START])
+    editors = [node_id for node_id, node in workflow.nodes.items() if node_id in reached and node.kind == "agent"
+               and workflow.setting(node_id, "access") in ("edit", "full")]
     if not editors:
         return ()
     step = Shape(workflow, topo).step
-    return (min(editors, key=step.__getitem__),)  # the first in the file of those at the earliest step
+    return tuple(sorted(editors, key=step.__getitem__))  # a stable sort keeps the file order at a step
 
 
 def _out(topo: Topology, node: str) -> list[tuple[int | None, str]]:

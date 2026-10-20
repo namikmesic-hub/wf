@@ -726,7 +726,7 @@ def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: s
         print(f"{name}: {problem}", file=sys.stderr)
         return 1
     home = _run_home(run, state)
-    if problem := _repo_problem(run, workflow, home) or _signing_problem(workflows, home):
+    if problem := _repo_problem(run, workflow, home, state.values or {}) or _signing_problem(workflows, home):
         print(f"{name}: {problem}", file=sys.stderr)
         return 1
     try:
@@ -785,11 +785,12 @@ def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapsho
     return None
 
 
-def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict) -> str | None:
+def _repo_problem(run: runs.Run, workflow: spec.Workflow, home: dict, values: dict) -> str | None:
     """Why the follow-up can't work in the run's `repo` workspace, or None. It can't when a node that the
-    follow-up can reach works there, and that checkout is now on another branch than the run's."""
-    kinds = set()
-    for node in scheduler.Topology.of(workflow).reachable(shape.follow_up_targets(workflow)):
+    follow-up can reach works there, and that checkout is now on another branch than the run's. `values` is
+    the state of the run, whose passes say where a workflow without `follow_up` sends the request."""
+    kinds, topo = set(), scheduler.Topology.of(workflow)
+    for node in topo.reachable(shape.follow_up_targets(workflow, topo, values.get("passes") or {})):
         seen = set()
         while workflow.setting(node, "workspace") in workflow.nodes and node not in seen:
             seen.add(node)

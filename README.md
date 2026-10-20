@@ -58,7 +58,8 @@ wf retry <run-id> --harness 'review[2]=claude-code' --model 'review[2]=claude-op
 
 `wf continue <run-id> "<request>"` gives a run that succeeded a follow-up request.
 The run goes on from the node that its workflow's `follow_up` names, on the same branches and agent sessions.
-Without `follow_up`, the first agent node with `edit` or `full` access takes the request, and wf adds it to the instruction of that node.
+Without `follow_up`, the first agent node with `edit` or `full` access that the run ran takes the request.
+Then wf adds the request to the instruction of that node.
 Its routes count from zero again, and `--limit` gives it a budget of its own.
 
 Steps that read Slack, Granola, Linear, Notion or Gmail list them in `tools`.
