@@ -1,0 +1,722 @@
+{
+  "uid": "wf-runs",
+  "title": "wf runs",
+  "tags": [
+    "wf"
+  ],
+  "editable": true,
+  "timezone": "browser",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "workflow",
+        "label": "Workflow",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "clickhouse"
+        },
+        "query": {
+          "refId": "workflow",
+          "queryType": "sql",
+          "rawSql": "SELECT DISTINCT workflow FROM wf.runs ORDER BY workflow"
+        },
+        "definition": "SELECT DISTINCT workflow FROM wf.runs ORDER BY workflow",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "piechart",
+      "title": "Runs by state",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "succeeded"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "running"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "waiting"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "limit"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stopped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "values": true,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "value"
+        ],
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "pluginVersion": "4.23.0",
+          "rawSql": "SELECT status, count() AS runs\nFROM wf.runs FINAL\nWHERE $__timeFilter(started)\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY status\nORDER BY runs DESC"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Runs over time",
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "maxDataPoints": 60,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "displayName": "${__field.labels.status}",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "succeeded"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "running"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "waiting"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "limit"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stopped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "pluginVersion": "4.23.0",
+          "rawSql": "SELECT $__timeInterval(started) AS time, status, count() AS runs\nFROM wf.runs FINAL\nWHERE $__timeFilter(started)\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY time, status\nORDER BY time"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Errors and retries per model",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "minWidth": 100
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "pluginVersion": "4.23.0",
+          "rawSql": "SELECT harness, model, count() AS attempts,\n       countIf(attempt > 1) AS retries,\n       countIf(outcome IN ('failed', 'timed_out', 'unavailable')) AS failed,\n       countIf(error_class = 'rate_limit') AS rate_limit,\n       countIf(error_class = 'dropped_connection') AS dropped,\n       countIf(error_class = 'timeout') AS timeout,\n       countIf(error_class NOT IN ('', 'rate_limit', 'dropped_connection', 'timeout')) AS other\nFROM wf.attempts FINAL\nWHERE $__timeFilter(started) AND kind = 'agent'\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY harness, model\nORDER BY failed DESC, attempts DESC"
+        }
+      ],
+      "description": "Retries are attempts after the first. The last four columns count attempts by the class of their error."
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Tokens and cost per model",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "minWidth": 100
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "pluginVersion": "4.23.0",
+          "rawSql": "SELECT harness, model, count() AS attempts, sum(tokens) AS total,\n       sum(input_tokens) AS input, sum(output_tokens) AS output, sum(reasoning_tokens) AS reasoning,\n       sum(cache_read_tokens) AS cache_read, sum(cache_write_tokens) AS cache_write, sum(cost_usd) AS cost\nFROM wf.attempts FINAL\nWHERE $__timeFilter(started) AND kind = 'agent'\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY harness, model\nORDER BY cost DESC, total DESC"
+        }
+      ],
+      "description": "Tokens and cost of the attempts of agent nodes."
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Tool calls per model",
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "minWidth": 100
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mean"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "pluginVersion": "4.23.0",
+          "rawSql": "SELECT harness, model, count() AS calls, avg(duration_ms) AS mean, quantile(0.95)(duration_ms) AS p95,\n       countIf(ifNull(is_error, false)) AS errors, sum(duration_ms) AS total\nFROM wf.tool_calls FINAL\nWHERE $__timeFilter(started)\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY harness, model\nORDER BY calls DESC"
+        }
+      ],
+      "description": "The tool calls of agents, with their mean and p95 time, their errors, and their total time."
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Node duration p50, p95, max",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "minWidth": 100
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "pluginVersion": "4.23.0",
+          "rawSql": "SELECT workflow, node, count() AS attempts,\n       quantile(0.5)(duration_s) AS p50, quantile(0.95)(duration_s) AS p95, max(duration_s) AS max\nFROM wf.attempts FINAL\nWHERE $__timeFilter(started) AND duration_s IS NOT NULL\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY workflow, node\nORDER BY p95 DESC"
+        }
+      ],
+      "description": "The time of each attempt of a node, over the attempts that started in the time range."
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Review problems per model",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "minWidth": 100
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "per_review"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "pluginVersion": "4.23.0",
+          "rawSql": "SELECT p.workflow AS workflow, a.harness AS harness, a.model AS model,\n       count() AS reviews, sum(p.value) AS problems, problems / reviews AS per_review\nFROM wf.metric_points AS p FINAL\nINNER JOIN (\n    SELECT run_id, node, pass, item, argMax(harness, attempt) AS harness, argMax(model, attempt) AS model\n    FROM wf.attempts FINAL\n    WHERE outcome = 'succeeded'\n    GROUP BY run_id, node, pass, item\n) AS a ON a.run_id = p.run_id AND a.node = p.node AND a.pass = p.pass AND a.item = p.item\nWHERE p.metric = 'review.problems' AND $__timeFilter(p.time)\n  AND $__conditionalAll(p.workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY workflow, harness, model\nORDER BY problems DESC"
+        }
+      ],
+      "description": "The problems that each review reported, by the model of the last attempt of the review that succeeded."
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Problem states per pass",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "minWidth": 100
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "pluginVersion": "4.23.0",
+          "rawSql": "SELECT workflow, pass, labels['state'] AS state, count() AS problems\nFROM wf.metric_points FINAL\nWHERE metric = 'finding' AND $__timeFilter(time)\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY workflow, pass, state\nORDER BY workflow, pass, state"
+        }
+      ],
+      "description": "The merged problems after each pass of the node that merges them, by state."
+    }
+  ]
+}

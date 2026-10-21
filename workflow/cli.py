@@ -34,6 +34,8 @@ To see runs as they happen (observe.py, ui.py):
     wf sessions [run-id]             each agent session that runs now
     wf watch <run-id>                the run's steps and tool calls, as they come
     wf ui                            a web page on this machine: runs, graph, progress, metrics, transcripts
+    wf metrics up                    start Grafana on ClickHouse in Docker (metrics/compose.yaml), and print
+                                     Grafana's address (metrics.py)
 
 Every command that makes or finds runs takes --runs-dir DIR (default: WF_RUNS_DIR) to keep run
 folders outside the repo, in a folder per repo under DIR, instead of in ./.wf/runs (runs.py).
@@ -59,7 +61,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from . import diagram, firstmate, observe, operate, progress, report, runner, runs, spec, steer, trace_view, ui, validate, workspaces
+from . import diagram, firstmate, metrics, observe, operate, progress, report, runner, runs, spec, steer, trace_view, ui, validate, workspaces
 from .tools import keychain, signin
 from .tools.catalog import TOOLS
 
@@ -183,6 +185,11 @@ def main(argv: list[str] | None = None) -> int:
     page.add_argument("--open", action="store_true", help="open the page in the browser")
     page.add_argument("--runs-dir", **runs_dir)
     page.set_defaults(handler=_ui)
+
+    stack = commands.add_parser("metrics", help="the metrics stack on this machine: Grafana on ClickHouse, in Docker")
+    stack_commands = stack.add_subparsers(dest="metrics_command", required=True, parser_class=_Parser)
+    stack_commands.add_parser("up", help="start it with docker compose up -d, and print Grafana's address").set_defaults(
+        handler=lambda a: metrics.up())
 
     steering = commands.add_parser(
         "steer", help="send a message into the live agent session of a running node",

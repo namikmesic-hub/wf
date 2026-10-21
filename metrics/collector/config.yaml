@@ -1,0 +1,74 @@
+# The OpenTelemetry Collector of the wf metrics stack.
+# It takes OTLP from Claude Code and Codex, and writes it into the ClickHouse database otel.
+# The Collector makes the tables of that database when it starts.
+
+receivers:
+  otlp:
+    protocols:
+      grpc: {endpoint: 0.0.0.0:4317}
+      http: {endpoint: 0.0.0.0:4318}
+
+processors:
+  # A short Codex session sends about 1,000 spans, nearly all of them internal.
+  # Keep only its model requests and its turns.
+  # The Codex app server that wf starts names its service codex-app-server.
+  filter/codex-spans:
+    trace_conditions:
+      - >-
+        IsMatch(resource.attributes["service.name"], "^codex")
+        and not ContainsValue(["codex.sampling", "session_task.turn", "run_turn"], span.name)
+
+  # Claude Code puts the email and the ids of the account on each record. Remove them.
+  # Tool output and tool arguments can hold whole files. Keep their first 512 bytes.
+  transform/privacy:
+    trace_statements:
+      - delete_matching_keys(resource.attributes, "^(user[.](email|account_uuid|account_id)|organization[.]id)$")
+      - delete_matching_keys(span.attributes, "^(user[.](email|account_uuid|account_id)|organization[.]id)$")
+      - set(span.attributes["output"], Substring(span.attributes["output"], 0, 512, true)) where IsString(span.attributes["output"]) and Len(span.attributes["output"]) > 512
+      - set(span.attributes["arguments"], Substring(span.attributes["arguments"], 0, 512, true)) where IsString(span.attributes["arguments"]) and Len(span.attributes["arguments"]) > 512
+      - set(span.attributes["tool_input"], Substring(span.attributes["tool_input"], 0, 512, true)) where IsString(span.attributes["tool_input"]) and Len(span.attributes["tool_input"]) > 512
+    log_statements:
+      - delete_matching_keys(resource.attributes, "^(user[.](email|account_uuid|account_id)|organization[.]id)$")
+      - delete_matching_keys(log.attributes, "^(user[.](email|account_uuid|account_id)|organization[.]id)$")
+      - set(log.attributes["output"], Substring(log.attributes["output"], 0, 512, true)) where IsString(log.attributes["output"]) and Len(log.attributes["output"]) > 512
+      - set(log.attributes["arguments"], Substring(log.attributes["arguments"], 0, 512, true)) where IsString(log.attributes["arguments"]) and Len(log.attributes["arguments"]) > 512
+      - set(log.attributes["tool_input"], Substring(log.attributes["tool_input"], 0, 512, true)) where IsString(log.attributes["tool_input"]) and Len(log.attributes["tool_input"]) > 512
+    metric_statements:
+      - delete_matching_keys(resource.attributes, "^(user[.](email|account_uuid|account_id)|organization[.]id)$")
+      - delete_matching_keys(datapoint.attributes, "^(user[.](email|account_uuid|account_id)|organization[.]id)$")
+
+  batch:
+    timeout: 2s
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    database: otel
+    username: wf
+    password: wf
+    create_schema: true
+    async_insert: true
+    ttl: 2160h
+    logs_table_name: otel_logs
+    traces_table_name: otel_traces
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [filter/codex-spans, transform/privacy, batch]
+      exporters: [clickhouse]
+    logs:
+      receivers: [otlp]
+      processors: [transform/privacy, batch]
+      exporters: [clickhouse]
+    metrics:
+      receivers: [otlp]
+      processors: [transform/privacy, batch]
+      exporters: [clickhouse]

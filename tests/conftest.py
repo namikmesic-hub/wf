@@ -7,11 +7,43 @@
   config, so a global config that signs commits with a key that waits for a touch doesn't
   stop the tests' commits (the agents' git tool drops these variables, so it still reads
   your ~/.gitconfig);
-- the keyring is an empty one in memory, so no test reads or writes your real Keychain."""
+- the keyring is an empty one in memory, so no test reads or writes your real Keychain.
+
+pytest skips each test marked docker where `docker info` or `docker compose version` fails, or where
+it can't reach grafana.com. The metrics stack downloads a Grafana plugin from there at each start."""
+
+import shutil
+import subprocess
+import urllib.request
 
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
+
+
+@pytest.hookimpl(trylast=True)  # after -m deselects tests, so a run without the docker tests never calls docker
+def pytest_collection_modifyitems(items):
+    marked = [item for item in items if item.get_closest_marker("docker")]
+    lacking = _what_docker_tests_lack() if marked else None
+    if lacking:
+        for item in marked:
+            item.add_marker(pytest.mark.skip(reason=f"needs {lacking}"))
+
+
+def _what_docker_tests_lack() -> str | None:
+    if shutil.which("docker") is None:
+        return "Docker with Compose"
+    try:
+        if not all(subprocess.run(["docker", *args], capture_output=True, timeout=30).returncode == 0
+                   for args in (["info"], ["compose", "version"])):
+            return "Docker with Compose, and a Docker daemon that answers"
+    except (OSError, subprocess.TimeoutExpired):
+        return "Docker with Compose, and a Docker daemon that answers"
+    try:
+        urllib.request.urlopen("https://grafana.com/api/plugins/grafana-clickhouse-datasource", timeout=10).close()
+    except OSError:
+        return "the internet: the metrics stack downloads Grafana's ClickHouse plugin from grafana.com at each start"
+    return None
 
 
 @pytest.fixture(autouse=True)

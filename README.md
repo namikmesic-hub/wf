@@ -98,6 +98,34 @@ The address that `wf ui` prints holds a key, so other programs and users on the 
 
 ![wf ui: a run of implement.yaml at its tests for the second time](assets/wf-ui.png)
 
+## Metrics in Grafana
+
+`wf metrics up` starts the metrics stack of `metrics/compose.yaml` in Docker, and prints the address of Grafana.
+The stack has three services:
+- an OpenTelemetry Collector, which takes OTLP from Claude Code and Codex on ports 4317 and 4318
+- ClickHouse, which keeps that data in the database `otel`, and the tables of wf runs in the database `wf`
+- Grafana, whose home page is the dashboard "wf runs", on port 3000
+
+wf doesn't write the tables of `wf` yet, so the dashboard stays empty for now.
+`wf metrics up` needs Docker with Compose, and an install of wf from its checkout, because the stack is part of wf's source.
+A start with new volumes also needs the internet, for the images and for Grafana's ClickHouse plugin.
+`wf metrics up` waits until ClickHouse and Grafana are healthy and the Collector takes OTLP.
+The stack doesn't start again by itself when Docker starts again, so then run `wf metrics up` again.
+`docker compose -f metrics/compose.yaml -p wf-metrics down` stops the stack, and `down -v` also deletes its data.
+Give each such command `-p wf-metrics`, because a `COMPOSE_PROJECT_NAME` in your shell replaces the project name of the file.
+
+Each port listens on 127.0.0.1 only.
+Grafana has no login, and ClickHouse has the fixed user `wf` with the password `wf`.
+So each user and program on this machine can read and change the data of the stack.
+ClickHouse runs a statement over HTTP only for a request to 127.0.0.1 or localhost with the headers `X-ClickHouse-User` and `X-ClickHouse-Key`.
+Grafana sends a request for another host name, such as localhost, to the same port on 127.0.0.1.
+So a web page can't send a statement to either of them, also through a DNS name that points to 127.0.0.1.
+A page on such a DNS name can still send records to the Collector.
+To move a port, set `WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` or `WF_METRICS_OTLP_HTTP_PORT`.
+With 0, Docker picks a free port, and `docker compose -f metrics/compose.yaml -p wf-metrics port <service> <port>` names it.
+Grafana can't know a port that Docker picks, so it then sends a request for localhost to port 0.
+The address that `wf metrics up` prints names 127.0.0.1, so it still opens Grafana.
+
 ## Docs
 
 - [docs/workflow-spec.md](docs/workflow-spec.md): the file format, and how runs behave.
@@ -122,6 +150,10 @@ Tools attach to sessions on all three.
 uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
+
+Where Docker answers and pytest can reach grafana.com, `uv run pytest` also starts the metrics stack in compose projects of its own.
+The tests remove them at the end.
+A `-m` of your own replaces the default `-m 'not harness'`, so leave those tests out with `-m 'not harness and not docker'`.
 
 The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.
 The host has its own TypeScript checks: `npm ci && npm run check && npm test` in `workflow/harnesses/cursor_host`.
