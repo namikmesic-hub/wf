@@ -157,7 +157,7 @@ A template that is exactly one `{{ ... }}` keeps its type (a list stays a list).
 | `item`, `index` | the current item and its position (for_each node templates only) |
 | `workspace.<node>` | `{path, branch, base}` |
 | `errors.<node>` | failed items `{index, item, error}` (on_item_error: continue) |
-| `results.<node>` | for_each only: `{index, item, output, harness, model}` for each item at its position, with `output: none` for an item that failed |
+| `results.<node>` | for_each only: `{index, item, output, harness, model}` for each item at its position, with `output: none` for an item that failed. The harness and model of its last agent attempt. Both are none for a command or workflow node, and model is none on the harness's default |
 | `run` | `{id, dir, cost_usd, tokens, elapsed_s, base}` |
 | `session.continued` | true while rendering a continued session's instruction |
 | `follow_up` | `{request, number}` of the latest `wf continue` request, or `none` before the first |

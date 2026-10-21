@@ -42,7 +42,7 @@ _WORKSPACE = schemas.object_schema(
     {"path": {"type": "string"}, "branch": {"type": ["string", "null"]}, "base": {"type": ["string", "null"]}}
 )
 _ERROR_ITEM = schemas.object_schema({"index": {"type": "integer"}, "item": {}, "error": {"type": "string"}})
-_NAME = {"type": ["string", "null"]}  # a harness or a model in `results.<node>`: none for a node without an agent
+_NAME = {"type": ["string", "null"]}  # in results.<node>: none with no agent attempt, and a model of none is the harness's default
 _RUN = schemas.object_schema({
     "id": {"type": "string"}, "dir": {"type": "string"}, "cost_usd": {"type": "number"},
     "tokens": {"type": "integer"}, "elapsed_s": {"type": "number"}, "base": {"type": ["string", "null"]},

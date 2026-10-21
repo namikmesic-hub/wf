@@ -282,6 +282,38 @@ def test_results_numbers_each_seat_by_its_position_with_the_harness_and_model_it
                                       "2 on claude-code claude-opus-5-5: c, d")
 
 
+def test_results_names_the_last_attempt_of_each_item_after_a_fallback_and_lists_only_the_latest_pass(repo):
+    Path("seats.yaml").write_text(dedent("""
+        version: 1
+        name: seats
+        defaults: {harness: [claude-code, codex], model: {claude-code: claude-opus-5-5, codex: gpt-6}}
+        start: {input: {}}
+        nodes:
+          check:
+            needs: [start]
+            for_each: '["a", "b", "c"]'
+            retry: 0
+            on_item_error: continue
+            instruction: check it
+            routes:
+              - {when: "history.check | length < 2", to: check, max: 1}
+              - {to: end}
+        end:
+          output:
+            harnesses: {type: array, value: "{{ results.check | map(attribute='harness') | list }}"}
+            models: {type: array, value: "{{ results.check | map(attribute='model') | list }}"}
+            outputs: {type: array, value: "{{ results.check | map(attribute='output') | list }}"}
+    """))
+    steps = {"agents": {"check[0]": [{"summary": "a1"}, {"summary": "a2"}],
+                        "check[1]": [{"summary": "b1"}, {"_unavailable": "usage limit"}, {"_fail": "crashed"}],
+                        "check[2]": [{"_unavailable": "usage limit"}, {"summary": "c1"},
+                                     {"_unavailable": "usage limit"}, {"summary": "c2"}]}}
+    assert cli.main(["run", "seats.yaml", "--dry-run", script(steps)]) == 0
+    assert output() == {"harnesses": ["claude-code", "codex", "codex"],  # not the first attempt's claude-code
+                        "models": ["claude-opus-5-5", "gpt-6", "gpt-6"],
+                        "outputs": [{"summary": "a2"}, None, {"summary": "c2"}]}  # the second pass only
+
+
 def test_a_fallback_after_failed_attempts_is_shown(repo, capsys):
     Path("flow.yaml").write_text(dedent("""
         version: 1
