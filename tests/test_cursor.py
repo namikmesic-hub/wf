@@ -393,6 +393,14 @@ def test_a_turn_that_a_timeout_cancels_still_counts_what_cursor_reports_as_it_en
                                 "cache_read_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}
 
 
+def test_a_turn_that_a_timeout_cancels_still_gives_the_trace_its_cut_off_thinking_and_the_request_id_of_its_result(
+        repo, monkeypatch, cursor_host):
+    use(monkeypatch, repo, cursor_host, [{"thinking": ["Half a ", "thought"], "result_request": "req-late", "hang": True}])
+    assert run("retry: 0\ntimeout: 2s\n") == 1
+    assert [(r["parent"], r["duration_ms"], r["text"]) for r in trace("thinking")] == [("ask#1.a1.t1", None, "Half a thought")]
+    assert [(r["parent"], r["request_id"]) for r in trace("request")] == [("ask#1.a1.t1", "req-1"), ("ask#1.a1.t1", "req-late")]
+
+
 def test_a_lost_connection_as_a_session_opens_fails_the_attempt_and_the_retry_waits(repo, monkeypatch, cursor_host, capsys):
     pauses = []
 

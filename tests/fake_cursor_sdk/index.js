@@ -16,6 +16,7 @@
 //                                                     them. Without "thinking_ms" the block doesn't end
 //   {"request": "req-x"}                              a request message, which the real SDK writes only
 //                                                     to the agent's store
+//   {"result_request": "req-y"}                       the run's result gives this request id, and not the run's
 //   {"usage": {"inputTokens": 1, ...}}                a usage message, whose totalTokens the fake adds up
 //   {"error": {"name": "RateLimitError", "message": "...", "isRetryable": false}}  the stream throws it
 //   {"run_error": {"message": "...", "code": "..."}}  the run ends with status "error"
@@ -272,6 +273,7 @@ class FakeRun {
       if ("thinking_ms" in action) this.push({ type: "thinking", text: "", thinking_duration_ms: action.thinking_ms });
     }
     if ("request" in action) this.push({ type: "request", request_id: action.request });
+    if ("result_request" in action) this.resultRequestId = action.result_request;
     if ("usage" in action && !("hang" in action)) this.push({ type: "usage", usage: action.usage });
     if ("error" in action) throw made(action.error);
     if ("run_error" in action) {
@@ -329,7 +331,7 @@ class FakeRun {
 
   async wait() {
     await this.done;
-    return { id: this.id, requestId: this.requestId, status: this.status, ...(this.error ? { error: this.error } : {}) };
+    return { id: this.id, requestId: this.resultRequestId ?? this.requestId, status: this.status, ...(this.error ? { error: this.error } : {}) };
   }
 
   async cancel() {
