@@ -448,6 +448,8 @@ def _parse(source: str, *, expression: bool):
 # Filters whose result holds the same elements as their input, so a loop over
 # `build | selectattr("passed")` still loops over elements of `build`.
 _SAME_ELEMENTS = frozenset({"selectattr", "rejectattr", "select", "reject", "sort", "unique", "list", "reverse"})
+# Filters of _SAME_ELEMENTS that can drop elements, so that a position in their result can name another element
+_DROPS = frozenset({"selectattr", "rejectattr", "select", "reject", "unique"})
 # Filters that give nothing for none, where the others fail
 _NONE_IS_EMPTY = frozenset({"map", "select", "reject", "selectattr", "rejectattr"})
 # Filters whose result is always a number, so it can't carry text into a command
@@ -487,7 +489,11 @@ class _Local:
     map(attribute=...) takes from each element: after `{% set outs =
     results.b | map(attribute="output") %}`, outs[0] is results.b[0].output.
     `kept` holds the fields that the filters keep set on each element, as
-    paths from the element at a position of `path`.
+    paths from the element at a position of `path`. Only a loop over the list
+    counts them. `moved` says that a filter can drop elements, so that a
+    position in the list can name another element of `path`, or none.
+    `filled` is the path of a value that a map with a literal default gives,
+    with EACH at its position: a read that ends there can't be undefined.
     """
 
     name: str | None = None
@@ -496,6 +502,8 @@ class _Local:
     loops: frozenset[int] = frozenset()
     each: tuple = ()
     kept: frozenset[tuple] = frozenset()
+    moved: bool = False
+    filled: tuple = ()
 
 
 def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
@@ -604,6 +612,16 @@ def _through(local: _Local, path: tuple) -> tuple:
     """The outside path that `path` reads through `local`. In a list that map(attribute=...) gives,
     the first step picks the element, and the field that map takes comes after it."""
     return (*local.path, path[0], *local.each, *path[1:]) if local.each and path else (*local.path, *path)
+
+
+def _filled(local: _Local, read: tuple) -> frozenset[str]:
+    """The guards of a read through `local` that ends at the field that a map with a literal default takes.
+    Jinja puts the default in place of each missing step of it, so they are the guards of the map's own read."""
+    pattern = local.filled
+    if not pattern or len(read) != len(pattern) or any(p is not EACH and p != r for p, r in zip(pattern, read)):
+        return frozenset()
+    start = len(pattern) - pattern[::-1].index(EACH)  # the field starts after the position of the element
+    return frozenset(guard(local.name, read[:k]) for k in range(start, len(read)))
 
 
 def _plain(guards: frozenset, loops: frozenset = frozenset()) -> frozenset[str]:
@@ -861,7 +879,7 @@ class _Walker:
         if listed.name is None:
             return listed, frozenset()
         loops = listed.loops | ({loop} if loop is not None else set())
-        element = _Local(listed.name, _through(listed, (EACH,)), listed.sources, loops)
+        element = _Local(listed.name, _through(listed, (EACH,)), listed.sources, loops, filled=listed.filled)
         return element, frozenset(_bound(element, guard(listed.name, (*listed.path, EACH, *field))) for field in listed.kept)
 
     def _use(self, name: nodes.Name, path: tuple, scope, guards, output, quoted) -> None:
@@ -869,8 +887,9 @@ class _Walker:
         if local is None:
             self.refs.append(Ref(name.name, path, name.lineno, output, quoted, _plain(guards)))
         elif local.name is not None:
-            kept = {_bound(local, guard(local.name, (*local.path, path[0], *field))) for field in local.kept} if path else set()
-            self.refs.append(Ref(local.name, _through(local, path), name.lineno, output, quoted, _plain(guards | kept, local.loops)))
+            read = _through(local, path)
+            filled = frozenset() if local.moved and path else _filled(local, read)
+            self.refs.append(Ref(local.name, read, name.lineno, output, quoted, _plain(guards | filled, local.loops)))
         else:
             for source in local.sources:
                 self.refs.append(Ref(source, None, name.lineno, output, quoted, _plain(guards)))
@@ -886,14 +905,18 @@ class _Walker:
             if local is None:
                 value = _Local(name.name, path, (name.name,))
             elif local.name is not None:
-                value = replace(local, path=_through(local, path), each=(), kept=frozenset()) if path else local
+                value = local if not path else replace(local, path=_through(local, path), each=(), kept=frozenset(),
+                                                       moved=False, filled=() if local.moved else local.filled)
             else:
                 return _Local(sources=local.sources)
             for applied in filters:
                 if (field := _mapped(applied)) is not None:
-                    value = replace(value, each=value.each + field)
-                elif (field := _keeps(applied)) is not None:
-                    value = replace(value, kept=value.kept | {value.each + field})
+                    each = value.each + field
+                    value = replace(value, each=each, filled=(*value.path, EACH, *each) if _defaulted(applied) else ())
+                elif applied.name in _DROPS:
+                    value = replace(value, moved=True)
+                    if (field := _keeps(applied)) is not None:
+                        value = replace(value, kept=value.kept | {value.each + field})
             return value
         sources: list[str] = []
         for found in node.find_all(nodes.Name):
