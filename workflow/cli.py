@@ -35,6 +35,10 @@ To see runs as they happen (observe.py, ui.py):
     wf watch <run-id>                the run's steps and tool calls, as they come
     wf ui                            a web page on this machine: runs, graph, progress, metrics, transcripts
 
+To keep the records of runs in ClickHouse, for Grafana (export.py):
+    wf metrics export [<run-id>...]  write what runs did since their last export into ClickHouse's tables
+                                     of wf runs (--all-repos: each repo's runs in the runs folder)
+
 Every command that makes or finds runs takes --runs-dir DIR (default: WF_RUNS_DIR) to keep run
 folders outside the repo, in a folder per repo under DIR, instead of in ./.wf/runs (runs.py).
 
@@ -59,7 +63,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from . import diagram, firstmate, observe, operate, progress, report, runner, runs, spec, steer, trace_view, ui, validate, workspaces
+from . import diagram, export, firstmate, observe, operate, progress, report, runner, runs, settings, spec, steer, trace_view, ui, validate, workspaces
 from .tools import keychain, signin
 from .tools.catalog import TOOLS
 
@@ -183,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     page.add_argument("--open", action="store_true", help="open the page in the browser")
     page.add_argument("--runs-dir", **runs_dir)
     page.set_defaults(handler=_ui)
+    _metrics_command(commands, runs_dir)
 
     steering = commands.add_parser(
         "steer", help="send a message into the live agent session of a running node",
@@ -766,6 +771,79 @@ def _continue(args) -> int:
         print(f"wf continue: {error}", file=sys.stderr)
         return 1
     return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir)
+
+
+# ---------- wf metrics ----------
+
+
+ROWS = {"runs": "run", "attempts": "attempt", "turns": "turn", "tool_calls": "tool call", "routes": "route"}
+
+
+def _metrics_command(commands, runs_dir: dict) -> None:
+    metrics = commands.add_parser("metrics", help="the records of runs in ClickHouse, for Grafana")
+    actions = metrics.add_subparsers(dest="metrics_command", required=True, parser_class=_Parser)
+    exporting = actions.add_parser(
+        "export", help="write what runs did since their last export into ClickHouse's tables of wf runs",
+        description="Write what runs did since their last export into ClickHouse's tables of wf runs: the runs named, "
+                    "or each run of this repo. The address of ClickHouse comes from WF_CLICKHOUSE_URL, or else from "
+                    "telemetry.clickhouse_url in ~/.wf/config.yaml. Each run folder keeps where its export stopped, in "
+                    "export.json, so exporting twice changes nothing.")
+    exporting.add_argument("run_ids", nargs="*", metavar="run-id")
+    exporting.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
+    exporting.add_argument("--runs-dir", **runs_dir)
+    exporting.set_defaults(handler=_metrics_export, workflow=None)
+
+
+def _metrics_export(args) -> int:
+    """Exit code 1 when a run can't be exported. A run folder that can't be read doesn't stop the others,
+    but ClickHouse that is down or whose tables differ stops the export."""
+    if args.all_repos and args.run_ids:
+        print("wf metrics export: name runs, or give --all-repos, but not both", file=sys.stderr)
+        return 1
+    if args.all_repos and not (args.runs_dir or os.environ.get(runs.RUNS_DIR, "").strip()):
+        print("wf metrics export: --all-repos needs a runs folder: --runs-dir DIR, or WF_RUNS_DIR", file=sys.stderr)
+        return 1
+    try:
+        url = export.address()
+    except settings.SettingsError as error:
+        print(f"wf metrics export: {error}", file=sys.stderr)
+        return 1
+    if url is None:
+        print(f"wf metrics export: there's no ClickHouse to write to. Set {export.URL_ENV}, or telemetry.clickhouse_url "
+              f"in {settings.path()}, to its address, like http://127.0.0.1:8123", file=sys.stderr)
+        return 1
+    folder = runs.runs_folder(Path.cwd(), args.runs_dir)
+    if args.all_repos:
+        folder = folder.parent
+        chosen = list(reversed(ui.Source(Path.cwd(), args.runs_dir, every_repo=True).runs().values()))  # oldest first
+    elif args.run_ids:
+        chosen = _chosen(args, None)
+        if chosen is None:
+            return 1
+    else:
+        chosen = runs.all_runs(Path.cwd(), args.runs_dir)
+    if not chosen:
+        print(f"wf metrics export: no runs in {folder}")
+        return 0
+    store = export.Store(url)
+    try:
+        store.prepare()
+    except export.ExportError as error:
+        print(f"wf metrics export: {error}", file=sys.stderr)
+        return 1
+    failed = False
+    for run in chosen:
+        try:
+            written = export.export(run, store)
+        except export.UnreadableFolder as error:
+            print(f"wf metrics export: run {run.id}: {error}", file=sys.stderr)
+            failed = True
+            continue
+        except export.ExportError as error:  # ClickHouse: the runs after this one would fail the same way
+            print(f"wf metrics export: run {run.id}: {error}", file=sys.stderr)
+            return 1
+        print(f"{run.id}: " + (", ".join(_count(count, ROWS[table]) for table, count in written.items()) or "nothing new"))
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":  # `python -m workflow.cli`, as detached runs start it

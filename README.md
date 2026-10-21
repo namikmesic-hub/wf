@@ -98,6 +98,25 @@ The address that `wf ui` prints holds a key, so other programs and users on the 
 
 ![wf ui: a run of implement.yaml at its tests for the second time](assets/wf-ui.png)
 
+## Runs in ClickHouse
+
+`wf metrics export` writes what runs did into ClickHouse, a column store, so that Grafana can show it.
+Set the address of the HTTP port of ClickHouse once, in `~/.wf/config.yaml` or in `WF_CLICKHOUSE_URL`:
+
+```yaml
+telemetry:
+  clickhouse_url: http://127.0.0.1:8123   # http://user:password@host:8123 for a user other than wf
+```
+
+```sh
+wf metrics export                                # each run of this repo, from where its last export stopped
+wf metrics export --all-repos --runs-dir ~/runs  # each run of each repo in a runs folder
+```
+
+wf makes the tables that are missing, from `workflow/clickhouse.sql`.
+Each run folder keeps where its export stopped, in `export.json`, so a second export writes nothing.
+A run from before wf wrote a trace exports from its `events.jsonl`, with less detail.
+
 ## Docs
 
 - [docs/workflow-spec.md](docs/workflow-spec.md): the file format, and how runs behave.
@@ -122,6 +141,9 @@ Tools attach to sessions on all three.
 uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
+
+Where Docker answers, `uv run pytest` also exports runs into ClickHouse in a container of its own, and removes it at the end.
+A `-m` of your own replaces the default `-m 'not harness'`, so leave those tests out with `-m 'not harness and not docker'`.
 
 The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.
 The host has its own TypeScript checks: `npm ci && npm run check && npm test` in `workflow/harnesses/cursor_host`.

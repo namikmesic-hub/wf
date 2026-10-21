@@ -69,9 +69,9 @@ The tests named below are in `tests/test_tools.py`.
 | The redirect has no `iss`, and the metadata says the server sends one | Setup stops. | `workflow/tools/signin.py:142` | `test_a_sign_in_without_the_iss_the_server_says_it_sends_is_ignored` |
 | The vendor says no (`error=access_denied`), or sends no code | Setup stops, and asks for no token. | `workflow/tools/signin.py:145`, `workflow/tools/signin.py:147` | `test_a_sign_in_that_comes_back_wrong_gets_no_token` |
 | No redirect comes back within 5 minutes | Setup stops. | `workflow/tools/signin.py:139` | `test_setup_gives_up_when_no_sign_in_comes_back` |
-| The redirect is good | Setup trades the code for tokens with the PKCE verifier, saves them in the Keychain item, and runs doctor. | `workflow/cli.py:660`, `workflow/cli.py:665` | `test_setup_signs_in_in_the_browser_and_keeps_the_secret_in_the_keychain` |
+| The redirect is good | Setup trades the code for tokens with the PKCE verifier, saves them in the Keychain item, and runs doctor. | `workflow/cli.py:665`, `workflow/cli.py:670` | `test_setup_signs_in_in_the_browser_and_keeps_the_secret_in_the_keychain` |
 | `--token` | Setup asks you to paste a token instead, saves it, and runs doctor. A pasted token has no refresh. Only the tools whose vendor gives tokens out take `--token`. | `workflow/tools/signin.py:110` | `test_setup_takes_a_pasted_token`, `test_only_tools_whose_vendor_gives_out_tokens_take_one` |
-| There's no terminal | Setup refuses, since it asks you to sign in. | `workflow/cli.py:655` | `test_setup_needs_a_terminal` |
+| There's no terminal | Setup refuses, since it asks you to sign in. | `workflow/cli.py:660` | `test_setup_needs_a_terminal` |
 
 ### Slack
 
@@ -152,7 +152,7 @@ The tests named below are in `tests/test_tools.py`.
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| The Keychain holds no sign-in for the tool, or one wf didn't write | `not set up`, with `run wf tools <name> setup`. `wf tools doctor` doesn't fail for it, and `wf tools <name> doctor` exits with 1. | `workflow/tools/doctor.py:50`, `workflow/cli.py:679` | `test_doctor_for_every_tool_reports_one_that_is_not_set_up_without_failing`, `test_a_stored_item_wf_didnt_write_counts_as_not_set_up` |
+| The Keychain holds no sign-in for the tool, or one wf didn't write | `not set up`, with `run wf tools <name> setup`. `wf tools doctor` doesn't fail for it, and `wf tools <name> doctor` exits with 1. | `workflow/tools/doctor.py:50`, `workflow/cli.py:684` | `test_doctor_for_every_tool_reports_one_that_is_not_set_up_without_failing`, `test_a_stored_item_wf_didnt_write_counts_as_not_set_up` |
 | The Keychain can't be read | `fail`, with "unlock your login Keychain". | `workflow/tools/doctor.py:48` | `test_doctor_says_when_the_keyring_cannot_be_read` |
 | The access token has expired | It's refreshed, and the checks go on. | `workflow/tools/signin.py:228` | `test_doctor_refreshes_a_sign_in_that_has_expired` |
 | The vendor refuses the sign-in, or the refresh | `fail`, with `run wf tools <name> setup`. | `workflow/tools/doctor.py:65` | `test_doctor_says_to_sign_in_again_when_the_vendor_refuses` |
@@ -163,7 +163,7 @@ The tests named below are in `tests/test_tools.py`.
 | The server marks an operation read-only (`readOnlyHint`), and wf keeps it back | The report adds a note that suggests adding it to the list. | `workflow/tools/doctor.py:88` | `test_doctor_notes_an_operation_the_server_marks_read_only_that_wf_keeps_back` |
 | wf counts an operation as a read, and the server marks it as changing things (`readOnlyHint: false` or `destructiveHint: true`) | `fail`, with "update wf". | `workflow/tools/doctor.py:93` | `test_doctor_fails_when_a_read_on_wfs_list_is_marked_as_changing_things` |
 | All four checks pass | `pass` | `workflow/tools/doctor.py:95` | `test_doctor_passes_when_the_sign_in_works_and_a_read_call_answers` |
-| Setup saved a sign-in that doctor fails | Setup exits with 1. | `workflow/cli.py:667` | `test_setup_that_saves_a_sign_in_doctor_rejects_exits_with_1` |
+| Setup saved a sign-in that doctor fails | Setup exits with 1. | `workflow/cli.py:672` | `test_setup_that_saves_a_sign_in_doctor_rejects_exits_with_1` |
 
 ## In a workflow
 

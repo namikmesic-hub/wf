@@ -23,7 +23,7 @@ def test_each_feature_reads_its_own_setting(monkeypatch, wf_home):
 
 
 @pytest.mark.parametrize("text, problem", [
-    ("max_agent: 4\n", "unknown setting max_agent (known: max_agents, cursor_runtime, cursor_api_key_file)"),
+    ("max_agent: 4\n", "unknown setting max_agent (known: max_agents, cursor_runtime, cursor_api_key_file, telemetry)"),
     ("- 4\n", "must hold settings by name"),
     ("max_agents: [\n", "can't read"),
 ])
