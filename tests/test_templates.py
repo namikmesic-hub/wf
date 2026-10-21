@@ -143,6 +143,40 @@ def test_guards_come_from_if_and_and_conditional_expressions():
     assert any(r.path == ("x",) and "review" in r.guarded for r in is_none)
 
 
+def read_of(source: str, last: str = "done") -> Ref:
+    (read,) = [r for r in templates.references(source) if r.path and r.path[-1] == last]
+    return read
+
+
+@pytest.mark.parametrize("source", [
+    "{% if results.b[1].output %}{{ results.b[1].output.done }}{% endif %}",
+    "{% for r in results.b %}{% if r.output %}{{ r.output.done }}{% endif %}{% endfor %}",
+    "{% for r in results.b %}{% if not r.output %}x{% else %}{{ r.output.done }}{% endif %}{% endfor %}",
+    "{% for r in results.b %}{% if r.output is not none %}{{ r.output.done }}{% endif %}{% endfor %}",
+    "{% for r in results.b %}{{ r.output.done if r.output else 'x' }}{% endfor %}",
+    "{% for r in results.b %}{{ r.output and r.output.done }}{% endfor %}",
+    "{% for r in results.b if r.output %}{{ r.output.done }}{% endfor %}",
+    "{% for r in results.b | selectattr('output') %}{{ r.output.done }}{% endfor %}",
+    "{% for r in results.b | rejectattr('output', 'none') | list %}{{ r.output.done }}{% endfor %}",
+])
+def test_a_check_guards_the_path_it_reads_also_through_a_loop_variable(source):
+    read = read_of(source)
+    assert templates.guard("results", read.path[:3]) in read.guarded  # results.b[1].output or results.b[*].output
+
+
+@pytest.mark.parametrize("source", [
+    "{% for r in results.b %}{{ r.output.done }}{% endfor %}",
+    "{% if results.b[0].output %}{{ results.b[1].output.done }}{% endif %}",  # another item
+    "{% for r in results.b %}{% if r.index %}{{ r.output.done }}{% endif %}{% endfor %}",
+    "{% for r in results.b if r %}{{ r.output.done }}{% endfor %}",
+    "{% for r in results.b | selectattr('output', 'defined') %}{{ r.output.done }}{% endfor %}",  # set, but maybe none
+    "{% for r in results.b %}{% if r.output %}x{% endif %}{{ r.output.done }}{% endfor %}",  # after the check
+])
+def test_a_check_of_something_else_leaves_the_path_unguarded(source):
+    read = read_of(source)
+    assert templates.guard("results", read.path[:3]) not in read.guarded
+
+
 def test_output_and_quoting_are_tracked_for_commands():
     out = find("git checkout {{ implement.branch | quote }}", "implement")
     assert (out.output, out.quoted) == (True, True)

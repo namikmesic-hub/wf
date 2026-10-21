@@ -4,6 +4,7 @@ Each case is a small workflow file and the problems it should produce, as
 (level, where, part of the message).
 """
 
+import json
 import re
 from pathlib import Path
 from textwrap import dedent, indent
@@ -320,30 +321,38 @@ def test_a_for_each_list_from_results_gives_its_items_the_schema_of_the_entries(
 
 
 def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_warns(tmp_path):
-    report = check(tmp_path, flow("""
-        side: {needs: [start], command: x}
-        build: {needs: [start], for_each: "[1, 2]", on_item_error: continue, instruction: x, output: {done: {type: boolean}}}
-        all: {needs: [start], for_each: "[1, 2]", instruction: x, output: {done: {type: boolean}}}
-        sum:
-          needs: [build, all]
-          instruction: >-
-            {{ results.build[0].output.done }} {{ results.all[0].output.done }} {{ results.build[0].output }}
-            {% if results.build[1].output %}{{ results.build[1].output.done }}{% endif %}
-            {% for r in results.build %}{{ r.output.done if r.output else 'failed' }}{% endfor %}
-            {% for r in results.build if r.output %}{{ r.output.done }}{% endfor %}
-            {% for r in results.build | selectattr('output') %}{{ r.output.done }}{% endfor %}
-            {% for r in results.build %}{% if r.output is not none %}{{ r.output.done }}{% endif %}{% endfor %}
-            {% for r in results.build %}{{ r.output.done }}{% endfor %}
-        early:
-          needs: [side]
-          instruction: >-
-            {{ results.build[0].index }} {% if build %}{{ results.build[1].index }}{% endif %}
-            {% if results.build %}{{ results.build[1].index }}{% endif %} {% for r in results.build %}{{ r.index }}{% endfor %}
-    """))
+    # Each read is the only one in its template, as wf validate warns once for each template and entry or node
+    after = {  # these run after build and all
+        "bare_index": "{{ results.build[0].output.done }}",
+        "bare_loop": "{% for r in results.build %}{{ r.output.done }}{% endfor %}",
+        "by_if": "{% if results.build[1].output %}{{ results.build[1].output.done }}{% endif %}",
+        "by_else": "{% for r in results.build %}{% if not r.output %}failed{% else %}{{ r.output.done }}{% endif %}{% endfor %}",
+        "by_value": "{% for r in results.build %}{{ r.output.done if r.output else 'failed' }}{% endfor %}",
+        "by_and": "{% for r in results.build %}{{ r.output and r.output.done }}{% endfor %}",
+        "by_not_none": "{% for r in results.build %}{% if r.output is not none %}{{ r.output.done }}{% endif %}{% endfor %}",
+        "by_for_if": "{% for r in results.build if r.output %}{{ r.output.done }}{% endfor %}",
+        "by_select": "{% for r in results.build | selectattr('output') %}{{ r.output.done }}{% endfor %}",
+        "by_reject": "{% for r in results.build | rejectattr('output', 'none') %}{{ r.output.done }}{% endfor %}",
+        "on_fail": "{{ results.all[0].output.done }}",  # on_item_error: fail leaves no output none
+        "whole": "{{ results.build[0].output }}",  # the output itself, and no field of it
+    }
+    beside = {  # these run beside build, which might not have run yet
+        "early": "{{ results.build[0].index }}",
+        "if_ran": "{% if build %}{{ results.build[1].index }}{% endif %}",
+        "if_any": "{% if results.build %}{{ results.build[1].index }}{% endif %}",
+        "in_loop": "{% for r in results.build %}{{ r.index }}{% endfor %}",
+    }
+    nodes = ["side: {needs: [start], command: x}",
+             "build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, output: {done: {type: boolean}}}",
+             "all: {needs: [start], for_each: '[1, 2]', instruction: x, output: {done: {type: boolean}}}"]
+    nodes += [f"{name}: {{needs: [build, all], instruction: {json.dumps(text)}}}" for name, text in after.items()]
+    nodes += [f"{name}: {{needs: [side], instruction: {json.dumps(text)}}}" for name, text in beside.items()]
+    report = check(tmp_path, flow("\n".join(nodes)))
     assert_problems(report, [
-        ("warning", "nodes.sum.instruction", "reads `results.build[0].output.done`, but with `on_item_error: continue` an item "
-                                             "of `build` that failed has the output none: check that the output is set first"),
-        ("warning", "nodes.sum.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.bare_index.instruction", "reads `results.build[0].output.done`, but with `on_item_error: continue` "
+                                                    "an item of `build` that failed has the output none: check that the output "
+                                                    "is set first"),
+        ("warning", "nodes.bare_loop.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.early.instruction", "reads `results.build[0].index`, but `build` might not have run yet; "
                                                "check first with {% if build %}"),
     ])
