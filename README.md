@@ -150,8 +150,8 @@ uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
 
-Where Docker answers and pytest can reach grafana.com, `uv run pytest` also starts the metrics stack in a compose project of its own.
-The tests remove it at the end.
+Where Docker answers and pytest can reach grafana.com, `uv run pytest` also starts the metrics stack in compose projects of its own.
+The tests remove them at the end.
 A `-m` of your own replaces the default `-m 'not harness'`, so leave those tests out with `-m 'not harness and not docker'`.
 
 The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.

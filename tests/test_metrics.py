@@ -1,7 +1,7 @@
 """wf metrics up, and the metrics stack that it starts (metrics/compose.yaml).
 
-The tests marked docker start the stack from empty volumes, in a compose project of their own on free
-ports, and remove its containers and volumes at the end. Each start needs the internet for Grafana's
+The tests marked docker start the stack, or only its Grafana, in a compose project of their own with new
+volumes. At the end, they remove its containers and volumes. Each start needs the internet for Grafana's
 ClickHouse plugin, and the first start also for the images. Where Docker doesn't answer, or where pytest
 can't reach grafana.com, pytest skips them (conftest.py)."""
 
@@ -167,31 +167,38 @@ class Stack:
     otlp: str
 
 
-@pytest.fixture(scope="module")
-def stack():
-    """The stack that `wf metrics up` starts, in a new compose project with new volumes, on free ports."""
-    project = f"wf-metrics-test-{uuid.uuid4().hex[:8]}"
-    compose = ["docker", "compose", "-f", str(metrics.COMPOSE), "-p", project]
+@contextlib.contextmanager
+def project(**ports: str):
+    """A new compose project of the stack, with each port variable at 0 unless ports sets it: its docker compose
+    command. At the end, it removes the containers and the volumes of the project."""
+    name = f"wf-metrics-test-{uuid.uuid4().hex[:8]}"
+    compose = ["docker", "compose", "-f", str(metrics.COMPOSE), "-p", name]
     with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("COMPOSE_PROJECT_NAME", project)
-        for name in metrics.PORTS:
-            patch.setenv(name, "0")
-        patch.setenv("WF_METRICS_GRAFANA_PORT", str(free_port()))  # with 0, Grafana sends a request for localhost to port 0
+        patch.setenv("COMPOSE_PROJECT_NAME", name)
+        for variable in metrics.PORTS:
+            patch.setenv(variable, ports.get(variable, "0"))
         try:
-            printed = io.StringIO()
-            with contextlib.redirect_stdout(printed):
-                assert cli.main(["metrics", "up"]) == 0
-            grafana = printed.getvalue().strip().removeprefix("Grafana: ")
-
-            def address(service: str, port: int) -> str:
-                found = subprocess.run([*compose, "port", service, str(port)], capture_output=True, text=True, check=True)
-                return f"http://{found.stdout.strip()}"
-
-            yield Stack(compose, grafana, address("clickhouse", 8123), address("collector", 4318))
+            yield compose
         finally:
             removed = subprocess.run([*compose, "down", "--volumes", "--remove-orphans"], capture_output=True, text=True,
                                      timeout=300)
-            assert removed.returncode == 0, f"docker compose down failed, and project {project} may still run: {removed.stderr}"
+            assert removed.returncode == 0, f"docker compose down failed, and project {name} may still run: {removed.stderr}"
+
+
+@pytest.fixture(scope="module")
+def stack():
+    """The stack that `wf metrics up` starts, in a new compose project with new volumes, on ports that Docker picks."""
+    with project() as compose:
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            assert cli.main(["metrics", "up"]) == 0
+        grafana = printed.getvalue().strip().removeprefix("Grafana: ")
+
+        def address(service: str, port: int) -> str:
+            found = subprocess.run([*compose, "port", service, str(port)], capture_output=True, text=True, check=True)
+            return f"http://{found.stdout.strip()}"
+
+        yield Stack(compose, grafana, address("clickhouse", 8123), address("collector", 4318))
 
 
 def answer(url: str, body: bytes | None = None, headers: dict | None = None) -> tuple[int, str | None]:
@@ -397,9 +404,9 @@ def test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables(stack
     # A page on a DNS name that points to 127.0.0.1 sends its requests with that name in Host
     assert answer(f"{stack.clickhouse}/", b"SELECT 1", {**keys, "Host": "attacker.example:8123"}) == (403, None)
     port = urllib.parse.urlsplit(stack.grafana).port
-    for host in ("attacker.example", "localhost"):
+    for host in ("attacker.example", "localhost"):  # Grafana can't know a port that Docker picks
         assert answer(f"{stack.grafana}/api/ds/query", b'{"queries": []}',
-                      {"Content-Type": "application/json", "Host": f"{host}:{port}"}) == (301, f"{stack.grafana}/api/ds/query")
+                      {"Content-Type": "application/json", "Host": f"{host}:{port}"}) == (301, "http://127.0.0.1:0/api/ds/query")
 
     assert clickhouse(stack, "SELECT name, value FROM system.server_settings WHERE name IN "
                              "('mark_cache_size', 'max_server_memory_usage') ORDER BY name FORMAT TSV") == (
@@ -446,6 +453,19 @@ def test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables(stack
         assert rows(stack, query, now - DAY, now, "deliver-change"), f"{title} shows no rows of deliver-change"
         assert rows(stack, query, now - DAY, now, "no-such-workflow") == [], f"{title} shows other workflows"
         assert rows(stack, query, now - 30 * DAY, now - DAY) == [], f"{title} shows rows from outside its time range"
+
+
+@pytest.mark.docker
+def test_grafana_on_a_moved_port_sends_a_request_for_another_host_name_to_that_port():
+    port = free_port()
+    with project(WF_METRICS_GRAFANA_PORT=str(port)) as compose:
+        started = subprocess.run([*compose, "up", "-d", "--wait", "grafana"], capture_output=True, text=True, timeout=600)
+        assert started.returncode == 0, started.stderr
+        grafana = f"http://127.0.0.1:{port}"
+        assert json.loads(_request(f"{grafana}/api/health"))["database"] == "ok"
+        for host in ("attacker.example", "localhost"):
+            assert answer(f"{grafana}/d/wf-runs?orgId=1", headers={"Host": f"{host}:{port}"}) == (
+                301, f"{grafana}/d/wf-runs?orgId=1")
 
 
 # ---------- what the Collector keeps ----------
