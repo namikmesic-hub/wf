@@ -51,5 +51,7 @@ Then the tools around runs, none of which LangGraph knows about:
     progress.py    how far a run is on its way from start to end, as an estimate (`wf status`)
     observe.py     the agent sessions that run now (`wf sessions`), and the event stream (`wf watch`)
     ui.py          `wf ui`: a web page on this machine (ui/: the page) with the graph, progress and transcripts
+    export.py      `wf metrics export`: the records of run folders as rows of ClickHouse's tables of wf runs,
+                   which clickhouse.sql makes
     examples/      two complete workflows (`wf examples` copies them out)
 """

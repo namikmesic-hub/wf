@@ -97,12 +97,12 @@ def test_the_collector_takes_the_login_of_clickhouse_from_its_environment():
     assert "otel/opentelemetry-collector-contrib:0.162.0" in COLLECTOR.read_text(encoding="utf-8")  # its exporter is there
 
 
-def test_wf_runs_no_docker_and_has_no_metrics_command(capsys):
+def test_wf_runs_no_docker_and_its_one_metrics_command_is_export(capsys):
     for source in (ROOT / "workflow").rglob("*.py"):
         assert not re.search(r"""["']docker["']""", source.read_text(encoding="utf-8")), source
     with pytest.raises(SystemExit):
         cli.main(["metrics", "up"])
-    assert "invalid choice: 'metrics'" in capsys.readouterr().err
+    assert "invalid choice: 'up'" in capsys.readouterr().err
 
 
 # ---------- what the Collector keeps ----------

@@ -155,8 +155,17 @@ You run ClickHouse yourself, on this machine or on another one, and `[metrics]` 
 Percent-encode the user and the password, for example `%40` for `@` and `%2F` for `/`.
 With `enabled = true`, the string must have each of its parts, and wf names each part that it lacks and doesn't start.
 With `enabled = false`, or without `[metrics]`, wf exports nothing.
-wf doesn't write the tables of runs yet.
-Until the export of runs makes them, each panel of the example dashboard below shows an error for a missing table.
+
+`wf metrics export` writes what runs did into the database of `url`, so that Grafana can show it:
+
+```sh
+wf metrics export                                # each run of this repo, from where its last export stopped
+wf metrics export --all-repos --runs-dir ~/runs  # each run of each repo in a runs folder
+```
+
+wf makes the database and the tables that are missing, from `workflow/clickhouse.sql`.
+Each run folder keeps where its export stopped, in `export.json`, so a second export writes nothing.
+A run from before wf wrote a trace exports from its `events.jsonl`, with less detail.
 
 The password is the one secret of `config.toml`.
 wf never shows it: `wf config show` and each message of wf show `***` in its place.
@@ -224,8 +233,9 @@ uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
 
-No test starts a container.
 One test reads `docs/metrics/compose.yaml` with `docker compose config`, and pytest skips it on a machine without Docker with Compose.
+Where Docker answers, `uv run pytest` also exports runs into ClickHouse in a container of its own, and removes it at the end.
+A `-m` of your own replaces the default `-m 'not harness'`, so leave those tests out with `-m 'not harness and not docker'`.
 
 The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.
 The host has its own TypeScript checks: `npm ci && npm run check && npm test` in `workflow/harnesses/cursor_host`.
