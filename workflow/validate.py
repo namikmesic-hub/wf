@@ -439,7 +439,7 @@ class _Checker:
         if name == "run" and ref.path[:1] == ("tokens",):
             self.token_refs.append(where)
         self._might_not_have_run(where, ref, node_id, context)
-        self._failed_item(where, ref)
+        self._failed_item(where, ref, node_id)
 
     def _might_not_have_run(self, where: str, ref: Ref, node_id: str | None, context: str) -> None:
         name, path = ref.name, ref.path
@@ -468,20 +468,36 @@ class _Checker:
                          f"{{% if {target} %}}...{{% endif %}}, or in a single value `{_dotted(name, path)} if {target} else none`"
                          + (" (fails the run if it hasn't)" if context == "end" else ""))
 
-    def _failed_item(self, where: str, ref: Ref) -> None:
-        """A field of an item's output in `results.<node>`, with on_item_error: continue, where no check
-        proves the output is set: an item that failed has the output none, and the template then fails."""
-        path = ref.path
-        if ref.name != "results" or not path or len(path) < 4 or path[2] != "output" or path[0] not in self.nodes:
+    def _failed_item(self, where: str, ref: Ref, node_id: str | None) -> None:
+        """A field of an entry's output, from a node with on_item_error: continue, where no check proves
+        the output is set: an item that failed has the output none, and the template then fails. The
+        entry is one of `results.<node>`, or the `item` of a for_each over it. The `item` of an entry
+        is an entry too, when the for_each list of its node was results of another node."""
+        path = ref.path or ()
+        if ref.name == "results" and len(path) > 2 and path[0] in self.nodes:
+            owner, at = path[0], 2
+        elif ref.name == "item" and node_id is not None:
+            owner, at = self._listed_results(node_id), 0
+        else:
             return
-        entry = templates.guard("results", path[:3])
-        if (self.wf.setting(path[0], "on_item_error") != "continue" or entry in ref.guarded
+        while owner is not None and at < len(path) and path[at] == "item":
+            owner, at = self._listed_results(owner), at + 1
+        if owner is None or len(path) < at + 2 or path[at] != "output":
+            return
+        entry = templates.guard(ref.name, path[:at + 1])
+        if (self.wf.setting(owner, "on_item_error") != "continue" or entry in ref.guarded
                 or (where, entry) in self._warned):
             return
         self._warned.add((where, entry))
-        self.warn(where, f"reads `{_dotted('results', path)}`, but with `on_item_error: continue` an item of `{path[0]}` "
+        self.warn(where, f"reads `{_dotted(ref.name, path)}`, but with `on_item_error: continue` an item of `{owner}` "
                          "that failed has the output none: check that the output is set first, with {% if ... %} "
                          "or `... if ... else none`")
+
+    def _listed_results(self, node_id: str) -> str | None:
+        """The node whose results.<node> the for_each list of `node_id` is, so that its items are their entries."""
+        listed = templates.pure_path(self.nodes[node_id].for_each or "", expression=True)
+        node = listed[1][0] if listed and listed[0] == "results" and len(listed[1]) == 1 else None
+        return node if node in self.nodes and self.nodes[node].for_each is not None else None
 
     def _for_each(self, node_id: str) -> None:
         expression = self.nodes[node_id].for_each
@@ -1095,7 +1111,7 @@ def _hint(name: str, options) -> str:
 def _dotted(name: str, path: tuple | None) -> str:
     text = name
     for step in path or ():
-        text += "[]" if step is EACH else f"[{step}]" if isinstance(step, int) else f".{step}"
+        text += "[]" if step is EACH else f"[{step}]" if isinstance(step, (int, templates.At)) else f".{step}"
     return text
 
 

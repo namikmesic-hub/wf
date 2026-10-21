@@ -113,8 +113,34 @@ def test_loop_variables_resolve_to_the_list_they_loop_over():
 def test_filters_that_keep_elements_keep_the_path():
     assert refs("{% for b in build | selectattr('passed') | list %}{{ b.summary }}{% endfor %}") == [
         ("build", ()),
+        ("build", (EACH, "passed")),  # the field that selectattr reads from each element
         ("build", (EACH, "summary")),
     ]
+
+
+def test_a_filter_that_reads_a_field_of_each_element_reads_its_path():
+    assert refs("{{ results.b | map(attribute='output.stdout') | join }}") == [("results", ("b",)), ("results", ("b", EACH, "output", "stdout"))]
+    assert refs("{{ plan.tasks | sum(attribute='size') }} {{ plan.tasks | sort(attribute='rank') | list }}") == [
+        ("plan", ("tasks",)), ("plan", ("tasks", EACH, "size")), ("plan", ("tasks",)), ("plan", ("tasks", EACH, "rank"))]
+    assert refs("{{ plan.tasks | map(attribute='x', default='') | list }} {{ plan.tasks | map('upper') | list }}") == [
+        ("plan", ("tasks",)), ("plan", ("tasks",))]  # a default for a missing field, or no field
+
+
+def test_a_position_that_the_template_computes_is_kept_apart_from_a_loop():
+    assert refs("{{ results.b[-1].item }} {{ results.b[index].item }} {{ results.b[start.pos + 1].item }}") == [
+        ("results", ("b", -1, "item")), ("results", ("b", templates.At("index"), "item")), ("index", ()),
+        ("results", ("b", templates.At("start.pos + 1"), "item")), ("start", ("pos",))]
+    (read,) = [r for r in templates.references("{{ results.b[start.pos | int(0)].item }}") if r.name == "results"]
+    assert templates.guard(read.name, read.path) == "results.b[start.pos | int(0)].item"
+
+
+@pytest.mark.parametrize("source, guarded", [
+    ("{% if results.b %}{{ results.b[0].index }}{% endif %}", True),
+    ("{% if results.b is not none %}{{ results.b[0].index }}{% endif %}", False),  # an empty list isn't none
+    ("{% if results.b != none %}{{ results.b[0].index }}{% endif %}", False),
+])
+def test_a_none_check_of_a_list_that_is_never_none_proves_nothing(source, guarded):
+    assert ("results.b" in read_of(source, "index").guarded) is guarded
 
 
 def test_method_calls_are_not_fields():
@@ -158,6 +184,12 @@ def read_of(source: str, last: str = "done") -> Ref:
     "{% for r in results.b if r.output %}{{ r.output.done }}{% endfor %}",
     "{% for r in results.b | selectattr('output') %}{{ r.output.done }}{% endfor %}",
     "{% for r in results.b | rejectattr('output', 'none') | list %}{{ r.output.done }}{% endfor %}",
+    "{% if results.b[-1].output %}{{ results.b[-1].output.done }}{% endif %}",
+    "{% if results.b[start.i].output %}{{ results.b[start.i].output.done }}{% endif %}",
+    "{% for a in results.b %}{% for c in results.b %}{% if c.output %}{{ c.output.done }}{% endif %}{% endfor %}{% endfor %}",
+    "{% for r in results.b %}{% set o = r.output %}{% if r.output %}{{ o.done }}{% endif %}{% endfor %}",
+    "{% for r in results.b %}{% if r.output %}{% for p in r.output.parts %}{{ p.done }}{% endfor %}{% endif %}{% endfor %}",
+    "{{ results.b | selectattr('output') | map(attribute='output.done') | list }}",
 ])
 def test_a_check_guards_the_path_it_reads_also_through_a_loop_variable(source):
     read = read_of(source)
@@ -171,6 +203,10 @@ def test_a_check_guards_the_path_it_reads_also_through_a_loop_variable(source):
     "{% for r in results.b if r %}{{ r.output.done }}{% endfor %}",
     "{% for r in results.b | selectattr('output', 'defined') %}{{ r.output.done }}{% endfor %}",  # set, but maybe none
     "{% for r in results.b %}{% if r.output %}x{% endif %}{{ r.output.done }}{% endfor %}",  # after the check
+    "{% for a in results.b %}{% for c in results.b %}{% if c.output %}{{ a.output.done }}{% endif %}{% endfor %}{% endfor %}",
+    "{% for r in results.b %}{% if r.output %}{{ results.b[-1].output.done }}{% endif %}{% endfor %}",
+    "{% if results.b[start.i].output %}{{ results.b[start.j].output.done }}{% endif %}",
+    "{{ results.b | map(attribute='output.done') | list }}",
 ])
 def test_a_check_of_something_else_leaves_the_path_unguarded(source):
     read = read_of(source)

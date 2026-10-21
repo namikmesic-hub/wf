@@ -41,10 +41,11 @@ have run, unquoted agent output in shell commands.
 """
 
 import contextvars
+import itertools
 import json
 import shlex
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from jinja2 import StrictUndefined, TemplateSyntaxError, Undefined, nodes
@@ -334,14 +335,18 @@ class Ref:
     """One use of an outside name in a template.
 
     path: the fields read from it, e.g. ("tasks", 0, "title"); EACH stands for
-      "an element of this list" (from a for loop). None means the template
-      reads something derived from the name that we can't follow.
+      "an element of this list" (from a for loop, or a filter such as map), and
+      At("i") for the element at a position that the template computes, as in
+      tasks[i]. None means the template reads something derived from the name
+      that we can't follow.
     output: the value is written into the text by {{ }}, not just tested or looped over.
     quoted: ...and that {{ }} ends with `| quote`.
     guarded: names that an enclosing check proves aren't none here, as in
       `{% if review %}` or `x.y if x else none`. "name.field" entries cover
       checks like `{% if workspace.implement %}`. Each checked path is an entry
       too, as guard() writes it, also when the check reads a loop variable.
+      A check through a loop variable covers only the reads through that same
+      variable, or through a name set from it.
     """
 
     name: str
@@ -441,7 +446,21 @@ def _parse(source: str, *, expression: bool):
 _SAME_ELEMENTS = frozenset({"selectattr", "rejectattr", "select", "reject", "sort", "unique", "list", "reverse"})
 # Filters whose result is always a number, so it can't carry text into a command
 _NUMBERS = frozenset({"length", "count", "int", "float", "abs", "round", "sum", "wordcount", "filesizeformat"})
+# Filters that read a field of each element, which `attribute` (or the first argument) names
+_ATTRIBUTE_FILTERS = frozenset({"map", "selectattr", "rejectattr", "sort", "unique", "sum", "min", "max", "groupby"})
+# Variables that wf gives as an empty list or map, and never as none: a none check of them proves nothing
+_NEVER_NONE = frozenset({"results", "history", "errors"})
 _UNSUPPORTED = {nodes.Include: "include", nodes.Import: "import", nodes.FromImport: "from ... import", nodes.Extends: "extends"}
+
+
+@dataclass(frozen=True)
+class At:
+    """A path step: the element at a position that the template computes, as in plan.tasks[index]."""
+
+    text: str  # the expression of the position, as the template reads
+
+    def __str__(self) -> str:
+        return self.text
 
 
 @dataclass(frozen=True)
@@ -450,16 +469,18 @@ class _Local:
 
     If its value is a known path into an outside name (`t` in `for t in
     plan.tasks`), `name` and `path` say which. `sources` lists every outside
-    name its value came from, so tainted data can still be followed.
+    name its value came from, so tainted data can still be followed. `loops`
+    names the for loops whose current element it is, or is inside of.
     """
 
     name: str | None = None
     path: tuple = ()
     sources: tuple[str, ...] = ()
+    loops: frozenset[int] = frozenset()
 
 
 def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
-    """For a.b[0]['c'] -> (Name a, ("b", 0, "c"), dynamic index nodes); None if not that shape."""
+    """For a.b[0]['c'][i] -> (Name a, ("b", 0, "c", At("i")), dynamic index nodes); None if not that shape."""
     steps, dynamic = [], []
     while True:
         if isinstance(node, nodes.Getattr):
@@ -470,8 +491,10 @@ def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
                 pass  # x[1:] is still the list
             elif isinstance(arg, nodes.Const) and isinstance(arg.value, (str, int)) and not isinstance(arg.value, bool):
                 steps.append(arg.value)
+            elif isinstance(arg, nodes.Neg) and isinstance(arg.node, nodes.Const) and type(arg.node.value) is int:
+                steps.append(-arg.node.value)  # x[-1]
             else:
-                steps.append(EACH)
+                steps.append(At(_text(arg)))
                 dynamic.append(arg)
         elif isinstance(node, nodes.Name):
             return node, tuple(reversed(steps)), dynamic
@@ -480,17 +503,40 @@ def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
         node = node.node
 
 
+_OPERATORS = {nodes.Add: "+", nodes.Sub: "-", nodes.Mul: "*", nodes.Div: "/", nodes.FloorDiv: "//", nodes.Mod: "%"}
+
+
+def _text(node) -> str:
+    """An expression as one text, for the position in an At step: index, start.pos | int or loop.index0 + 1."""
+    if isinstance(node, nodes.Const):
+        return repr(node.value)
+    if isinstance(node, nodes.Neg):
+        return f"-{_text(node.node)}"
+    if type(node) in _OPERATORS:
+        return f"{_text(node.left)} {_OPERATORS[type(node)]} {_text(node.right)}"
+    if isinstance(node, (nodes.Filter, nodes.Call)):
+        args = ", ".join([_text(arg) for arg in node.args] + [f"{kw.key}={_text(kw.value)}" for kw in node.kwargs])
+        if isinstance(node, nodes.Call):
+            return f"{_text(node.node)}({args})"
+        return f"{_text(node.node)} | {node.name}" + (f"({args})" if args else "")
+    chain = _chain(node)
+    return guard(chain[0].name, chain[1]) if chain else repr(node)
+
+
 def guard(name: str, path: tuple) -> str:
-    """How Ref.guarded names a checked path: results.build[0].output, or results.build[*].output for any element."""
+    """How Ref.guarded names a checked path: results.build[0].output, results.build[index].output,
+    or results.build[*].output for an element of a loop."""
     text = name
     for step in path:
-        text += "[*]" if step is EACH else f"[{step}]" if isinstance(step, int) else f".{step}"
+        text += "[*]" if step is EACH else f"[{step}]" if isinstance(step, (int, At)) else f".{step}"
     return text
 
 
 def _checks(test, scope: dict | None = None) -> tuple[frozenset, frozenset]:
     """Names proven not none (when the test is true, when it is false). The checked path is one of them,
-    as guard() writes it, with a loop variable in `scope` read as the path it stands for."""
+    as guard() writes it, with a loop variable in `scope` read as the path it stands for. A path through
+    the element of a loop is bound to that loop, as (its loops, the path), so that it counts only for the
+    reads through the same element (_plain)."""
     chain = _chain(test)
     if chain:
         name, path, _ = chain
@@ -499,7 +545,7 @@ def _checks(test, scope: dict | None = None) -> tuple[frozenset, frozenset]:
         if local is None:
             tokens.add(guard(name.name, path))
         elif local.name is not None:
-            tokens.add(guard(local.name, local.path + path))
+            tokens.add(_bound(local, guard(local.name, local.path + path)))
         return frozenset(tokens), frozenset()
     if isinstance(test, nodes.Not):
         yes, no = _checks(test.node, scope)
@@ -509,11 +555,11 @@ def _checks(test, scope: dict | None = None) -> tuple[frozenset, frozenset]:
     if isinstance(test, nodes.Or):
         return frozenset(), _checks(test.left, scope)[1] | _checks(test.right, scope)[1]
     if isinstance(test, nodes.Test) and test.name == "none":
-        return frozenset(), _checks(test.node, scope)[0]
+        return frozenset(), _not_none(test.node, scope)
     if isinstance(test, nodes.Compare) and len(test.ops) == 1:
         op, right = test.ops[0].op, test.ops[0].expr
         if isinstance(right, nodes.Const) and right.value is None and op in ("eq", "ne"):
-            tokens = _checks(test.expr, scope)[0]
+            tokens = _not_none(test.expr, scope)
             return (tokens, frozenset()) if op == "ne" else (frozenset(), tokens)
         left = _chain(test.expr)
         if left and left[1]:  # `x.a == 1` can only be true if x isn't none
@@ -521,7 +567,27 @@ def _checks(test, scope: dict | None = None) -> tuple[frozenset, frozenset]:
     return frozenset(), frozenset()
 
 
-def _kept(node, source: _Local) -> frozenset[str]:
+def _not_none(node, scope: dict | None) -> frozenset:
+    """What `node is not none` proves: what _checks() gives for `node`, but nothing for a list or map
+    of _NEVER_NONE, such as results.build, which is an empty list before its node runs."""
+    chain = _chain(node)
+    if chain and chain[0].name in _NEVER_NONE and chain[0].name not in (scope or {}) and len(chain[1]) <= 1:
+        return frozenset()
+    return _checks(node, scope)[0]
+
+
+def _bound(local: _Local, checked: str):
+    """The guard token of a path checked through `local`: the path itself, or (its loops, the path)."""
+    return (local.loops, checked) if local.loops else checked
+
+
+def _plain(guards: frozenset, loops: frozenset = frozenset()) -> frozenset[str]:
+    """The guards of a read through a local in `loops`: each plain path, and each path that a check
+    through the elements of those loops gave. A check of another loop's element doesn't count."""
+    return frozenset(g if isinstance(g, str) else g[1] for g in guards if isinstance(g, str) or g[0] <= loops)
+
+
+def _kept(node, source: _Local) -> frozenset:
     """The fields that a loop's filters keep set on its elements, as guard() writes them: each element
     of `results.build | selectattr("output")`, or of `| rejectattr("output", "none")`, has an output."""
     found = set()
@@ -530,9 +596,25 @@ def _kept(node, source: _Local) -> frozenset[str]:
         field = args[0] if args and len(args) == len(node.args) and isinstance(args[0], str) else None
         keeps = (node.name == "selectattr" and len(args) == 1) or (node.name == "rejectattr" and args[1:] == ["none"])
         if field and keeps and source.name is not None:
-            found.add(guard(source.name, source.path + (field,)))
+            found.add(_bound(source, guard(source.name, source.path + (field,))))
         node = node.node
     return frozenset(found)
+
+
+def _filter_attribute(node) -> tuple | None:
+    """The field that a filter reads from each element, as a path: ("output", "stdout") for
+    `map(attribute="output.stdout")`. None when it reads none, or gives a default for a missing one."""
+    if not isinstance(node, nodes.Filter) or node.name not in _ATTRIBUTE_FILTERS or node.node is None:
+        return None
+    given = {keyword.key: keyword.value for keyword in node.kwargs}
+    value = given.get("attribute")
+    if value is None and node.name in ("selectattr", "rejectattr", "groupby") and node.args:
+        value = node.args[0]
+    if "default" in given or not (isinstance(value, nodes.Const) and isinstance(value.value, str)):
+        return None
+    if not value.value or "," in value.value:  # sort and unique also take several, with commas
+        return None
+    return tuple(int(part) if part.isdigit() else part for part in value.value.split("."))
 
 
 def _target_names(target) -> list[str]:
@@ -544,6 +626,7 @@ class _Walker:
 
     def __init__(self):
         self.refs: list[Ref] = []
+        self.loops = itertools.count(1)  # a key for each for loop, which binds the checks of its element
 
     # ----- statements -----
 
@@ -566,6 +649,8 @@ class _Walker:
             self.expr(node.iter, scope, guards)
             inner = dict(scope)
             source = self._local(node.iter, scope, each=True)
+            if source.name is not None:
+                source = replace(source, loops=source.loops | {next(self.loops)})
             for name in _target_names(node.target):
                 inner[name] = source if isinstance(node.target, nodes.Name) else _Local(sources=source.sources)
             inner["loop"] = _Local()
@@ -650,19 +735,34 @@ class _Walker:
         elif isinstance(node, nodes.Filter) and node.name in _NUMBERS:
             for child in node.iter_child_nodes():  # `x | length` writes a number, not x
                 self.expr(child, scope, guards)
+            self._attribute(node, scope, guards)
         else:
             for child in node.iter_child_nodes():
                 self.expr(child, scope, guards, output, quoted)
+            self._attribute(node, scope, guards)
+
+    def _attribute(self, node, scope, guards) -> None:
+        """`x | map(attribute="output.stdout")` reads that field of each element of x, as a loop over x
+        does. Over none or an empty list it reads nothing, so x needs no check for it."""
+        field = _filter_attribute(node)
+        source = self._local(node.node, scope, each=True) if field else None
+        if source is None or source.name is None:
+            return
+        listed = node.node
+        while isinstance(listed, nodes.Filter) and listed.name in _SAME_ELEMENTS and listed.node is not None:
+            listed = listed.node
+        kept = guards | _kept(node.node, source) | _checks(listed, scope)[0]
+        self.refs.append(Ref(source.name, source.path + field, node.lineno, guarded=_plain(kept, source.loops)))
 
     def _use(self, name: nodes.Name, path: tuple, scope, guards, output, quoted) -> None:
         local = scope.get(name.name)
         if local is None:
-            self.refs.append(Ref(name.name, path, name.lineno, output, quoted, guards))
+            self.refs.append(Ref(name.name, path, name.lineno, output, quoted, _plain(guards)))
         elif local.name is not None:
-            self.refs.append(Ref(local.name, local.path + path, name.lineno, output, quoted, guards))
+            self.refs.append(Ref(local.name, local.path + path, name.lineno, output, quoted, _plain(guards, local.loops)))
         else:
             for source in local.sources:
-                self.refs.append(Ref(source, None, name.lineno, output, quoted, guards))
+                self.refs.append(Ref(source, None, name.lineno, output, quoted, _plain(guards)))
 
     def _local(self, node, scope, each: bool = False) -> _Local:
         """What a local name assigned from `node` refers to."""
@@ -677,7 +777,7 @@ class _Walker:
             if local is None:
                 return _Local(name.name, path + suffix, (name.name,))
             if local.name is not None:
-                return _Local(local.name, local.path + path + suffix, local.sources)
+                return _Local(local.name, local.path + path + suffix, local.sources, local.loops)
             return _Local(sources=local.sources)
         sources: list[str] = []
         for found in node.find_all(nodes.Name):

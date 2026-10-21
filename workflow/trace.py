@@ -368,8 +368,9 @@ def _read_paths(source: str, expression: bool = False) -> set[tuple]:
 
 
 def _general(path: tuple) -> tuple:
-    """A negative index, as in x[-1], counts as any element: the list's length isn't known yet."""
-    return tuple(EACH if isinstance(step, int) and not isinstance(step, bool) and step < 0 else step for step in path)
+    """A negative index, as in x[-1], counts as any element: the list's length isn't known yet. So does
+    a position that the template computes, as in x[index]."""
+    return tuple(EACH if isinstance(step, templates.At) or (type(step) is int and step < 0) else step for step in path)
 
 
 def _matches(pattern: tuple, path: tuple) -> bool:

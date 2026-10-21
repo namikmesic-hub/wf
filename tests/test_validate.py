@@ -335,9 +335,14 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         "by_reject": "{% for r in results.build | rejectattr('output', 'none') %}{{ r.output.done }}{% endfor %}",
         "on_fail": "{{ results.all[0].output.done }}",  # on_item_error: fail leaves no output none
         "whole": "{{ results.build[0].output }}",  # the output itself, and no field of it
+        "by_map": "{{ results.build | map(attribute='output.done') | list }}",
+        "map_kept": "{{ results.build | selectattr('output') | map(attribute='output.done') | list }}",
+        "map_default": "{{ results.build | map(attribute='output.done', default=false) | list }}",
     }
     beside = {  # these run beside build, which might not have run yet
         "early": "{{ results.build[0].index }}",
+        "early_last": "{{ results.build[-1].index }}",
+        "early_none": "{% if results.build is not none %}{{ results.build[1].index }}{% endif %}",  # never none
         "if_ran": "{% if build %}{{ results.build[1].index }}{% endif %}",
         "if_any": "{% if results.build %}{{ results.build[1].index }}{% endif %}",
         "in_loop": "{% for r in results.build %}{{ r.index }}{% endfor %}",
@@ -347,14 +352,23 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
              "all: {needs: [start], for_each: '[1, 2]', instruction: x, output: {done: {type: boolean}}}"]
     nodes += [f"{name}: {{needs: [build, all], instruction: {json.dumps(text)}}}" for name, text in after.items()]
     nodes += [f"{name}: {{needs: [side], instruction: {json.dumps(text)}}}" for name, text in beside.items()]
+    nodes += ["pair: {needs: [side], for_each: '[0, 1]', instruction: '{{ results.build[index].index }}'}",  # by its position
+              "pick: {needs: [build], for_each: results.build, instruction: '{{ item.output.done }}'}",  # each entry
+              "pick_checked: {needs: [build], for_each: results.build, instruction: '{% if item.output %}{{ item.output.done }}{% endif %}'}"]
     report = check(tmp_path, flow("\n".join(nodes)))
     assert_problems(report, [
         ("warning", "nodes.bare_index.instruction", "reads `results.build[0].output.done`, but with `on_item_error: continue` "
                                                     "an item of `build` that failed has the output none: check that the output "
                                                     "is set first"),
         ("warning", "nodes.bare_loop.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.by_map.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.early.instruction", "reads `results.build[0].index`, but `build` might not have run yet; "
                                                "check first with {% if build %}"),
+        ("warning", "nodes.early_last.instruction", "reads `results.build[-1].index`, but `build` might not have run yet"),
+        ("warning", "nodes.early_none.instruction", "reads `results.build[1].index`, but `build` might not have run yet"),
+        ("warning", "nodes.pair.instruction", "reads `results.build[index].index`, but `build` might not have run yet"),
+        ("warning", "nodes.pick.instruction", "reads `item.output.done`, but with `on_item_error: continue` an item of "
+                                              "`build` that failed has the output none"),
     ])
 
 
