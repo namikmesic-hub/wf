@@ -813,15 +813,19 @@ def _metrics_export(args) -> int:
               f"in {settings.path()}, to its address, like http://127.0.0.1:8123", file=sys.stderr)
         return 1
     folder = runs.runs_folder(Path.cwd(), args.runs_dir)
-    if args.all_repos:
-        folder = folder.parent
-        chosen = list(reversed(ui.Source(Path.cwd(), args.runs_dir, every_repo=True).runs().values()))  # oldest first
-    elif args.run_ids:
-        chosen = _chosen(args, None)
-        if chosen is None:
-            return 1
-    else:
-        chosen = runs.all_runs(Path.cwd(), args.runs_dir)
+    try:
+        if args.all_repos:
+            folder = folder.parent
+            chosen = list(reversed(ui.Source(Path.cwd(), args.runs_dir, every_repo=True).runs().values()))  # oldest first
+        elif args.run_ids:
+            chosen = _chosen(args, None)
+            if chosen is None:
+                return 1
+        else:
+            chosen = runs.all_runs(Path.cwd(), args.runs_dir)
+    except OSError as error:  # a run folder that wf can't look into
+        print(f"wf metrics export: can't list the runs in {folder}: {error.strerror or error}", file=sys.stderr)
+        return 1
     if not chosen:
         print(f"wf metrics export: no runs in {folder}")
         return 0
