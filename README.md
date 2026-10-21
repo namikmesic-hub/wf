@@ -117,11 +117,13 @@ Each port listens on 127.0.0.1 only.
 Grafana has no login, and ClickHouse has the fixed user `wf` with the password `wf`.
 So each user and program on this machine can read and change the data of the stack.
 ClickHouse runs a statement over HTTP only for a request to 127.0.0.1 or localhost with the headers `X-ClickHouse-User` and `X-ClickHouse-Key`.
-Grafana sends a request for another host name to 127.0.0.1.
+Grafana sends a request for another host name, such as localhost, to the same port on 127.0.0.1.
 So a web page can't send a statement to either of them, also through a DNS name that points to 127.0.0.1.
 A page on such a DNS name can still send records to the Collector.
 To move a port, set `WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` or `WF_METRICS_OTLP_HTTP_PORT`.
 With 0, Docker picks a free port, and `docker compose -f metrics/compose.yaml port <service> <port>` names it.
+Grafana can't know a port that Docker picks, so it then sends a request for localhost to port 0.
+The address that `wf metrics up` prints names 127.0.0.1, so it still opens Grafana.
 
 ## Docs
 

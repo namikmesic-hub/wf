@@ -9,6 +9,7 @@
 # because Grafana has no login and ClickHouse has the fixed password wf.
 # Set a WF_METRICS_*_PORT variable to move a port. With 0, Docker picks a free port,
 # and `docker compose -f metrics/compose.yaml port SERVICE PORT` names it.
+# Grafana can't know a port that Docker picks, so it then sends a request for another host name to port 0.
 
 name: wf-metrics
 
@@ -56,9 +57,10 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: "true"
-      # A request for another host name goes to 127.0.0.1, so a page on a DNS name that points here can't use Grafana.
+      # A request for another host name goes to the root URL, so a page on a DNS name that points here can't use Grafana.
       GF_SERVER_DOMAIN: 127.0.0.1
       GF_SERVER_ENFORCE_DOMAIN: "true"
+      GF_SERVER_ROOT_URL: http://127.0.0.1:${WF_METRICS_GRAFANA_PORT:-3000}/
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"

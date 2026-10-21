@@ -46,6 +46,13 @@ def fake_docker(tmp_path, monkeypatch, script: str):
     return tmp_path / "docker.log"
 
 
+def free_port() -> int:
+    """A port on 127.0.0.1 that no program listens on now."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 @pytest.fixture
 def otlp_port():
     """A server on this machine that answers each POST with 200, as the Collector answers OTLP: its address."""
@@ -82,9 +89,7 @@ def test_wf_metrics_up_starts_the_stack_and_prints_grafana_s_address(tmp_path, m
 
 
 def test_wf_metrics_up_fails_when_the_collector_doesn_t_take_otlp(tmp_path, monkeypatch, capsys):
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        closed = f"127.0.0.1:{probe.getsockname()[1]}"
+    closed = f"127.0.0.1:{free_port()}"
     log = fake_docker(tmp_path, monkeypatch, ports(closed))
     monkeypatch.setattr(metrics, "READY_S", 0.5)
     assert cli.main(["metrics", "up"]) == 1
@@ -164,13 +169,14 @@ class Stack:
 
 @pytest.fixture(scope="module")
 def stack():
-    """The stack that `wf metrics up` starts, in a new compose project with new volumes, on ports that Docker picks."""
+    """The stack that `wf metrics up` starts, in a new compose project with new volumes, on free ports."""
     project = f"wf-metrics-test-{uuid.uuid4().hex[:8]}"
     compose = ["docker", "compose", "-f", str(metrics.COMPOSE), "-p", project]
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("COMPOSE_PROJECT_NAME", project)
         for name in metrics.PORTS:
             patch.setenv(name, "0")
+        patch.setenv("WF_METRICS_GRAFANA_PORT", str(free_port()))  # with 0, Grafana sends a request for localhost to port 0
         try:
             printed = io.StringIO()
             with contextlib.redirect_stdout(printed):
@@ -188,14 +194,16 @@ def stack():
             assert removed.returncode == 0, f"docker compose down failed, and project {project} may still run: {removed.stderr}"
 
 
-def status(url: str, body: bytes | None = None, headers: dict | None = None) -> int:
-    """The status of one request, without following a redirect. A Host in headers replaces the host of the URL."""
+def answer(url: str, body: bytes | None = None, headers: dict | None = None) -> tuple[int, str | None]:
+    """The status and the Location of one request, without following a redirect.
+    A Host in headers replaces the host of the URL."""
     parts = urllib.parse.urlsplit(url)
     connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=30)
     try:
         target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
         connection.request("GET" if body is None else "POST", target, body, headers or {})
-        return connection.getresponse().status
+        response = connection.getresponse()
+        return response.status, response.getheader("Location")
     finally:
         connection.close()
 
@@ -381,14 +389,17 @@ def test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables(stack
     assert set(re.findall(r"\{ID:(\S+) Version:(\S*) URL:", logged)) == {("grafana-clickhouse-datasource", "4.23.0")}
     assert grafana(stack, "/api/dashboards/home")["dashboard"]["uid"] == "wf-runs"
     admin = base64.b64encode(b"admin:admin").decode()
-    assert status(stack.grafana + "/api/admin/settings", headers={"Authorization": f"Basic {admin}"}) in (401, 403)
+    assert answer(stack.grafana + "/api/admin/settings",
+                  headers={"Authorization": f"Basic {admin}"}) in ((401, None), (403, None))
     keys = {"X-ClickHouse-User": "wf", "X-ClickHouse-Key": "wf"}
-    assert status(f"{stack.clickhouse}/", b"SELECT 1", keys) == 200
-    assert status(f"{stack.clickhouse}/?user=wf&password=wf", b"SELECT 1", {"Content-Type": "text/plain"}) == 403
+    assert answer(f"{stack.clickhouse}/", b"SELECT 1", keys) == (200, None)
+    assert answer(f"{stack.clickhouse}/?user=wf&password=wf", b"SELECT 1", {"Content-Type": "text/plain"}) == (403, None)
     # A page on a DNS name that points to 127.0.0.1 sends its requests with that name in Host
-    assert status(f"{stack.clickhouse}/", b"SELECT 1", {**keys, "Host": "attacker.example:8123"}) == 403
-    assert status(f"{stack.grafana}/api/ds/query", b'{"queries": []}',
-                  {"Content-Type": "application/json", "Host": "attacker.example:3000"}) == 301
+    assert answer(f"{stack.clickhouse}/", b"SELECT 1", {**keys, "Host": "attacker.example:8123"}) == (403, None)
+    port = urllib.parse.urlsplit(stack.grafana).port
+    for host in ("attacker.example", "localhost"):
+        assert answer(f"{stack.grafana}/api/ds/query", b'{"queries": []}',
+                      {"Content-Type": "application/json", "Host": f"{host}:{port}"}) == (301, f"{stack.grafana}/api/ds/query")
 
     assert clickhouse(stack, "SELECT name, value FROM system.server_settings WHERE name IN "
                              "('mark_cache_size', 'max_server_memory_usage') ORDER BY name FORMAT TSV") == (
