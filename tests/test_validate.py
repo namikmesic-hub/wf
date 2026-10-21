@@ -285,6 +285,7 @@ def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(t
             {% for r in results.build %}{{ r.index }} {{ r.item.title }} {{ r.output.done if r.output else 'failed' }}
             {{ r.harness }} {{ r.model }}{% endfor %}
             {{ results.build[0].item.titel }} {{ results.build[0].output.dun }} {{ results.build[0].cost }} {{ results.plan }}
+            {{ results.build | selectattr('output.doen', 'defined') | list }}
         echo:
           needs: [build]
           command: >-
@@ -297,6 +298,7 @@ def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(t
         ("error", "nodes.sum.instruction", "`results.build[0].output.dun`: no field `dun` (fields: done)"),
         ("error", "nodes.sum.instruction", "`results.build[0].cost`: no field `cost` (fields: index, item, output, harness, model)"),
         ("error", "nodes.sum.instruction", "`plan` isn't a for_each node, so `results.plan` doesn't exist"),
+        ("error", "nodes.sum.instruction", "`results.build[].output.doen`: no field `doen` (fields: done)"),  # also with a type test
         ("warning", "nodes.echo.command", "output from `results` into the shell unquoted"),  # the item's title, not its index
         ("warning", "nodes.act.instruction", "reads output from `build`, which has `web: true`"),
     ])
@@ -341,6 +343,8 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         "map_none": "{{ results.build | map(attribute='output.done', default=none) | list }}",  # Jinja ignores a default of none
         "by_sum": "{{ results.build | sum('output.done') }}",  # the first argument of sum is the field
         "select_defined": "{{ results.build | selectattr('output.done', 'defined') | list }}",  # a type test can't fail
+        "select_deep": "{{ results.build | selectattr('output.verdict.passed', 'defined') | list }}",  # passed of an undefined verdict
+        "by_join": "{{ results.build | join(', ', attribute='output.done') }}",
     }
     beside = {  # these run beside build, which might not have run yet
         "early": "{{ results.build[0].index }}",
@@ -351,7 +355,8 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         "in_loop": "{% for r in results.build %}{{ r.index }}{% endfor %}",
     }
     nodes = ["side: {needs: [start], command: x}",
-             "build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, output: {done: {type: boolean}}}",
+             "build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, "
+             "output: {done: {type: boolean}, verdict: {type: object, properties: {passed: {type: boolean}}}}}",
              "all: {needs: [start], for_each: '[1, 2]', instruction: x, output: {done: {type: boolean}}}"]
     nodes += [f"{name}: {{needs: [build, all], instruction: {json.dumps(text)}}}" for name, text in after.items()]
     nodes += [f"{name}: {{needs: [side], instruction: {json.dumps(text)}}}" for name, text in beside.items()]
@@ -367,6 +372,8 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         ("warning", "nodes.by_map.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.map_none.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.by_sum.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.select_deep.instruction", "reads `results.build[].output.verdict.passed`, but with `on_item_error: continue`"),
+        ("warning", "nodes.by_join.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.early.instruction", "reads `results.build[0].index`, but `build` might not have run yet; "
                                                "check first with {% if build %}"),
         ("warning", "nodes.early_last.instruction", "reads `results.build[-1].index`, but `build` might not have run yet"),

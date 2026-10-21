@@ -138,12 +138,33 @@ def test_a_filter_that_reads_a_field_of_each_element_reads_its_path():
     ("results.b | groupby('output.kind', 'other')", None),  # the default without its keyword
     ("results.b | selectattr('output.done')", "done"),
     ("results.b | selectattr('output.done', 'equalto', true)", "done"),
-    ("results.b | selectattr('output.done', 'defined')", None),  # a type test can't fail on a missing field
-    ("results.b | rejectattr('output.done', 'none')", None),
+    ("results.b | join(', ', attribute='output.title')", "title"),
+    ("results.b | join(', ', 'output.title')", "title"),  # the field after the separator, without its keyword
 ])
 def test_a_filter_reads_the_field_only_where_a_missing_field_can_make_it_fail(source, field):
     reads = [path for name, path in refs(source, expression=True) if name == "results" and len(path) > 1]
     assert reads == ([("b", EACH, "output", field)] if field else [])
+
+
+@pytest.mark.parametrize("source", [
+    "results.b | selectattr('output.done', 'defined') | list",  # a type test takes the undefined field of a none output
+    "results.b | rejectattr('output.done', 'none') | list",
+    "results.b | selectattr('output.verdict.passed', 'defined') | list",  # but Jinja can't read passed of an undefined verdict
+    "results.b | rejectattr('output.verdict.passed', 'none') | list",
+    "results.b | selectattr('output.done') | list",
+    "results.b | join(', ', attribute='output.title')",
+    "results.b | selectattr('output') | join(', ', attribute='output.title')",
+])
+def test_a_filter_leaves_the_output_unguarded_exactly_where_a_failed_item_makes_it_fail(source):
+    entries = [{"index": 0, "item": "a", "output": {"done": True, "title": "A", "verdict": {"passed": True}}, "harness": None, "model": None},
+               {"index": 1, "item": "b", "output": None, "harness": None, "model": None}]
+    try:
+        templates.evaluate(source, {"results": {"b": entries}})
+        fails = False
+    except TemplateError:
+        fails = True
+    (read,) = [r for r in templates.references(source, expression=True) if r.name == "results" and len(r.path) > 3]
+    assert (templates.guard("results", read.path[:3]) not in read.guarded) is fails
 
 
 def test_a_position_that_the_template_computes_is_kept_apart_from_a_loop():

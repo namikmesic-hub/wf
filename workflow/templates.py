@@ -346,7 +346,9 @@ class Ref:
       checks like `{% if workspace.implement %}`. Each checked path is an entry
       too, as guard() writes it, also when the check reads a loop variable.
       A check through a loop variable covers only the reads through that same
-      variable, or through a name set from it.
+      variable, or through a name set from it. A type test in selectattr or
+      rejectattr adds the path before the last step of its field, because a
+      none there can't make the test fail.
     """
 
     name: str
@@ -449,7 +451,8 @@ _NUMBERS = frozenset({"length", "count", "int", "float", "abs", "round", "sum", 
 # Filters that read a field of each element, and the positions of their arguments `attribute` and `default`
 # for a template that doesn't name them. So sum("cost") reads the field cost.
 _ATTRIBUTE_FILTERS = {"map": (None, None), "selectattr": (0, None), "rejectattr": (0, None), "sum": (0, None),
-                      "groupby": (0, 1), "unique": (1, None), "min": (1, None), "max": (1, None), "sort": (2, None)}
+                      "groupby": (0, 1), "unique": (1, None), "min": (1, None), "max": (1, None), "sort": (2, None),
+                      "join": (1, None)}
 # Tests that check only the type or the identity of a value, so a field of none, which is undefined, can't make them fail
 _TYPE_TESTS = frozenset({"defined", "undefined", "none", "boolean", "true", "false", "integer", "float", "number",
                          "string", "mapping", "sequence", "callable", "sameas", "escaped"})
@@ -608,8 +611,8 @@ def _kept(node, source: _Local) -> frozenset:
 
 def _filter_attribute(node) -> tuple | None:
     """The field that a filter reads from each element, as a path: ("output", "stdout") for
-    `map(attribute="output.stdout")`. None when it reads none, or when a missing field can't make it fail.
-    A literal default other than none prevents that, and so does a test of _TYPE_TESTS in selectattr or rejectattr."""
+    `map(attribute="output.stdout")`. None when it reads none, or when it gives a literal default
+    other than none, which takes the place of a missing field."""
     if not isinstance(node, nodes.Filter) or node.name not in _ATTRIBUTE_FILTERS or node.node is None:
         return None
     field_position, default_position = _ATTRIBUTE_FILTERS[node.name]
@@ -619,10 +622,14 @@ def _filter_attribute(node) -> tuple | None:
     default = _argument(node, "default", default_position)
     if isinstance(default, (nodes.List, nodes.Tuple, nodes.Dict)) or (isinstance(default, nodes.Const) and default.value is not None):
         return None  # Jinja uses a default only when it isn't none
-    test = node.args[1] if node.name in ("selectattr", "rejectattr") and len(node.args) > 1 else None
-    if isinstance(test, nodes.Const) and test.value in _TYPE_TESTS:
-        return None
     return tuple(int(part) if part.isdigit() else part for part in value.value.split("."))
+
+
+def _type_tested(node: nodes.Filter) -> bool:
+    """Whether selectattr or rejectattr runs a test of _TYPE_TESTS on its field. The test takes the
+    undefined value of a missing last step, but Jinja can't read a step after a missing one."""
+    test = node.args[1] if node.name in ("selectattr", "rejectattr") and len(node.args) > 1 else None
+    return isinstance(test, nodes.Const) and test.value in _TYPE_TESTS
 
 
 def _argument(node: nodes.Filter, keyword: str, position: int | None):
@@ -768,6 +775,8 @@ class _Walker:
         while isinstance(listed, nodes.Filter) and listed.name in _SAME_ELEMENTS and listed.node is not None:
             listed = listed.node
         kept = guards | _kept(node.node, source) | _checks(listed, scope)[0]
+        if _type_tested(node):
+            kept |= {_bound(source, guard(source.name, source.path + field[:-1]))}
         self.refs.append(Ref(source.name, source.path + field, node.lineno, guarded=_plain(kept, source.loops)))
 
     def _use(self, name: nodes.Name, path: tuple, scope, guards, output, quoted) -> None:
