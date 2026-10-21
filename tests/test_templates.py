@@ -180,7 +180,24 @@ def test_a_field_step_that_isnt_a_decimal_number_stays_a_name():
     "results.b | selectattr('output', 'defined') | map(attribute='output.done') | list",  # a none output is defined
 ])
 def test_a_filter_leaves_the_output_unguarded_exactly_where_a_failed_item_fails_the_render_or_writes_undefined(source):
-    template = "{{ " + source + " }}"  # as wf renders an instruction
+    assert_unguarded_exactly_where_a_failed_item_breaks_the_render("{{ " + source + " }}")  # as wf renders an instruction
+
+
+@pytest.mark.parametrize("template", [
+    "{% set outs = results.b | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
+    "{% set outs = results.b | map(attribute='output') | list %}{{ outs[1].done }}",
+    "{% set outs = results.b | map(attribute='output') | list %}{% if outs[1] %}{{ outs[1].done }}{% endif %}",
+    "{% set outs = results.b | map(attribute='output') %}{{ outs | join(', ', attribute='title') }}",
+    "{% with outs = results.b | map(attribute='output') %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
+    "{% with outs = results.b | map(attribute='output') | select %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
+    "{% set outs = results.b | selectattr('output') | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
+    "{% set ok = results.b | selectattr('output') | list %}{{ ok[0].output.done }}",
+])
+def test_a_name_from_set_or_with_leaves_the_output_unguarded_exactly_where_a_failed_item_fails_the_render(template):
+    assert_unguarded_exactly_where_a_failed_item_breaks_the_render(template)
+
+
+def assert_unguarded_exactly_where_a_failed_item_breaks_the_render(template: str) -> None:
     succeeded = {"index": 0, "item": "a", "output": {"done": True, "title": "A", "cost": 1, "kind": "k", "verdict": {"passed": True}},
                  "harness": None, "model": None}
     failed = {"index": 1, "item": "b", "output": None, "harness": None, "model": None}
@@ -189,7 +206,7 @@ def test_a_filter_leaves_the_output_unguarded_exactly_where_a_failed_item_fails_
         broken = "Undefined" in templates.render(template, {"results": {"b": [succeeded, failed]}})
     except TemplateError:
         broken = True
-    reads = [r for r in templates.references(template) if r.name == "results" and len(r.path) > 3]
+    reads = [r for r in templates.references(template) if r.name == "results" and len(r.path or ()) > 3]
     assert any(templates.guard("results", r.path[:3]) not in r.guarded for r in reads) is broken
 
 
@@ -263,6 +280,12 @@ def read_of(source: str, last: str = "done") -> Ref:
     "{% for o in results.b | selectattr('output') | map(attribute='output') %}{{ o.done }}{% endfor %}",
     "{% for o in results.b | map(attribute='output') %}{% if o %}{{ o.done }}{% endif %}{% endfor %}",
     "{% for o in results.b | map(attribute='output') | select %}{{ o.done }}{% endfor %}",
+    "{% set outs = results.b | map(attribute='output') | list %}{% for o in outs if o %}{{ o.done }}{% endfor %}",
+    "{% set outs = results.b | map(attribute='output') | list %}{% if outs[1] %}{{ outs[1].done }}{% endif %}",
+    "{% set outs = results.b | selectattr('output') | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
+    "{% with outs = results.b | map(attribute='output') | select %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
+    "{% set ok = results.b | selectattr('output') | list %}{% for r in ok %}{{ r.output.done }}{% endfor %}",
+    "{% set ok = results.b | selectattr('output') | list %}{{ ok[0].output.done }}",  # each entry of ok has an output
 ])
 def test_a_check_guards_the_path_it_reads_also_through_a_loop_variable(source):
     read = read_of(source)
@@ -282,6 +305,11 @@ def test_a_check_guards_the_path_it_reads_also_through_a_loop_variable(source):
     "{{ results.b | map(attribute='output.done') | list }}",
     "{% for o in results.b | map(attribute='output') %}{{ o.done }}{% endfor %}",  # each o is an output
     "{% for r in results.b | selectattr('output', 'none') %}{{ r.output.done }}{% endfor %}",  # only the none ones
+    "{% set outs = results.b | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
+    "{% set outs = results.b | map(attribute='output') | list %}{{ outs[1].done }}",  # outs[1] is results.b[1].output
+    "{% set outs = results.b | map(attribute='output') | list %}{% if outs[0] %}{{ outs[1].done }}{% endif %}",
+    "{% with outs = results.b | map(attribute='output') %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
+    "{% set outs = results.b | map(attribute='output') %}{% set again = outs | list %}{{ again[1].done }}",
 ])
 def test_a_check_of_something_else_leaves_the_path_unguarded(source):
     read = read_of(source)

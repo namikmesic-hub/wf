@@ -1641,6 +1641,8 @@ Warnings:
   A deeper field, such as `output.verdict.passed`, still gets the warning, because a failed item has no `output.verdict` to read `passed` from.
   Each element of `results.<node> | map(attribute='output')` is an output, so a read of a field of it counts too.
   So does a read of `item.output.<field>` in a `for_each` over `results.<node>`, also through filters that keep the entries, such as `| list`.
+  A read through a name that `set` or `with` gives such a list counts too, as in `{% set outs = results.build | map(attribute='output') | list %}`.
+  A filter of that list that checks the output, such as `selectattr('output')`, is a check for each read through the name.
 - A `command` uses node outputs without `env` or `| quote`, or uses a `start` input that a
   parent workflow fills from node output, or a `workspace.<node>.branch` that a `branch`
   names from node output.

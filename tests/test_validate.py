@@ -368,6 +368,12 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         "select_defined": "{{ results.build | selectattr('output.done', 'defined') | list }}",  # a type test can't fail
         "select_deep": "{{ results.build | selectattr('output.verdict.passed', 'defined') | list }}",  # passed of an undefined verdict
         "by_join": "{{ results.build | join(', ', attribute='output.done') }}",
+        "by_set": "{% set outs = results.build | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
+        "set_index": "{% set outs = results.build | map(attribute='output') | list %}{{ outs[0].done }}",
+        "by_with": "{% with outs = results.build | map(attribute='output') %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
+        "set_checked": "{% set outs = results.build | map(attribute='output') | list %}{% if outs[0] %}{{ outs[0].done }}{% endif %}",
+        "set_kept": "{% set ok = results.build | selectattr('output') | map(attribute='output') | list %}{% for o in ok %}{{ o.done }}{% endfor %}",
+        "set_entries": "{% set ok = results.build | selectattr('output') | list %}{% for r in ok %}{{ r.output.done }}{% endfor %}",
     }
     beside = {  # these run beside build, which might not have run yet
         "early": "{{ results.build[0].index }}",
@@ -399,6 +405,9 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         ("warning", "nodes.by_sum.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.select_deep.instruction", "reads `results.build[].output.verdict.passed`, but with `on_item_error: continue`"),
         ("warning", "nodes.by_join.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.by_set.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.set_index.instruction", "reads `results.build[0].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.by_with.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.early.instruction", "reads `results.build[0].index`, but `build` might not have run yet; "
                                                "check first with {% if build %}"),
         ("warning", "nodes.early_last.instruction", "reads `results.build[-1].index`, but `build` might not have run yet"),

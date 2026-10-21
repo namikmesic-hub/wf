@@ -483,12 +483,19 @@ class _Local:
     plan.tasks`), `name` and `path` say which. `sources` lists every outside
     name its value came from, so tainted data can still be followed. `loops`
     names the for loops whose current element it is, or is inside of.
+    A list through filters keeps the path of the list. `each` is the field that
+    map(attribute=...) takes from each element: after `{% set outs =
+    results.b | map(attribute="output") %}`, outs[0] is results.b[0].output.
+    `kept` holds the fields that the filters keep set on each element, as
+    paths from the element at a position of `path`.
     """
 
     name: str | None = None
     path: tuple = ()
     sources: tuple[str, ...] = ()
     loops: frozenset[int] = frozenset()
+    each: tuple = ()
+    kept: frozenset[tuple] = frozenset()
 
 
 def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
@@ -557,7 +564,7 @@ def _checks(test, scope: dict | None = None) -> tuple[frozenset, frozenset]:
         if local is None:
             tokens.add(guard(name.name, path))
         elif local.name is not None:
-            tokens.add(_bound(local, guard(local.name, local.path + path)))
+            tokens.add(_bound(local, guard(local.name, _through(local, path))))
         return frozenset(tokens), frozenset()
     if isinstance(test, nodes.Not):
         yes, no = _checks(test.node, scope)
@@ -591,6 +598,12 @@ def _not_none(node, scope: dict | None) -> frozenset:
 def _bound(local: _Local, checked: str):
     """The guard token of a path checked through `local`: the path itself, or (its loops, the path)."""
     return (local.loops, checked) if local.loops else checked
+
+
+def _through(local: _Local, path: tuple) -> tuple:
+    """The outside path that `path` reads through `local`. In a list that map(attribute=...) gives,
+    the first step picks the element, and the field that map takes comes after it."""
+    return (*local.path, path[0], *local.each, *path[1:]) if local.each and path else (*local.path, *path)
 
 
 def _plain(guards: frozenset, loops: frozenset = frozenset()) -> frozenset[str]:
@@ -844,45 +857,44 @@ class _Walker:
         on it. Through map(attribute=...), each element is that field: each element of
         `results.b | map(attribute="output")` is results.b[*].output. The guards of a for loop's
         element are bound to that `loop`."""
-        inner, filters = _unwrap(node)
-        local = self._local(inner, scope, each=True)
-        if local.name is not None and loop is not None:
-            local = replace(local, loops=local.loops | {loop})
-        kept = set()
-        for found in filters:
-            if local.name is None:
-                break
-            if (field := _mapped(found)) is not None:
-                local = replace(local, path=local.path + field)
-            elif (field := _keeps(found)) is not None:
-                kept.add(_bound(local, guard(local.name, local.path + field)))
-        return local, frozenset(kept)
+        listed = self._local(node, scope)
+        if listed.name is None:
+            return listed, frozenset()
+        loops = listed.loops | ({loop} if loop is not None else set())
+        element = _Local(listed.name, _through(listed, (EACH,)), listed.sources, loops)
+        return element, frozenset(_bound(element, guard(listed.name, (*listed.path, EACH, *field))) for field in listed.kept)
 
     def _use(self, name: nodes.Name, path: tuple, scope, guards, output, quoted) -> None:
         local = scope.get(name.name)
         if local is None:
             self.refs.append(Ref(name.name, path, name.lineno, output, quoted, _plain(guards)))
         elif local.name is not None:
-            self.refs.append(Ref(local.name, local.path + path, name.lineno, output, quoted, _plain(guards, local.loops)))
+            kept = {_bound(local, guard(local.name, (*local.path, path[0], *field))) for field in local.kept} if path else set()
+            self.refs.append(Ref(local.name, _through(local, path), name.lineno, output, quoted, _plain(guards | kept, local.loops)))
         else:
             for source in local.sources:
                 self.refs.append(Ref(source, None, name.lineno, output, quoted, _plain(guards)))
 
-    def _local(self, node, scope, each: bool = False) -> _Local:
-        """What a local name assigned from `node` refers to."""
-        unwrapped = node
-        while isinstance(unwrapped, nodes.Filter) and unwrapped.name in _SAME_ELEMENTS and unwrapped.node is not None:
-            unwrapped = unwrapped.node
-        chain = _chain(unwrapped)
+    def _local(self, node, scope) -> _Local:
+        """What a local name assigned from `node` refers to. Through the filters that keep the elements
+        of a list or take a field of each, it is still that list (see _Local)."""
+        inner, filters = _unwrap(node)
+        chain = _chain(inner)
         if chain and not chain[2]:
             name, path, _ = chain
-            suffix = (EACH,) if each else ()
             local = scope.get(name.name)
             if local is None:
-                return _Local(name.name, path + suffix, (name.name,))
-            if local.name is not None:
-                return _Local(local.name, local.path + path + suffix, local.sources, local.loops)
-            return _Local(sources=local.sources)
+                value = _Local(name.name, path, (name.name,))
+            elif local.name is not None:
+                value = replace(local, path=_through(local, path), each=(), kept=frozenset()) if path else local
+            else:
+                return _Local(sources=local.sources)
+            for applied in filters:
+                if (field := _mapped(applied)) is not None:
+                    value = replace(value, each=value.each + field)
+                elif (field := _keeps(applied)) is not None:
+                    value = replace(value, kept=value.kept | {value.each + field})
+            return value
         sources: list[str] = []
         for found in node.find_all(nodes.Name):
             if found.ctx != "load":
