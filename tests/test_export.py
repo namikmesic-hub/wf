@@ -4,6 +4,7 @@ Most tests export into a store in memory, which keeps each row that the export i
 docker export into a real ClickHouse in a container of their own, and remove it at the end. Where Docker
 doesn't answer, or can't get the image of ClickHouse, pytest skips them."""
 
+import fcntl
 import hashlib
 import http.server
 import json
@@ -106,7 +107,8 @@ def r(clock: str, kind: str, ident: str, facts: dict | None = None, **more) -> d
 def traced(error: dict) -> list[dict]:
     """The trace of a run of `deliver`: a command that fails once, an agent with two turns and three tool calls,
     two items of review, one of them on a fallback after a rate limit, and a workflow node whose sub-workflow
-    times out, until `wf retry` runs it again. `error` is the reference to LONG_ERROR in blobs/."""
+    times out, until `wf retry` runs it again. Before its rate limit, Cursor names a call of a wf tool only in
+    the call's second record, as its ACP does. `error` is the reference to LONG_ERROR in blobs/."""
     tests = {"node": "tests", "pass": 1, "command": "make test", "cwd": "/repo", "env": {}}
     implement = {"node": "implement", "pass": 1, "attempt": 1, "harness": "claude-code", "model": "claude-opus-5-5",
                  "effort": "high", "access": "edit", "web": False}
@@ -153,6 +155,10 @@ def traced(error: dict) -> list[dict]:
         r("10:01:11.000", "attempt", "review#1[0].a1", review, session=fresh, started=at("10:01:11.000")),
         r("10:01:11.000", "attempt", "review#1[1].a1", rate_limited, session=fresh, started=at("10:01:11.000")),
         r("10:01:12.000", "turn", "review#1[1].a1.t1", turn(rate_limited, 1), sends="instruction", text="Review it."),
+        r("10:01:13.000", "tool_call", "review#1[1].a1.t1.c1", turn(rate_limited, 1), tool="other", arguments={}),
+        r("10:01:13.400", "tool_call", "review#1[1].a1.t1.c1", turn(rate_limited, 1), tool="linear.list_issues",
+          arguments={"team": "wf"}),
+        r("10:01:14.000", "tool_result", "review#1[1].a1.t1.c1", turn(rate_limited, 1), is_error=False, kept=False, characters=120),
         r("10:01:40.000", "turn_end", "review#1[1].a1.t1", turn(rate_limited, 1), status="failed", message=error, usage=NOTHING),
         r("10:01:40.100", "attempt_end", "review#1[1].a1", rate_limited, session={"start": "fresh", "id": "agent-1"},
           usage=NOTHING, started=at("10:01:11.000"), ended=at("10:01:40.100"), duration_s=29.1, outcome="failed", error=error),
@@ -268,15 +274,18 @@ SOL = {"harness": "codex", "model": "gpt-6.1-sol"}
 TRACE_ROWS = {
     "runs": [{"run_id": TRACED, "repo_key": REPO, "workflow": "deliver", "status": "succeeded", "dry_run": False,
               "started": "2026-10-20 08:00:00.000", "ended": "2026-10-20 09:00:31.000", "duration_s": 192.0,
-              "cost_usd": 0.8, "tokens": 7400, "source": "trace"}],
+              "cost_usd": 0.8, "tokens": 7700, "source": "trace"}],
     "attempts": [
         attempt(TRACED, "build", 1, -1, 1, kind="workflow", started="2026-10-20 08:02:31.000", ended="2026-10-20 08:02:40.100",
                 duration_s=9.1, outcome="failed", error="sub-workflow build failed: compile: timed out after 8s",
                 error_class="timeout"),
         attempt(TRACED, "build", 1, -1, 2, kind="workflow", started="2026-10-20 09:00:01.000", ended="2026-10-20 09:00:30.100",
                 duration_s=29.1),
-        attempt(TRACED, "build/compile", 1, -1, 1, **SOL, effort="low", access="edit", session_id="thr-3", session_start="fresh",
-                started="2026-10-20 09:00:01.100", ended="2026-10-20 09:00:30.000", duration_s=28.9,
+        attempt(TRACED, "build#1.a1/compile", 1, -1, 1, **SOL, effort="low", access="edit", session_id="thr-2",
+                session_start="fresh", started="2026-10-20 08:02:31.100", ended="2026-10-20 08:02:40.000", duration_s=8.9,
+                outcome="timed_out", error="timed out after 8s", error_class="timeout", **counts(300, 0.0, 100, 50, 150, 0, 20)),
+        attempt(TRACED, "build#1.a2/compile", 1, -1, 1, **SOL, effort="low", access="edit", session_id="thr-3",
+                session_start="fresh", started="2026-10-20 09:00:01.100", ended="2026-10-20 09:00:30.000", duration_s=28.9,
                 **counts(400, 0.0, 100, 100, 200, 0, 30)),
         attempt(TRACED, "implement", 1, -1, 1, **OPUS, access="edit", session_id="sess-1", session_start="fresh",
                 started="2026-10-20 08:00:06.000", ended="2026-10-20 08:01:10.500", duration_s=64.5,
@@ -307,6 +316,8 @@ TRACE_ROWS = {
     "tool_calls": [
         call(TRACED, "implement", 1, -1, 1, 1, "t1.c1", "Bash", "claude-code", "claude-opus-5-5", "2026-10-20 08:00:07.000", 1300.0, False),
         call(TRACED, "implement", 1, -1, 1, 1, "t1.c2", "Read", "claude-code", "claude-opus-5-5", "2026-10-20 08:00:09.000", 40.0, True),
+        call(TRACED, "review", 1, 1, 1, 1, "t1.c1", "linear.list_issues", "cursor", "gemini-3.8-flash-high",
+             "2026-10-20 08:01:13.000", 1000.0, False),
         call(TRACED, "implement", 1, -1, 1, 2, "t2.c1", "Grep", "claude-code", "claude-opus-5-5", "2026-10-20 08:01:08.000"),
     ],
     "routes": [
@@ -357,7 +368,7 @@ def test_a_trace_gives_a_row_for_each_run_attempt_turn_tool_call_and_route(runs_
     store = Memory()
     written = export.export(of(traced_folder(runs_dir / REPO)), store)
     assert store.final() == {table: ordered(table, rows) for table, rows in TRACE_ROWS.items()}
-    assert written == {"runs": 1, "attempts": 9, "turns": 3, "tool_calls": 3, "routes": 2}
+    assert written == {"runs": 1, "attempts": 10, "turns": 3, "tool_calls": 4, "routes": 2}
 
 
 def test_each_row_has_the_columns_of_its_table():
@@ -378,6 +389,7 @@ def test_the_schema_has_the_tables_of_the_metrics_stack_with_each_count_of_usage
 
 
 def test_an_export_gives_the_same_rows_wherever_the_one_before_stopped(tmp_path):
+    # No process holds the run's lock, so each cut shows the run as stopped there, until the rest comes
     for cut in range(len(traced({})) + 1):
         path = traced_folder(tmp_path / str(cut) / REPO)
         text = (path / "trace.jsonl").read_text()
@@ -395,7 +407,8 @@ def test_a_row_of_something_that_runs_is_written_again_when_it_ends(runs_dir):
     upto = text.index('"kind": "tool_result", "id": "implement#1.a1.t1.c1"')
     (path / "trace.jsonl").write_text(text[:text.rindex("\n", 0, upto) + 1])
     store = Memory()
-    export.export(of(path), store)
+    with Run.at(path).driving():  # the process that writes the trace
+        export.export(of(path), store)
     running = store.final()
     assert [(row["node"], row["outcome"], row["ended"]) for row in running["attempts"]] == [
         ("implement", "running", None), ("tests", "failed", "2026-10-20 08:00:03.500"), ("tests", "succeeded", "2026-10-20 08:00:05.600")]
@@ -413,12 +426,88 @@ def test_a_line_that_is_still_being_written_waits_for_the_next_export(runs_dir):
     half = len(text) - 40  # in the last line, the run_stopped of the retry
     (path / "trace.jsonl").write_text(text[:half])
     store = Memory()
-    export.export(of(path), store)
+    with Run.at(path).driving():  # the process that writes the trace
+        export.export(of(path), store)
     assert json.loads((path / "export.json").read_text())["offset"] == text.rindex("\n", 0, half) + 1
     assert store.final()["runs"][0]["status"] == "running"
     (path / "trace.jsonl").write_text(text)
     assert export.export(of(path), store) == {"runs": 1}
     assert store.final() == {table: ordered(table, rows) for table, rows in TRACE_ROWS.items()}
+
+
+def killed(path: Path) -> str:
+    """The trace of the run folder, cut after the call that implement starts in its second turn, where its
+    process dies. Returns the whole trace."""
+    text = (path / "trace.jsonl").read_text()
+    (path / "trace.jsonl").write_text(text[:text.index("\n", text.index('"id": "implement#1.a1.t2.c1"')) + 1])
+    return text
+
+
+IMPLEMENT = {"node": "implement", "pass": 1, "attempt": 1, "harness": "claude-code", "model": "claude-opus-5-5", "effort": "high",
+             "access": "edit", "web": False}
+RERUN = [  # `wf retry` runs implement again from the checkpoint, in an attempt of the same number
+    r("11:00:00.000", "run", "run", action="retried", workflow="deliver"),
+    r("11:00:01.000", "attempt", "implement#1.a1", IMPLEMENT, session={"start": "fresh"}, started=at("11:00:01.000")),
+    r("11:00:01.100", "turn", "implement#1.a1.t1", {"node": "implement", "pass": 1, "attempt": 1}, turn=1, sends="instruction"),
+    r("11:00:30.000", "turn_end", "implement#1.a1.t1", {"node": "implement", "pass": 1, "attempt": 1}, turn=1, status="done",
+      usage=used(100, 0.05, 10, 30, 50, 10, 0)),
+    r("11:00:31.000", "turn", "implement#1.a1.t2", {"node": "implement", "pass": 1, "attempt": 1}, turn=2, sends="reminder"),
+    r("11:00:32.000", "tool_call", "implement#1.a1.t2.c1", {"node": "implement", "pass": 1, "attempt": 1}, turn=2, tool="Edit"),
+    r("11:00:32.250", "tool_result", "implement#1.a1.t2.c1", {"node": "implement", "pass": 1, "attempt": 1}, turn=2, is_error=False),
+    r("11:00:33.000", "turn_end", "implement#1.a1.t2", {"node": "implement", "pass": 1, "attempt": 1}, turn=2, status="done",
+      usage=used(50, 0.05, 5, 15, 25, 5, 0)),
+    r("11:00:33.500", "attempt_end", "implement#1.a1", IMPLEMENT, session={"start": "fresh", "id": "sess-9"},
+      usage=used(150, 0.1, 15, 45, 75, 15, 0), started=at("11:00:01.000"), ended=at("11:00:33.500"), duration_s=32.5,
+      outcome="succeeded"),
+    r("11:00:34.000", "run_stopped", "run", status="succeeded"),
+]
+
+
+def test_a_run_whose_process_stopped_without_run_stopped_is_stopped_and_what_it_left_running_is_cancelled(runs_dir):
+    path = traced_folder(runs_dir / REPO)
+    killed(path)
+    store = Memory()
+    with Run.at(path).driving():  # while its process lives
+        export.export(of(path), store)
+    assert store.final()["runs"][0]["status"] == "running"
+    assert export.export(of(path), store) == {"runs": 1, "attempts": 1, "turns": 1}  # nothing new, but no process drives it
+    found = store.final()
+    assert [(row["status"], row["ended"], row["duration_s"]) for row in found["runs"]] == [
+        ("stopped", "2026-10-20 08:01:08.000", 68.0)]  # as `wf status` says, at its last record
+    assert [(row["outcome"], row["ended"], row["duration_s"]) for row in found["attempts"] if row["node"] == "implement"] == [
+        ("cancelled", "2026-10-20 08:01:08.000", 62.0)]
+    assert [(row["turn"], row["status"], row["ended"], row["duration_s"]) for row in found["turns"]] == [
+        (1, "done", "2026-10-20 08:01:06.100", 60.0), (2, "cancelled", "2026-10-20 08:01:08.000", 1.0)]
+    assert found["tool_calls"][-1]["call_id"] == "t2.c1" and found["tool_calls"][-1]["duration_ms"] is None
+    assert export.export(of(path), store) == {}
+
+
+def test_a_rerun_of_an_attempt_after_its_process_stopped_starts_with_none_of_what_that_process_left(runs_dir):
+    path = traced_folder(runs_dir / REPO)
+    killed(path)
+    with (path / "trace.jsonl").open("a") as trace:
+        trace.write(lines(RERUN))
+    store = Memory()
+    export.export(of(path), store)
+    found = store.final()
+    edit = next(row for row in found["tool_calls"] if row["call_id"] == "t2.c1")
+    assert (edit["tool"], edit["started"], edit["duration_ms"], edit["is_error"]) == ("Edit", "2026-10-20 09:00:32.000", 250.0, False)
+    assert [(row["turn"], row["started"], row["status"]) for row in found["turns"]] == [
+        (1, "2026-10-20 09:00:01.100", "done"), (2, "2026-10-20 09:00:31.000", "done")]
+    implement = next(row for row in found["attempts"] if row["node"] == "implement")
+    assert (implement["started"], implement["outcome"], implement["tokens"]) == ("2026-10-20 09:00:01.000", "succeeded", 150)
+    assert [(row["status"], row["ended"], row["duration_s"], row["tokens"]) for row in found["runs"]] == [
+        ("succeeded", "2026-10-20 09:00:34.000", 102.0, 150)]  # 68 s until the process died, and 34 s of the retry
+
+
+def test_a_trace_shorter_than_its_offset_is_read_again_from_its_start(runs_dir):
+    path = traced_folder(runs_dir / REPO)
+    export.export(of(path), Memory())
+    shorter = "".join((path / "trace.jsonl").read_text().splitlines(keepends=True)[:6])  # the run and the attempts of tests
+    (path / "trace.jsonl").write_text(shorter)
+    store = Memory()
+    assert export.export(of(path), store) == {"runs": 1, "attempts": 2}
+    assert json.loads((path / "export.json").read_text())["offset"] == len(shorter.encode())
 
 
 def test_exporting_twice_writes_nothing_the_second_time(runs_dir):
@@ -435,7 +524,7 @@ def test_tables_that_are_made_again_get_each_row_again(runs_dir):
     path = traced_folder(runs_dir / REPO)
     export.export(of(path), Memory("tables-1"))
     again = Memory("tables-2")  # after `docker compose down -v`, say
-    assert export.export(of(path), again) == {"runs": 1, "attempts": 9, "turns": 3, "tool_calls": 3, "routes": 2}
+    assert export.export(of(path), again) == {"runs": 1, "attempts": 10, "turns": 3, "tool_calls": 4, "routes": 2}
     assert again.final() == {table: ordered(table, rows) for table, rows in TRACE_ROWS.items()}
 
 
@@ -448,15 +537,52 @@ def test_a_damaged_export_json_counts_as_none(runs_dir, kept):
     assert store.final() == {table: ordered(table, rows) for table, rows in TRACE_ROWS.items()}
 
 
-def test_the_export_writes_only_export_json_and_works_while_a_process_drives_the_run(runs_dir):
+def test_the_export_writes_only_export_json_and_its_lock_and_works_while_a_process_drives_the_run(runs_dir):
     path = traced_folder(runs_dir / REPO)
     run = Run.at(path)
     with run.driving():  # as `wf run` holds it
         before = {file: file.read_bytes() for file in path.rglob("*") if file.is_file()}
         export.export(run, Memory())
         after = {file: file.read_bytes() for file in path.rglob("*") if file.is_file()}
-    assert set(after) - set(before) == {path / "export.json"}
+    assert set(after) - set(before) == {path / "export.json", path / "export.lock"}
     assert all(after[file] == data for file, data in before.items())
+
+
+def test_an_export_waits_while_another_export_of_the_run_holds_export_lock(runs_dir):
+    path = traced_folder(runs_dir / REPO)
+    other = os.open(path / "export.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(other, fcntl.LOCK_EX)
+    store, done = Memory(), threading.Event()
+    waiting = threading.Thread(target=lambda: (export.export(of(path), store), done.set()))
+    waiting.start()
+    try:
+        assert not done.wait(0.3)
+        assert store.inserts == [] and not (path / "export.json").exists()  # it read nothing yet
+    finally:
+        os.close(other)  # the other export ends
+    waiting.join(10)
+    assert done.is_set()
+    assert store.final() == {table: ordered(table, rows) for table, rows in TRACE_ROWS.items()}
+
+
+def test_each_pass_and_attempt_of_a_workflow_node_keeps_the_rows_of_its_sub_workflow(runs_dir):
+    compiles = {"where": "build/", "node": "compile", "pass": 1, "attempt": 1, "harness": "codex", "model": "gpt-6.1-sol"}
+    records = [r("10:00:00.000", "run", "run", action="started", workflow="deliver")]
+    for number, (minute, tokens) in enumerate([("10:01", 300), ("10:02", 500)], 1):  # two passes of build
+        inside = f"build#{number}.a1"
+        records += [r(f"{minute}:00.000", "attempt", f"{inside}/compile#1.a1", compiles, started=at(f"{minute}:00.000")),
+                    r(f"{minute}:09.000", "attempt_end", f"{inside}/compile#1.a1", compiles, started=at(f"{minute}:00.000"),
+                      ended=at(f"{minute}:09.000"), duration_s=9.0, outcome="succeeded", usage=used(tokens, 0.0, tokens, 0, 0, 0, 0)),
+                    r(f"{minute}:09.100", "routes", f"{inside}/compile#1", {"where": "build/", "node": "compile", "pass": 1},
+                      routes=[], taken=0, to=["end"])]
+    records.append(r("10:03:00.000", "run_stopped", "run", status="succeeded"))
+    store = Memory()
+    export.export(of(folder(runs_dir / REPO, TRACED, {"trace.jsonl": lines(records)})), store)
+    found = store.final()
+    assert [(row["node"], row["pass"], row["attempt"], row["tokens"]) for row in found["attempts"]] == [
+        ("build#1.a1/compile", 1, 1, 300), ("build#2.a1/compile", 1, 1, 500)]
+    assert [row["node"] for row in found["routes"]] == ["build#1.a1/compile", "build#2.a1/compile"]
+    assert found["runs"][0]["tokens"] == 800  # as wf report counts both
 
 
 # ---------- events.jsonl only ----------
@@ -484,6 +610,66 @@ def test_a_run_without_run_finished_takes_its_status_from_status_json(runs_dir):
     assert (run["status"], run["ended"], run["duration_s"]) == ("failed", "2026-10-19 21:15:30.000", 930.0)
 
 
+def test_a_run_from_before_the_trace_that_no_process_drives_but_that_says_running_is_stopped(runs_dir):
+    path = folder(runs_dir / REPO, EVENTED, {"events.jsonl": lines(EVENTS[:16])}, status="running")
+    store = Memory()
+    export.export(of(path), store)
+    (run,) = store.final()["runs"]
+    assert (run["status"], run["ended"], run["duration_s"]) == ("stopped", "2026-10-19 21:15:30.000", 930.0)
+
+
+def test_an_item_that_succeeded_in_a_pass_that_failed_succeeded(runs_dir):
+    events = [e("23:00:00", "node_started", "review", **{"pass": 1}, items=2),
+              e("23:00:05", "agent_tool", "review", **{"pass": 1}, index=0, attempt=1, harness="cursor", tool="read", detail="a"),
+              e("23:00:06", "agent_tool", "review", **{"pass": 1}, index=1, attempt=1, harness="cursor", tool="read", detail="b"),
+              e("23:01:00", "attempt_failed", "review", **{"pass": 1}, index=1, harness="cursor", attempt=1,
+                error="cursor: Connection failed repeatedly"),
+              e("23:02:00", "node_failed", "review", **{"pass": 1}, error="item 1: cursor: Connection failed repeatedly",
+                cost_usd=0.0, tokens=0)]  # on_item_error: fail
+    store = Memory()
+    export.export(of(folder(runs_dir / REPO, EVENTED, {"events.jsonl": lines(events)}, status="failed")), store)
+    assert [(row["item"], row["outcome"]) for row in store.final()["attempts"]] == [(0, "succeeded"), (1, "failed")]
+
+
+def test_the_spending_of_a_pass_in_a_sub_workflow_counts_once_in_its_run(runs_dir):
+    events = [e("23:00:00", "node_started", "build", **{"pass": 1}), e("23:00:00", "node_started", "build/compile", **{"pass": 1}),
+              e("23:00:05", "agent_tool", "build/compile", **{"pass": 1}, attempt=1, harness="codex", tool="exec", detail="make"),
+              e("23:01:00", "node_finished", "build/compile", **{"pass": 1}, cost_usd=0.25, tokens=500),
+              e("23:01:00", "node_finished", "build", **{"pass": 1}, cost_usd=0.25, tokens=500),  # its sub-workflow's
+              e("23:01:00", "run_finished", status="succeeded")]
+    store = Memory()
+    export.export(of(folder(runs_dir / REPO, EVENTED, {"events.jsonl": lines(events)})), store)
+    found = store.final()
+    assert [(row["node"], row["tokens"], row["cost_usd"]) for row in found["attempts"]] == [("build/compile", 500, 0.25)]
+    assert (found["runs"][0]["tokens"], found["runs"][0]["cost_usd"]) == (500, 0.25)
+
+
+def test_a_trace_that_starts_with_a_retry_of_a_run_from_before_the_trace_keeps_the_events_before_it(runs_dir):
+    review = {"node": "review", "pass": 1, "index": 0, "attempt": 1, "harness": "codex", "model": "gpt-6.1-sol"}
+    retried = [{"time": "2026-10-20T09:00:00.000+02:00", "kind": "run", "id": "run", "action": "retried", "workflow": "deliver"},
+               {"time": "2026-10-20T09:00:01.000+02:00", "kind": "attempt", "id": "review#1[0].a1", **review,
+                "started": "2026-10-20T09:00:01.000+02:00"},
+               {"time": "2026-10-20T09:00:31.000+02:00", "kind": "attempt_end", "id": "review#1[0].a1", **review,
+                "started": "2026-10-20T09:00:01.000+02:00", "ended": "2026-10-20T09:00:31.000+02:00", "duration_s": 30.0,
+                "outcome": "succeeded", "usage": used(400, 0.1, 100, 100, 200, 0, 0)},
+               {"time": "2026-10-20T09:01:00.000+02:00", "kind": "run_stopped", "id": "run", "status": "succeeded"}]
+    later = [{"time": "2026-10-20T09:00:00+02:00", "event": "node_started", "node": "review", "pass": 1, "items": 1},
+             {"time": "2026-10-20T09:00:31+02:00", "event": "node_finished", "node": "review", "pass": 1, "cost_usd": 0.1,
+              "tokens": 400},
+             {"time": "2026-10-20T09:01:00+02:00", "event": "run_finished", "status": "succeeded"}]  # today's wf writes them too
+    path = folder(runs_dir / REPO, EVENTED, {"events.jsonl": lines(EVENTS[:10] + later), "trace.jsonl": lines(retried)})
+    store = Memory()
+    export.export(of(path), store)
+    found = store.final()
+    assert [(row["node"], row["pass"], row["item"], row["tokens"]) for row in found["attempts"]] == [
+        ("implement", 1, -1, 3000), ("review", 1, 0, 400)]
+    assert [row["call_id"] for row in found["tool_calls"]] == ["e1", "e2"]
+    assert [(row["node"], row["to"]) for row in found["routes"]] == [("implement", ["review"])]
+    (run,) = found["runs"]
+    assert (run["started"], run["ended"], run["duration_s"], run["tokens"], run["cost_usd"], run["source"]) == (
+        "2026-10-19 21:00:00.000", "2026-10-20 07:01:00.000", 660.0, 3400, 1.6, "trace")  # 600 s before the trace, 60 s in it
+
+
 # ---------- errors ----------
 
 
@@ -504,8 +690,23 @@ def test_a_trace_that_cant_be_read_or_an_offset_that_cant_be_kept_is_an_unreadab
             export.export(of(path), Memory())
     finally:
         (path / "trace.jsonl").chmod(0o644)
-    path.chmod(0o555)
+    path.chmod(0)  # wf can't look into the folder
+    try:
+        with pytest.raises(export.UnreadableFolder, match="can't read .*trace.jsonl: Permission denied"):
+            export.export(of(path), Memory())
+    finally:
+        path.chmod(0o755)
+    (path / "export.lock").unlink()
+    path.chmod(0o555)  # the lock can't be made
     store = Memory()
+    try:
+        with pytest.raises(export.UnreadableFolder, match="can't open .*export.lock"):
+            export.export(of(path), store)
+        assert store.inserts == []
+    finally:
+        path.chmod(0o755)
+    (path / "export.lock").touch()
+    path.chmod(0o555)  # the lock is there, but export.json can't be written
     try:
         with pytest.raises(export.UnreadableFolder, match="can't keep the offset in .*export.json"):
             export.export(of(path), store)
@@ -643,6 +844,14 @@ def test_what_clickhouse_answers_decides_the_class_of_the_error(answering, statu
         store_at(address).insert("runs", [{"run_id": "r"}])
 
 
+@pytest.mark.parametrize("body", [b"<html><body>Welcome</body></html>\n", b'{"name": "runs"}\n', b"[1, 2]\n"])
+def test_an_address_that_answers_but_not_as_clickhouse_does_is_store_down(answering, body):
+    address, _, answer = answering
+    answer.update(body=body)
+    with pytest.raises(export.StoreDown, match=f"http://{address}/wf answers, but not as ClickHouse does"):
+        store_at(address).prepare()
+
+
 def test_prepare_makes_the_database_and_the_tables_that_are_missing_and_names_them_by_their_ids():
     made: dict[str, str] = {}  # table -> its id, as ClickHouse gives each table that it makes one
     databases: list[str] = []
@@ -739,7 +948,7 @@ def test_wf_metrics_export_writes_each_run_of_the_repo_and_then_nothing_new(repo
     assert cli.main(["metrics", "export"]) == 0
     assert capsys.readouterr().out.splitlines() == [
         f"{EVENTED}: 1 run, 6 attempts, 7 tool calls, 2 routes",
-        f"{TRACED}: 1 run, 9 attempts, 3 turns, 3 tool calls, 2 routes"]
+        f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes"]
     assert str(stores[0].url) == "http://wf:***@127.0.0.1:8123/wf"
     found = stores[0].final()
     assert {row["repo_key"] for row in found.pop("runs")} == {runs.repo_key(repo.resolve())}  # from the repo's path
@@ -784,13 +993,33 @@ def test_wf_metrics_export_stops_when_clickhouse_is_down_and_keeps_no_offset(rep
     assert not (path / "export.json").exists()
 
 
+def test_wf_metrics_export_stops_at_the_first_run_whose_rows_clickhouse_refuses(repo, monkeypatch, wf_home, capsys):
+    class Refusing(Memory):
+        def __init__(self, url):
+            super().__init__()
+
+        def insert(self, table, rows):
+            raise export.StoreDown("ClickHouse at http://127.0.0.1:8123 doesn't answer: gone")
+
+    monkeypatch.setattr(export, "Store", Refusing)
+    metrics_on(wf_home, metrics_url("127.0.0.1:8123"))
+    parent = runs.runs_folder(repo)
+    traced_folder(parent), evented_folder(parent)
+    os.utime(parent / EVENTED / "workflow" / "manifest.json", (0, 0))  # the older run comes first
+    assert cli.main(["metrics", "export"]) == 1
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", f"wf metrics export: run {EVENTED}: ClickHouse at http://127.0.0.1:8123 "
+                                                "doesn't answer: gone\n")
+    assert not (parent / TRACED / "export.lock").exists()  # the next run wasn't tried
+
+
 def test_a_run_folder_that_cant_be_read_doesnt_stop_the_others(repo, stores, capsys):
     parent = runs.runs_folder(repo)
     traced_folder(parent), folder(parent, EVENTED, {})
     assert cli.main(["metrics", "export"]) == 1
     captured = capsys.readouterr()
     assert f"wf metrics export: run {EVENTED}: " in captured.err and "has neither trace.jsonl nor events.jsonl" in captured.err
-    assert captured.out == f"{TRACED}: 1 run, 9 attempts, 3 turns, 3 tool calls, 2 routes\n"
+    assert captured.out == f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes\n"
 
 
 FLOW = """
@@ -912,11 +1141,11 @@ def test_a_backfill_into_clickhouse_gives_the_expected_rows_and_a_second_export_
     assert cli.main(backfill) == 0
     assert sorted(capsys.readouterr().out.splitlines()) == [
         f"{EVENTED}: 1 run, 6 attempts, 7 tool calls, 2 routes",
-        f"{TRACED}: 1 run, 9 attempts, 3 turns, 3 tool calls, 2 routes"]
+        f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes"]
     for table in export.WRITTEN:
         assert rows_of(empty, table) == expected[table], table
     written = {table: len(rows_of(empty, table, final=False)) for table in export.WRITTEN}
-    assert written == {"runs": 2, "attempts": 15, "turns": 3, "tool_calls": 10, "routes": 4}  # each row once
+    assert written == {"runs": 2, "attempts": 16, "turns": 3, "tool_calls": 11, "routes": 4}  # each row once
 
     assert cli.main(backfill) == 0
     assert sorted(capsys.readouterr().out.splitlines()) == [f"{EVENTED}: nothing new", f"{TRACED}: nothing new"]
@@ -946,7 +1175,7 @@ def test_clickhouse_with_a_table_that_differs_stops_the_export_until_the_table_i
     assert rows_of(empty, "attempts") == ordered("attempts", TRACE_ROWS["attempts"])
     query(empty, "DROP DATABASE wf SYNC")  # as `docker compose down -v` leaves it
     assert cli.main(backfill) == 0
-    assert capsys.readouterr().out.splitlines()[-1] == f"{TRACED}: 1 run, 9 attempts, 3 turns, 3 tool calls, 2 routes"
+    assert capsys.readouterr().out.splitlines()[-1] == f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes"
     assert rows_of(empty, "runs") == TRACE_ROWS["runs"]
 
 
@@ -957,7 +1186,7 @@ def test_the_export_makes_its_database_and_tables_where_the_url_says(clickhouse,
     traced_folder(runs_dir / REPO)
     metrics_on(wf_home, metrics_url(clickhouse, "runs%20of%20wf"))
     assert cli.main(["metrics", "export", "--all-repos", "--runs-dir", str(runs_dir)]) == 0
-    assert capsys.readouterr().out == f"{TRACED}: 1 run, 9 attempts, 3 turns, 3 tool calls, 2 routes\n"
+    assert capsys.readouterr().out == f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes\n"
     made = query(clickhouse, "SELECT name FROM system.tables WHERE database = 'runs of wf' ORDER BY name").split()
     assert made == sorted(export.schema())
     assert query(clickhouse, "SELECT count() FROM `runs of wf`.runs") == "1\n"

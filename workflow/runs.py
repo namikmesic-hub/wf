@@ -15,7 +15,7 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
       lock                          held by the one process driving the run (its pid inside)
       events.jsonl                  one line per progress event
       trace.jsonl, blobs/           what the run read, decided and did (trace.py)
-      export.json                   where `wf metrics export` stopped reading the trace (export.py)
+      export.json, export.lock      where `wf metrics export` stopped reading the trace, and its lock (export.py)
       checkpoints.sqlite            LangGraph checkpoints, used by wf retry
       nodes/<node>/<pass>/[<index>/]
         instruction.md              the rendered instruction (or command, or message)

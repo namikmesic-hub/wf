@@ -165,6 +165,7 @@ wf metrics export --all-repos --runs-dir ~/runs  # each run of each repo in a ru
 
 wf makes the database and the tables that are missing, from `workflow/clickhouse.sql`.
 Each run folder keeps where its export stopped, in `export.json`, so a second export writes nothing.
+Delete the `export.json` of a run to export it again from the start.
 A run from before wf wrote a trace exports from its `events.jsonl`, with less detail.
 
 The password is the one secret of `config.toml`.

@@ -14,49 +14,65 @@ ClickHouse keeps the tables in the database of metrics.url in config.toml, as cl
 
 Store.prepare() makes the database and each table that is missing. Then it checks each table that
 the export writes against clickhouse.sql: each column with its type, the engine and the key. A table
-that differs is a SchemaMismatch, and the export writes nothing.
+that differs is a SchemaMismatch, and the export writes nothing. It doesn't check metric_points,
+which nothing writes yet.
 
 An export of a run folder reads its trace.jsonl from the byte offset where the last export stopped.
 A record that starts or ends something gives a row: an `attempt` gives a row with the outcome
-`running`, and its `attempt_end` gives the whole row again. Turns and tool calls go the same way.
-Each table is a ReplacingMergeTree on the natural key of its rows (run, node, pass, item, attempt,
-...), so the later row replaces the earlier one. A node in a sub-workflow has its path as its name,
-as events name it: build[1]/implement. So when a workflow node runs its sub-workflow again in a later
-attempt, the rows of that attempt replace the rows of the earlier one. A job that isn't an item has
-the item -1.
+`running`, and its `attempt_end` gives the whole row again. Turns and tool calls go the same way, and
+a tool call keeps the start of its first record and the tool of its last. Each table is a
+ReplacingMergeTree on the natural key of its rows (run, node, pass, item, attempt, ...), so the
+later row replaces the earlier one. A node inside a sub-workflow has, in front of its own id, the
+trace id of the attempt that runs the sub-workflow, as in build#1[3].a1/implement. So each pass and
+each attempt of a workflow node has rows of its own. A job that isn't an item has the item -1.
 
 export.json in the run folder keeps the offset, the identity of the tables that took the rows, and
-what the next export needs of the records before the offset: the attempts that run, the turns and
-tool calls that haven't ended, and the times and spending of the run. A line that is still being
-written waits for the next export. The duration of a run is the time that wf drove it: from each
-`run` record to its `run_stopped`. Its tokens and cost are the sums of its rows in `attempts`.
+what the next export needs of the records before the offset: the attempts, turns and tool calls that
+haven't ended, and the times and spending of the run. A line that is still being written waits for
+the next export. The duration of a run is the time that wf drove it: from each `run` record to its
+`run_stopped`. Its tokens and cost are the sums of its rows in `attempts`.
+
+The process that drives a run holds the run's lock. When the trace says that a run runs, but no
+process holds its lock, the process stopped without its `run_stopped`: it crashed or was killed, as
+`wf status` says. The run is then `stopped` at its last record, and each attempt and turn that it
+left running is `cancelled` there. When `wf retry` runs them again, their new rows replace these.
 
 So exporting twice changes nothing: the second export finds nothing new and writes nothing. When the
 tables are made again, as after `docker compose down -v`, the identity changes, and the next export
-of each run starts again from the start of its file. Each row that it writes replaces an equal one.
+of each run starts again from the start of its file. So does the export of a run whose export.json
+is gone. Each row that it writes replaces an equal one.
 
 A run folder of a wf from before the trace has only events.jsonl. The export reads that file whole,
 once, and gets less from it (_events): the run, the attempts that events name, their failures, the
 names and times of the tool calls, the routes, and the tokens and cost of each pass. It gets no
-turns, no durations or results of tool calls, and no session ids.
+turns, no durations or results of tool calls, and no session ids. When today's wf drives such a run
+again, its trace starts with `wf retry` or `wf continue`, and the events before the trace give the
+rows of the run before it.
 
 The errors have classes, so that a caller can tell what to do:
 
-    StoreDown          ClickHouse doesn't answer, or refuses a request for a reason other than its tables
-    SchemaMismatch     a table differs from clickhouse.sql
+    StoreDown          ClickHouse doesn't answer, answers as another program, or refuses a request for a
+                       reason other than its tables
+    SchemaMismatch     a table differs from clickhouse.sql, or ClickHouse refuses rows for their table
     UnreadableFolder   wf can't read the run folder, or can't keep its offset in export.json
 
-After any of them, export.json stays as it was, so the next export writes the same rows again. The
-export never takes the run's lock, and it writes nothing in the run folder but export.json, so no
-error of the export can fail a run or make it slower.
+After any of them, export.json stays as it was, so the next export writes the same rows again. One
+export of a run folder at a time holds the folder's export.lock, from the read of export.json to its
+write. The export writes nothing else in the run folder, and it never holds the run's lock: it takes
+that lock only for a moment, as `wf status` does, to see whether a process drives a run that runs.
+So no error of the export can fail a run or make it slower.
 """
 
+import fcntl
 import functools
 import hashlib
 import http.client
 import json
+import os
 import re
+import stat
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -69,6 +85,7 @@ from .trace import FILE as TRACE
 
 SCHEMA = Path(__file__).with_name("clickhouse.sql")
 PROGRESS = "export.json"
+LOCK = "export.lock"
 EVENTS = "events.jsonl"
 TIMEOUT_S = 30
 NO_ITEM = -1
@@ -93,11 +110,12 @@ class ExportError(Exception):
 
 
 class StoreDown(ExportError):
-    """ClickHouse doesn't answer, or refuses a request for a reason other than its tables."""
+    """ClickHouse doesn't answer, answers as another program, or refuses a request for a reason other
+    than its tables."""
 
 
 class SchemaMismatch(ExportError):
-    """A table of ClickHouse differs from clickhouse.sql."""
+    """A table of ClickHouse differs from clickhouse.sql, or ClickHouse refuses rows for their table."""
 
 
 class UnreadableFolder(ExportError):
@@ -127,13 +145,14 @@ class Store:
         wanted = schema()
         tables = self._tables()
         if any(name not in tables for name in wanted):
-            if not self._select("SELECT name FROM system.databases WHERE name = {database:String}"):
+            if not self._select("SELECT name FROM system.databases WHERE name = {database:String}", "name"):
                 self._post(f"CREATE DATABASE IF NOT EXISTS {_identifier(self.database)}", inside=False)
             for statement in _statements(SCHEMA.read_text(encoding="utf-8")):
                 self._post(statement, inside=True)
             tables = self._tables()
         columns: dict[str, dict[str, str]] = {}
-        for row in self._select("SELECT table, name, type FROM system.columns WHERE database = {database:String}"):
+        query = "SELECT table, name, type FROM system.columns WHERE database = {database:String}"
+        for row in self._select(query, "table", "name", "type"):
             columns.setdefault(row["table"], {})[row["name"]] = row["type"]
         problems = differences(wanted, tables, columns, self.database)
         if problems:
@@ -147,11 +166,21 @@ class Store:
         self._post(f"INSERT INTO {table} FORMAT JSONEachRow", body, inside=True)
 
     def _tables(self) -> dict[str, dict]:
-        return {row["name"]: row for row in self._select(
-            "SELECT name, toString(uuid) AS uuid, engine, sorting_key FROM system.tables WHERE database = {database:String}")}
+        query = "SELECT name, toString(uuid) AS uuid, engine, sorting_key FROM system.tables WHERE database = {database:String}"
+        return {row["name"]: row for row in self._select(query, "name", "uuid", "engine", "sorting_key")}
 
-    def _select(self, query: str) -> list[dict]:
-        return [json.loads(line) for line in self._post(f"{query} FORMAT JSONEachRow").splitlines() if line.strip()]
+    def _select(self, query: str, *names: str) -> list[dict]:
+        """The rows that `query` gives, each with the columns `names`. Raises StoreDown for an answer that
+        isn't ClickHouse's, such as a web page."""
+        answer = self._post(f"{query} FORMAT JSONEachRow")
+        try:
+            rows = [json.loads(line) for line in answer.splitlines() if line.strip()]
+        except ValueError:
+            rows = None
+        if rows is None or not all(isinstance(row, dict) and all(name in row for name in names) for row in rows):
+            said = " ".join(answer.decode("utf-8", "replace").split())[:200]
+            raise StoreDown(f"{self.where} answers, but not as ClickHouse does: {said}")
+        return rows
 
     def _post(self, query: str, data: bytes | None = None, inside: bool = False) -> bytes:
         """Run `query` on the data `data`, or with no data, and give the answer. A query `inside` the database
@@ -246,48 +275,84 @@ def export(run: Run, store) -> dict[str, int]:
     the new offset in its export.json. Returns the number of rows written, by table: none when nothing
     is new. Raises UnreadableFolder, StoreDown or SchemaMismatch, and export.json then stays as it was."""
     folder = run.dir
-    path = next((folder / name for name in (TRACE, EVENTS) if (folder / name).is_file()), None)
-    if path is None:
-        raise UnreadableFolder(f"{folder} has neither {TRACE} nor {EVENTS}" if folder.is_dir() else f"{folder} isn't a folder")
-    kept = _kept(folder)
-    same = kept.get("store") == store.identity and kept.get("file") == path.name
-    offset, state = (kept["offset"], kept["state"]) if same else (0, _fresh())
-    records: list[dict | None] = []
+    path = _source(folder)
+    with _locked(folder):
+        kept = _kept(folder)
+        same = kept.get("store") == store.identity and kept.get("file") == path.name
+        offset, state = (kept["offset"], kept["state"]) if same else (0, _fresh())
+        try:
+            size = path.stat().st_size
+            if size < offset:  # not the file that the last export read
+                offset, state = 0, _fresh()
+            end = offset
+            if path.name == TRACE:
+                fold = _Trace(run, state)
+                for record, after in _lines(path, offset):
+                    fold.add(record)
+                    end = after
+                rows = fold.rows()
+            elif size != offset:  # events.jsonl no longer grows, so it's read whole, once
+                events = []
+                for record, after in _lines(path, 0):
+                    events.append(record)
+                    end = after
+                rows = _events(run, events)
+            else:
+                rows = {}
+        except OSError as error:
+            raise UnreadableFolder(f"can't read {path}: {error.strerror or error}") from None
+        rows = {table: found for table, found in rows.items() if found}
+        if same and end == offset and not rows:
+            return {}
+        for table, found in rows.items():
+            store.insert(table, found)
+        try:
+            runs.write_json(folder / PROGRESS, {"store": store.identity, "file": path.name, "offset": end, "state": state})
+        except OSError as error:
+            raise UnreadableFolder(f"can't keep the offset in {folder / PROGRESS}: {error.strerror or error}") from None
+        return {table: len(found) for table, found in rows.items()}
+
+
+def _source(folder: Path) -> Path:
+    """The run folder's trace.jsonl, or else its events.jsonl. Raises UnreadableFolder."""
+    for path in (folder / TRACE, folder / EVENTS):
+        if stat.S_ISREG(_mode(path)):
+            return path
+    raise UnreadableFolder(f"{folder} has neither {TRACE} nor {EVENTS}" if stat.S_ISDIR(_mode(folder)) else f"{folder} isn't a folder")
+
+
+def _mode(path: Path) -> int:
+    """The type and mode of `path`, or 0 when it isn't there. Raises UnreadableFolder when wf can't look."""
     try:
-        size = path.stat().st_size
-        if size < offset:  # not the file that the last export read
-            offset, state = 0, _fresh()
-        end = offset
-        if path.name == TRACE:
-            fold = _Trace(run, state)
-            for record, after in _lines(path, offset):
-                fold.add(record)
-                end = after
-            rows = fold.rows()
-        elif size != offset:  # events.jsonl no longer grows, so it's read whole, once
-            for record, after in _lines(path, 0):
-                records.append(record)
-                end = after
-            rows = _events(run, records)
-        else:
-            rows = {}
+        return path.stat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return 0
     except OSError as error:
         raise UnreadableFolder(f"can't read {path}: {error.strerror or error}") from None
-    if same and end == offset:
-        return {}
-    for table, found in rows.items():
-        if found:
-            store.insert(table, found)
+
+
+@contextmanager
+def _locked(folder: Path) -> Iterator[None]:
+    """Hold the run folder's export.lock, so that one export of the run at a time reads export.json,
+    inserts its rows and writes export.json. Raises UnreadableFolder."""
     try:
-        runs.write_json(folder / PROGRESS, {"store": store.identity, "file": path.name, "offset": end, "state": state})
+        fd = os.open(folder / LOCK, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as error:
-        raise UnreadableFolder(f"can't keep the offset in {folder / PROGRESS}: {error.strerror or error}") from None
-    return {table: len(found) for table, found in rows.items() if found}
+        raise UnreadableFolder(f"can't open {folder / LOCK}: {error.strerror or error}") from None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # another export of the run: wait until it ends
+        except OSError as error:
+            raise UnreadableFolder(f"can't lock {folder / LOCK}: {error.strerror or error}") from None
+        yield
+    finally:
+        os.close(fd)
 
 
 def _fresh() -> dict:
-    return {"started": None, "driving": None, "driven_s": 0.0, "status": "", "ended": None,
-            "spent": {}, "attempts": {}, "turns": {}, "calls": {}}
+    """The state of an export from the start of a trace (_Trace)."""
+    return {"started": None, "driving": None, "driven_s": 0.0, "status": "", "ended": None, "last": None, "told": "",
+            "before": [0, 0.0, 0.0], "spent": {}, "attempts": {}, "turns": {}, "calls": {}}
 
 
 def _kept(folder: Path) -> dict:
@@ -296,7 +361,7 @@ def _kept(folder: Path) -> dict:
         kept = json.loads((folder / PROGRESS).read_text(encoding="utf-8"))
         state = kept["state"]
         whole = isinstance(kept["offset"], int) and set(state) == set(_fresh()) and all(
-            isinstance(state[name], dict) for name in ("spent", "attempts", "turns", "calls"))
+            isinstance(state[name], dict) for name in ("spent", "attempts", "turns", "calls")) and len(state["before"]) == 3
     except (OSError, ValueError, KeyError, TypeError):
         return {}
     return kept if whole else {}
@@ -337,16 +402,15 @@ def error_class(error: str) -> str:
 
 class _Trace:
     """The rows that the records of a trace give, one record after the other. `state` holds what the
-    records before them left, and export.json keeps it for the next export."""
+    records before them left, and export.json keeps it for the next export. Its attempts, turns and
+    calls are the rows of those that haven't ended, by trace id."""
 
     def __init__(self, run: Run, state: dict):
         self.run, self.state = run, state
         info = run.info()
         self.workflow, self.dry_run = str(info.get("workflow") or ""), bool(info.get("dry_run"))
         self.found: dict[str, dict] = {table: {} for table in WRITTEN}  # table -> natural key -> its last row
-
-    def rows(self) -> dict[str, list[dict]]:
-        return {table: list(found.values()) for table, found in self.found.items()}
+        self.changed = False  # did a record change the run's row?
 
     def add(self, record: dict | None) -> None:
         kind, time = (record or {}).get("kind"), (record or {}).get("time")
@@ -357,10 +421,24 @@ class _Trace:
         elif kind == "routes":
             self._routes(record)
         elif kind in ("attempt", "attempt_end", "turn", "turn_end", "tool_call", "tool_result"):
-            place, ident = _place(record), record.get("id")
-            whole = isinstance(ident, str) and (kind in ("attempt", "attempt_end") or isinstance(record.get("turn"), int))
-            if place is not None and whole and (not kind.startswith("tool_") or CALL.fullmatch(ident)):
+            place = _place(record)
+            whole = kind in ("attempt", "attempt_end") or isinstance(record.get("turn"), int)
+            if place is not None and whole and (not kind.startswith("tool_") or CALL.fullmatch(record["id"])):
                 getattr(self, f"_{kind}")(record, place)
+        self.state["last"] = time
+
+    def rows(self) -> dict[str, list[dict]]:
+        """The rows of the records so far, and the run's row when it changed. A run that runs by its trace
+        stopped when no process holds its lock: then what it left running shows as cancelled."""
+        state = self.state
+        status = state["status"]
+        if state["driving"]:
+            status = "running" if self.run.driven() else "stopped"
+            if status == "stopped" and state["told"] != status:
+                self._cancel()
+        if state["started"] is not None and (self.changed or status != state["told"]):
+            self._run_row(status)
+        return {table: list(found.values()) for table, found in self.found.items()}
 
     def _row(self, table: str, row: dict) -> None:
         self.found[table][tuple(row[name] for name in keys(table))] = row
@@ -375,24 +453,69 @@ class _Trace:
     def _run(self, starts: bool, time: str, record: dict) -> None:
         state = self.state
         if starts:
+            if state["driving"]:  # the process before stopped without run_stopped
+                self._stopped()
+            if state["started"] is None and record.get("action") != "started":
+                self._before(time)
             state["started"] = state["started"] or _utc(time)
             state["driving"], state["status"], state["ended"] = time, "running", None
         else:
             if state["driving"]:
                 state["driven_s"] += _seconds(state["driving"], time) or 0.0
             state["driving"], state["status"], state["ended"] = None, _word(record.get("status")), _utc(time)
-        self._run_row()
+        self.changed = True
 
-    def _run_row(self) -> None:
+    def _stopped(self) -> None:
+        """The process that drove the run stopped at the last record, without run_stopped."""
         state = self.state
-        if state["started"] is None:  # the trace began without a `run` record
+        self._cancel()
+        state["driven_s"] += _seconds(state["driving"], state["last"]) or 0.0
+        state["driving"], state["status"], state["ended"] = None, "stopped", _utc(state["last"])
+        state["attempts"], state["turns"], state["calls"] = {}, {}, {}
+
+    def _cancel(self) -> None:
+        """Rows for the attempts and turns that haven't ended, as cancelled at the last record."""
+        last = self.state["last"]
+        for table, word in (("attempts", "outcome"), ("turns", "status")):
+            for row in self.state[table].values():
+                self._row(table, {**row, word: "cancelled", "ended": _utc(last), "duration_s": _seconds(row["started"], last)})
+
+    def _before(self, time: str) -> None:
+        """The rows of the events that a wf from before the trace wrote, for a trace that starts in the
+        middle of the run, at `time`."""
+        path = self.run.dir / EVENTS
+        if not path.is_file():
             return
-        spent = state["spent"].values()
+        cut, events = _moment(time).replace(microsecond=0), []  # events have whole seconds
+        for event, _ in _lines(path, 0):
+            moment = _moment((event or {}).get("time"))
+            if moment is not None and moment < cut:
+                events.append(event)
+        rows = _events(self.run, events)
+        for table in ("attempts", "tool_calls", "routes"):
+            for row in rows[table]:
+                self._row(table, row)
+        for row in rows["runs"]:
+            self.state["started"] = row["started"]
+            self.state["before"] = [row["tokens"], row["cost_usd"], _seconds(events[0]["time"], events[-1]["time"]) or 0.0]
+
+    def _run_row(self, status: str) -> None:
+        state = self.state
+        tokens, cost, before_s = state["before"]
+        for used, paid in state["spent"].values():
+            tokens, cost = tokens + used, cost + paid
+        if status == "running":
+            ended, driven = None, None
+        elif state["driving"]:  # stopped at its last record, without run_stopped
+            ended, driven = _utc(state["last"]), state["driven_s"] + (_seconds(state["driving"], state["last"]) or 0.0)
+        else:
+            ended, driven = state["ended"], state["driven_s"]
         self._row("runs", {
-            "run_id": self.run.id, "repo_key": _repo_key(self.run.dir), "workflow": self.workflow, "status": state["status"],
-            "dry_run": self.dry_run, "started": state["started"], "ended": state["ended"],
-            "duration_s": round(state["driven_s"], 3) if state["ended"] else None,
-            "cost_usd": round(sum(cost for _, cost in spent), 6), "tokens": sum(tokens for tokens, _ in spent), "source": "trace"})
+            "run_id": self.run.id, "repo_key": _repo_key(self.run.dir), "workflow": self.workflow, "status": status,
+            "dry_run": self.dry_run, "started": state["started"], "ended": ended,
+            "duration_s": None if driven is None else round(before_s + driven, 3), "cost_usd": round(cost, 6),
+            "tokens": tokens, "source": "trace"})
+        state["told"] = status
 
     def _routes(self, record: dict) -> None:
         place = _place(record, attempt=False)
@@ -406,19 +529,24 @@ class _Trace:
     # ----- attempts -----
 
     def _attempt(self, record: dict, place: dict) -> None:
-        self.state["attempts"][record["id"]] = [_word(record.get("harness")), _word(record.get("model"))]
-        self._row("attempts", self._attempt_row(record, place, ended=False))
+        self._forget(record["id"])  # what an earlier session of the attempt left, when its process stopped
+        row = self._attempt_row(record, place, ended=False)
+        self.state["attempts"][record["id"]] = row
+        self._row("attempts", row)
 
     def _attempt_end(self, record: dict, place: dict) -> None:
-        state, ident = self.state, record["id"]
-        for unended in (state["attempts"], state["turns"], state["calls"]):  # nothing inside an attempt outlives it
-            for key in [key for key in unended if key == ident or key.startswith((f"{ident}.", f"{ident}/"))]:
-                del unended[key]
+        self._forget(record["id"])
         row = self._attempt_row(record, place, ended=True)
         if "usage" in record:  # by the row's key, so that the run's numbers are the sums of its rows
-            state["spent"][json.dumps([row[name] for name in keys("attempts")])] = [row["tokens"], row["cost_usd"]]
+            self.state["spent"][json.dumps([row[name] for name in keys("attempts")])] = [row["tokens"], row["cost_usd"]]
         self._row("attempts", row)
-        self._run_row()
+        self.changed = True
+
+    def _forget(self, ident: str) -> None:
+        """Drop the attempt `ident`, and what runs inside it, from what hasn't ended."""
+        for unended in (self.state["attempts"], self.state["turns"], self.state["calls"]):
+            for key in [key for key in unended if key == ident or key.startswith((f"{ident}.", f"{ident}/"))]:
+                del unended[key]
 
     def _attempt_row(self, record: dict, place: dict, ended: bool) -> dict:
         session = record.get("session") if isinstance(record.get("session"), dict) else {}
@@ -439,12 +567,13 @@ class _Trace:
     # ----- turns -----
 
     def _turn(self, record: dict, place: dict) -> None:
-        self.state["turns"][record["id"]] = record["time"]
-        self._row("turns", self._turn_row(record, place, record["time"], ended=False))
+        row = self._turn_row(record, place, record["time"], ended=False)
+        self.state["turns"][record["id"]] = row
+        self._row("turns", row)
 
     def _turn_end(self, record: dict, place: dict) -> None:
-        started = self.state["turns"].pop(record["id"], None)
-        self._row("turns", self._turn_row(record, place, started, ended=True))
+        opened = self.state["turns"].pop(record["id"], None)
+        self._row("turns", self._turn_row(record, place, opened["started"] if opened else None, ended=True))
 
     def _turn_row(self, record: dict, place: dict, started: str | None, ended: bool) -> dict:
         return {"run_id": self.run.id, **place, "turn": record["turn"],
@@ -457,24 +586,25 @@ class _Trace:
     # ----- tool calls -----
 
     def _tool_call(self, record: dict, place: dict) -> None:
-        if record["id"] in self.state["calls"]:  # the harness gave more of the arguments: the call started before
-            return
-        self.state["calls"][record["id"]] = [_word(record.get("tool")), record["time"]]
-        self._row("tool_calls", self._call_row(record, place, _word(record.get("tool")), record["time"], None, None))
+        opened = self.state["calls"].get(record["id"])  # the harness reports the call again, as it learns more
+        tool = _word(record.get("tool")) or (opened["tool"] if opened else "")
+        row = self._call_row(record, place, tool, opened["started"] if opened else record["time"])
+        self.state["calls"][record["id"]] = row
+        self._row("tool_calls", row)
 
     def _tool_result(self, record: dict, place: dict) -> None:
-        tool, started = self.state["calls"].pop(record["id"], ["", None])
-        took = _seconds(started, record["time"])
-        self._row("tool_calls", self._call_row(record, place, tool, started or record["time"],
-                                               None if took is None else round(took * 1000, 3), bool(record.get("is_error"))))
+        opened = self.state["calls"].pop(record["id"], None)
+        took = _seconds(opened["started"], record["time"]) if opened else None  # a result without its call: no duration
+        row = opened or self._call_row(record, place, "", record["time"])
+        self._row("tool_calls", {**row, "duration_ms": None if took is None else round(took * 1000, 3),
+                                 "is_error": bool(record.get("is_error"))})
 
-    def _call_row(self, record: dict, place: dict, tool: str, started: str, took_ms: float | None,
-                  is_error: bool | None) -> dict:
+    def _call_row(self, record: dict, place: dict, tool: str, started: str) -> dict:
         attempt, call = CALL.fullmatch(record["id"]).groups()
-        harness, model = self.state["attempts"].get(attempt, ["", ""])
+        running = self.state["attempts"].get(attempt) or {}
         return {"run_id": self.run.id, "workflow": self.workflow, **place, "turn": record["turn"], "call_id": call,
-                "tool": tool, "harness": harness, "model": model, "started": _utc(started), "duration_ms": took_ms,
-                "is_error": is_error}
+                "tool": tool, "harness": running.get("harness", ""), "model": running.get("model", ""),
+                "started": _utc(started), "duration_ms": None, "is_error": None}
 
 
 @functools.cache
@@ -484,12 +614,15 @@ def keys(table: str) -> tuple[str, ...]:
 
 
 def _place(record: dict, attempt: bool = True) -> dict | None:
-    """Where a record is: node (with its path in a sub-workflow), pass, item, and attempt. None when it doesn't say."""
-    node, pass_no, item = record.get("node"), record.get("pass"), record.get("index", NO_ITEM)
+    """Where a record is: node, pass, item, and attempt. None when it doesn't say. The node of a record
+    inside a sub-workflow has in front of it the trace id of the attempt that runs the sub-workflow,
+    which starts the record's own id."""
+    node, pass_no, item, ident = record.get("node"), record.get("pass"), record.get("index", NO_ITEM), record.get("id")
     numbers = (pass_no, item, record.get("attempt")) if attempt else (pass_no, item)
-    if not isinstance(node, str) or not all(isinstance(number, int) for number in numbers):
+    if not isinstance(node, str) or not isinstance(ident, str) or not all(isinstance(number, int) for number in numbers):
         return None
-    place = {"node": _word(record.get("where")) + node, "pass": pass_no, "item": item}
+    inside = ident.rpartition("/")[0]
+    place = {"node": f"{inside}/{node}" if inside else node, "pass": pass_no, "item": item}
     return {**place, "attempt": record["attempt"]} if attempt else place
 
 
@@ -508,20 +641,24 @@ def _number(value: Any) -> float | None:
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def _utc(text: Any) -> str | None:
-    """A time of the run folder as ClickHouse reads a DateTime64(3, 'UTC'), or None."""
+def _moment(text: Any) -> datetime | None:
+    """A time of the run folder, or of a row, which has no zone because it is in UTC."""
     try:
         moment = datetime.fromisoformat(text)
     except (TypeError, ValueError):
         return None
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _utc(text: Any) -> str | None:
+    """A time as ClickHouse reads a DateTime64(3, 'UTC'), or None."""
+    moment = _moment(text)
+    return None if moment is None else moment.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def _seconds(start: Any, end: Any) -> float | None:
-    try:
-        return round((datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds(), 3)
-    except (TypeError, ValueError):
-        return None
+    first, last = _moment(start), _moment(end)
+    return None if first is None or last is None else round((last - first).total_seconds(), 3)
 
 
 # ---------- events.jsonl ----------
@@ -531,13 +668,14 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
     """The rows that the events of a run folder without a trace give:
 
     - runs: the run's start is its first event, and its end the `run_finished` event, or else its last
-      event when status.json doesn't say `running`. Its tokens and cost are those of its passes.
+      event when status.json doesn't say `running`. When it says `running` but no process holds the
+      run's lock, the run is `stopped`. Its tokens and cost are those of its passes.
     - attempts: each attempt that an event names, by node, pass, item and attempt. It starts at its
       first event, and ends at its `session_ended`, its failure, or else the end of its pass, when the
       node has no items. It failed with `attempt_failed` (timed_out, when the node's timeout ended it),
-      was unavailable with `harness_unavailable`, and succeeded when its pass finished without either.
-      Its tokens and cost are those of its last `agent_usage`. A pass without `agent_usage` gives its own
-      (`node_finished`) to its last attempt, when the node has no items.
+      was unavailable with `harness_unavailable`, and succeeded when its pass ended without either.
+      Its tokens and cost are those of its last `agent_usage`. When the node has no items, and the
+      events of a pass have no `agent_usage`, the last agent attempt gets the pass's (`node_finished`).
     - tool_calls: each `agent_tool`, as the call e1, e2, ... of its attempt, in turn 0, with no duration.
     - routes: each `route`, in the pass of its node that started last.
     """
@@ -582,14 +720,13 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
         ended = seen.get("ended") or (ended_pass["time"] if ended_pass and last_one else None)
         error = seen.get("error", "")
         session = seen.get("session", "")
-        succeeded = ended_pass is not None and ended_pass.get("event") == "node_finished"
         rows["attempts"].append({
             "run_id": run.id, "workflow": workflow, "node": node, "pass": pass_no, "item": item, "attempt": number,
             "kind": "agent" if harness else "", "harness": harness, "model": seen.get("model", ""),
             "effort": seen.get("effort", ""), "access": "", "session_id": "",
             "session_start": "load" if session == "fork" and harness == "cursor" else session,
             "started": _utc(seen["started"]), "ended": _utc(ended), "duration_s": _seconds(seen["started"], ended),
-            "outcome": seen.get("outcome") or ("succeeded" if succeeded else ""), "error": error,
+            "outcome": seen.get("outcome") or ("succeeded" if ended_pass else ""), "error": error,
             "error_class": error_class(error), **used, "exit_code": None})
         for count, (time, tool) in enumerate(seen["tools"], 1):
             rows["tool_calls"].append({
@@ -598,7 +735,9 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
                 "started": _utc(time), "duration_ms": None, "is_error": None})
     if first is not None:
         status = _word((finished or {}).get("status")) or _word(run.status().get("status"))
-        ended = finished["time"] if finished else last if status != "running" else None
+        if status == "running" and not run.driven():  # its wf process stopped without run_finished
+            status = "stopped"
+        ended = finished["time"] if finished else None if status == "running" else last
         spent = [_usage(event) for (node, _), event in passes.items() if "/" not in node]  # a sub-workflow's is in its node's
         rows["runs"].append({
             "run_id": run.id, "repo_key": _repo_key(run.dir), "workflow": workflow, "status": status,

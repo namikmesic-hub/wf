@@ -1245,7 +1245,7 @@ The tests named below are in `tests/test_workspaces.py`.
   events.jsonl                  one line per event: node started, finished, route taken, agent session started, override, ...
   trace.jsonl                   one record per line of what the run read, decided and did (see The trace)
   blobs/                        values too long for a line of the trace, by their sha256
-  export.json                   where wf metrics export stopped reading the trace (see Export to ClickHouse)
+  export.json, export.lock      where wf metrics export stopped reading the trace, and its lock (see Export to ClickHouse)
   checkpoints.sqlite            LangGraph checkpoints, used by wf retry
   nodes/<node>/<pass>/          one folder per pass ...
     [<index>/]                  ... and per item
@@ -1636,7 +1636,7 @@ The tests below are in `tests/test_config.py`, unless a row names another file.
 | `config.toml` sets `metrics.url`, and its mode gives other users access (wider than 0600) | Every command exits 1 before it starts. The message names the mode and the fix: `chmod 600`. The rule holds for each URL, because wf can't tell a URL without a password from one with a password where wf reads another part. Other users can read a file without `metrics.url`. | `workflow/config/load.py:183` | `test_a_file_that_sets_metrics_url_must_be_yours_alone`, `test_a_file_without_metrics_url_can_be_read_by_others` |
 | A run, its trace, the environment of its commands, and the output of `wf run`, `wf status`, `wf trace`, `wf report` and `wf config show` | None of them holds the password. The repr of the configuration shows `***` for it. | `workflow/config/connection.py:110` | `test_the_password_is_in_no_trace_record_run_folder_or_output`, `test_the_password_of_a_config_is_never_in_its_repr` |
 | `docs/metrics/compose.yaml` | `docker compose config` reads it: ClickHouse alone, on `127.0.0.1:8123`, in the project `wf-clickhouse`. It has its user, password and database, a named volume, the files for little memory and for the headers, and no SQL. Pytest skips the test without Docker with Compose. | `docs/metrics/compose.yaml:26`, `docs/metrics/compose.yaml:30` | `test_the_example_compose_file_parses_and_runs_clickhouse_alone_on_127_0_0_1` in `tests/test_metrics.py` |
-| The README | It gives the commands that start and stop the example, and the command that stops the stack of an older wf. It also gives the URL of the example, which loads with `metrics.enabled`. It says that a `COMPOSE_PROJECT_NAME` in the shell replaces the project name. | `README.md:197` | `test_the_readme_gives_the_commands_and_the_url_of_the_example` in `tests/test_metrics.py` |
+| The README | It gives the commands that start and stop the example, and the command that stops the stack of an older wf. It also gives the URL of the example, which loads with `metrics.enabled`. It says that a `COMPOSE_PROJECT_NAME` in the shell replaces the project name. | `README.md:198` | `test_the_readme_gives_the_commands_and_the_url_of_the_example` in `tests/test_metrics.py` |
 | The dashboard and the Collector | The dashboard reads the database of the example through one datasource. The Collector takes the login of ClickHouse from its environment, and its filter knows the `service.name` of the Codex app server. The Collector's file names the contrib image that validates it. | `docs/metrics/grafana/wf-runs.json:23`, `docs/metrics/collector/config.yaml:51` | `test_the_dashboard_reads_the_database_of_the_example_through_one_datasource`, `test_the_collector_takes_the_login_of_clickhouse_from_its_environment`, `test_the_codex_that_wf_starts_names_its_service_as_the_collector_s_filter_expects` in `tests/test_metrics.py` |
 | wf | Its one `wf metrics` command is `wf metrics export`, and no module of `workflow/` runs `docker`. | `workflow/cli.py:794` | `test_wf_runs_no_docker_and_its_one_metrics_command_is_export` in `tests/test_metrics.py` |
 
@@ -1670,39 +1670,61 @@ ClickHouse keeps the rows in the database of the URL, in the tables that `workfl
 Nothing writes `metric_points` yet.
 Each table is a `ReplacingMergeTree` on its natural key, so a new row replaces the row with the same key.
 Read the tables with `FINAL`, or with `argMax` over `loaded_at`.
-A node in a sub-workflow has its path as its name, as in events, such as `build[1]/implement`.
 A job that isn't an item has the item -1.
+A node inside a sub-workflow has, in front of its id, the trace id of the attempt that runs the sub-workflow, such as `build#1[3].a1/implement`.
+So each pass and each attempt of a workflow node keeps rows of its own.
+The SQL `replaceRegexpAll(node, '#[0-9]+|[.]a[0-9]+', '')` gives the name that events use, `build[3]/implement`.
 The class of an error comes from its text: `rate_limit`, `dropped_connection`, `timeout`, `auth`, `no_result` or `other`.
 
 Before it writes, `wf metrics export` makes the database and each table that is missing.
 Then it checks each table that it writes against `clickhouse.sql`: each column and its type, the engine and the key.
+It doesn't check `metric_points`, which nothing writes yet.
+So a `metric_points` that another schema made keeps its columns until it is made again.
 
 The export of a run reads `trace.jsonl` from the byte offset where the last export stopped.
 Each record that starts or ends a run, an attempt, a turn or a tool call gives a row, and so does each route decision.
 So an attempt that runs has a row with the outcome `running`, and the row of its end replaces it.
-A tool call starts at its first `tool_call` record.
+A tool call starts at its first `tool_call` record, and its tool is the one that its last `tool_call` record names.
 `export.json` in the run folder keeps the offset, and what the next export needs of the records before it.
 A line that wf still writes waits for the next export.
 The duration of a run is the time that wf drove it, from each `run` record to the `run_stopped` after it.
 The tokens and cost of a run are the sums of its rows in `attempts`.
 
+The process that drives a run holds the lock of the run.
+When the trace says that the run runs, but no process holds its lock, its process stopped without `run_stopped`.
+Then the row of the run says `stopped`, as `wf status` does, and ends at the last record of the trace.
+Each attempt and turn that the process left running is `cancelled` at that record.
+When `wf retry` runs them again, their new rows replace these.
+
 A run folder from before the trace has only `events.jsonl`.
 `wf metrics export` reads that file whole, one time, and gets less from it.
 It gets the run, the attempts that the events name, their failures, the names and times of the tool calls, and the routes.
+An attempt without a failure event succeeded when its pass ended.
 An attempt gets its tokens and cost from its last `agent_usage` event.
-When the events of a pass have no `agent_usage`, the last attempt of the pass gets the tokens and cost of the pass.
+When the node has no items, the last agent attempt of a pass gets the tokens and cost of the pass.
+It does so only when the events of the pass have no `agent_usage`.
 Such a folder gives no turns, no durations or results of tool calls, and no session ids.
+When today's wf drives such a run again, its trace starts with `wf retry` or `wf continue`.
+Then the events before the trace give the rows of the run before it.
 
-`wf metrics export` doesn't take the lock of a run, and it writes nothing into the run folder but `export.json`.
+To export a run again from the start, delete its `export.json`.
+To export each run again, drop the tables, and the next export makes them again.
+A `TRUNCATE` keeps the tables and their identity, so each export then finds nothing new.
+
+One export of a run at a time holds `export.lock` in the run folder, from its read of `export.json` to its write.
+`wf metrics export` writes nothing else into the run folder, and it never holds the lock of the run.
+It takes that lock only for a moment, as `wf status` does, to see whether a process still drives a run that runs.
 So it can't make a run fail or go slower, also while the run works.
 For each run, it prints the number of rows that it wrote in each table, or `nothing new`.
 Its errors have three classes:
 
-- Store down: ClickHouse doesn't answer, or refuses a request for a reason other than its tables, such as a wrong password.
+- Store down: ClickHouse doesn't answer, answers as another program, or refuses a request for a reason other than its tables, such as a wrong password.
   The export stops.
-- Schema mismatch: a table differs from `clickhouse.sql`.
-  The export stops before it writes, and names each difference.
-  When you drop those tables, the next export makes them again, and writes each run again.
+- Schema mismatch: a table differs from `clickhouse.sql`, or ClickHouse refuses the rows of a table for their table or columns.
+  The export stops, and names each difference.
+  When the check before the export finds a difference, the export writes nothing.
+  When ClickHouse refuses the rows of one table, the tables before it can already have the rows of that run.
+  The next export writes them again.
 - Unreadable folder: wf can't read a run folder, or can't keep its offset in `export.json`.
   The export goes on with the next run.
 
@@ -1712,20 +1734,28 @@ The tests that use Docker start ClickHouse 25.8 in a container of their own, and
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| A run folder has a trace | The run, each attempt, turn and tool call, and each route decision get a row. A failed attempt gets the class of its error, also when the trace keeps the error in `blobs/`. | `workflow/export.py:408`, `workflow/export.py:412`, `workflow/export.py:445`, `workflow/export.py:465`, `workflow/export.py:327` | `test_a_trace_gives_a_row_for_each_run_attempt_turn_tool_call_and_route`, `test_an_error_gets_its_class_from_its_text`, `test_the_records_of_a_real_run_give_a_row_for_each_attempt_turn_tool_call_and_route` |
-| An export stops at any line of the trace, and the next export reads the rest | The tables get the same rows as from one export. An attempt, turn or tool call that runs has a row, and the row of its end replaces it. | `workflow/export.py:253`, `workflow/export.py:282` | `test_an_export_gives_the_same_rows_wherever_the_one_before_stopped`, `test_a_row_of_something_that_runs_is_written_again_when_it_ends` |
-| The last line of the trace is still being written | The export leaves it for the next export. | `workflow/export.py:310` | `test_a_line_that_is_still_being_written_waits_for_the_next_export` |
-| A run is exported again, and nothing is new | The export writes no row, and `export.json` stays as it was. | `workflow/export.py:276` | `test_exporting_twice_writes_nothing_the_second_time`, `test_a_backfill_into_clickhouse_gives_the_expected_rows_and_a_second_export_changes_nothing` |
-| A table of `clickhouse.sql` is missing | The export makes it before it writes, and the identity of the tables changes. It also makes the database of the URL, when that is missing. When no table is missing, the export makes none. | `workflow/export.py:129`, `workflow/export.py:132`, `workflow/export.py:143` | `test_prepare_makes_the_database_and_the_tables_that_are_missing_and_names_them_by_their_ids`, `test_clickhouse_with_a_table_that_differs_stops_the_export_until_the_table_is_made_again` |
-| The tables were made again, or `export.json` is missing or damaged | The export writes each row of the run again, from the start of the file. Each row replaces the row with the same key, so the tables read the same with `FINAL`. | `workflow/export.py:143`, `workflow/export.py:253`, `workflow/export.py:293` | `test_tables_that_are_made_again_get_each_row_again`, `test_a_damaged_export_json_counts_as_none`, `test_a_backfill_into_clickhouse_gives_the_expected_rows_and_a_second_export_changes_nothing` |
-| A run folder has only `events.jsonl` | The export reads it one time. The run, the attempts that the events name, the tool calls and the routes get rows. A pass without `agent_usage` gives its tokens and cost to its last attempt. | `workflow/export.py:530`, `workflow/export.py:581` | `test_a_folder_with_only_events_gives_the_rows_that_its_events_say`, `test_a_folder_with_only_events_is_read_once`, `test_a_run_without_run_finished_takes_its_status_from_status_json` |
-| A process drives the run during the export | The export works, and writes only `export.json` in the run folder. | `workflow/export.py:282` | `test_the_export_writes_only_export_json_and_works_while_a_process_drives_the_run` |
-| ClickHouse doesn't answer, or refuses a request for another reason than its tables | Store down: `wf metrics export` says why and exits with code 1. `export.json` stays as it was. | `workflow/export.py:169`, `workflow/export.py:177`, `workflow/cli.py:838` | `test_clickhouse_that_doesnt_answer_is_down`, `test_what_clickhouse_answers_decides_the_class_of_the_error`, `test_wf_metrics_export_stops_when_clickhouse_is_down_and_keeps_no_offset`, `test_a_store_that_refuses_the_rows_leaves_the_offset_where_it_was` |
-| A table that the export writes has another column, type, engine or key than `clickhouse.sql`, or ClickHouse refuses the rows for a table or column | Schema mismatch: the export writes nothing, and names each difference. When the table is dropped, the next export makes it again. | `workflow/export.py:129`, `workflow/export.py:138`, `workflow/export.py:176`, `workflow/export.py:221` | `test_the_check_names_each_way_that_a_table_differs_from_the_schema`, `test_clickhouse_with_a_table_that_differs_stops_the_export_until_the_table_is_made_again` |
-| A run folder has neither `trace.jsonl` nor `events.jsonl`, can't be read, or can't keep `export.json` | Unreadable folder: the export says why, and goes on with the next run. `wf metrics export` then exits with code 1. | `workflow/export.py:251`, `workflow/export.py:275`, `workflow/export.py:284`, `workflow/cli.py:846` | `test_a_folder_without_a_trace_or_events_is_unreadable`, `test_a_trace_that_cant_be_read_or_an_offset_that_cant_be_kept_is_an_unreadable_folder`, `test_a_run_folder_that_cant_be_read_doesnt_stop_the_others` |
+| A run folder has a trace | The run, each attempt, turn and tool call, and each route decision get a row. A failed attempt gets the class of its error, also when the trace keeps the error in `blobs/`. | `workflow/export.py:531`, `workflow/export.py:537`, `workflow/export.py:574`, `workflow/export.py:595`, `workflow/export.py:392` | `test_a_trace_gives_a_row_for_each_run_attempt_turn_tool_call_and_route`, `test_an_error_gets_its_class_from_its_text`, `test_the_records_of_a_real_run_give_a_row_for_each_attempt_turn_tool_call_and_route` |
+| The harness reports a tool call again, with another tool | The call keeps the start of its first record, and takes the tool of its last. | `workflow/export.py:590` | `test_a_trace_gives_a_row_for_each_run_attempt_turn_tool_call_and_route` |
+| A workflow node runs its sub-workflow in another pass or attempt | Each run of the sub-workflow keeps rows of its own, under the trace id of the attempt that runs it. The tokens and cost of the run count each of them. | `workflow/export.py:624` | `test_each_pass_and_attempt_of_a_workflow_node_keeps_the_rows_of_its_sub_workflow`, `test_a_trace_gives_a_row_for_each_run_attempt_turn_tool_call_and_route` |
+| An export stops at any line of the trace, and the next export reads the rest | The tables get the same rows as from one export. An attempt, turn or tool call that runs has a row, and the row of its end replaces it. | `workflow/export.py:281`, `workflow/export.py:310` | `test_an_export_gives_the_same_rows_wherever_the_one_before_stopped`, `test_a_row_of_something_that_runs_is_written_again_when_it_ends` |
+| The last line of the trace is still being written | The export leaves it for the next export. | `workflow/export.py:375` | `test_a_line_that_is_still_being_written_waits_for_the_next_export` |
+| A run is exported again, and nothing is new | The export writes no row, and `export.json` stays as it was. | `workflow/export.py:305` | `test_exporting_twice_writes_nothing_the_second_time`, `test_a_backfill_into_clickhouse_gives_the_expected_rows_and_a_second_export_changes_nothing` |
+| The trace says that the run runs, but no process holds the lock of the run | The run is `stopped` at its last record, also when nothing in the trace is new. Each attempt and turn that its process left running is `cancelled` there. A rerun of one of them starts with nothing that the process left. | `workflow/export.py:436`, `workflow/export.py:457`, `workflow/export.py:476`, `workflow/export.py:532` | `test_a_run_whose_process_stopped_without_run_stopped_is_stopped_and_what_it_left_running_is_cancelled`, `test_a_rerun_of_an_attempt_after_its_process_stopped_starts_with_none_of_what_that_process_left` |
+| A table of `clickhouse.sql` is missing | The export makes it before it writes, and the identity of the tables changes. It also makes the database of the URL, when that is missing. When no table is missing, the export makes none. | `workflow/export.py:147`, `workflow/export.py:150`, `workflow/export.py:162` | `test_prepare_makes_the_database_and_the_tables_that_are_missing_and_names_them_by_their_ids`, `test_clickhouse_with_a_table_that_differs_stops_the_export_until_the_table_is_made_again` |
+| The tables were made again, `export.json` is missing or damaged, or the file is shorter than the offset | The export writes each row of the run again, from the start of the file. Each row replaces the row with the same key, so the tables read the same with `FINAL`. | `workflow/export.py:162`, `workflow/export.py:281`, `workflow/export.py:285`, `workflow/export.py:358` | `test_tables_that_are_made_again_get_each_row_again`, `test_a_damaged_export_json_counts_as_none`, `test_a_trace_shorter_than_its_offset_is_read_again_from_its_start`, `test_a_backfill_into_clickhouse_gives_the_expected_rows_and_a_second_export_changes_nothing` |
+| A run folder has only `events.jsonl` | The export reads it one time. The run, the attempts that the events name, the tool calls and the routes get rows. An attempt without a failure event succeeded when its pass ended. | `workflow/export.py:667`, `workflow/export.py:729` | `test_a_folder_with_only_events_gives_the_rows_that_its_events_say`, `test_a_folder_with_only_events_is_read_once`, `test_an_item_that_succeeded_in_a_pass_that_failed_succeeded` |
+| The events of a pass have no `agent_usage` | When the node has no items, the last agent attempt of the pass gets the tokens and cost of the pass. A pass in a sub-workflow counts once in the run, in its workflow node. | `workflow/export.py:719`, `workflow/export.py:741` | `test_a_folder_with_only_events_gives_the_rows_that_its_events_say`, `test_the_spending_of_a_pass_in_a_sub_workflow_counts_once_in_its_run` |
+| A run folder with only `events.jsonl` has no `run_finished` | The run takes its status from `status.json`. When that says `running` and no process holds the lock of the run, the run is `stopped`. | `workflow/export.py:739` | `test_a_run_without_run_finished_takes_its_status_from_status_json`, `test_a_run_from_before_the_trace_that_no_process_drives_but_that_says_running_is_stopped` |
+| A trace starts with `wf retry` or `wf continue` of a run from before the trace | The events before the trace give the rows of the run before it. The run starts at its first event, and adds their tokens, cost and time. | `workflow/export.py:483` | `test_a_trace_that_starts_with_a_retry_of_a_run_from_before_the_trace_keeps_the_events_before_it` |
+| A process drives the run during the export | The export works, and writes only `export.json` and `export.lock` in the run folder. | `workflow/export.py:279`, `workflow/export.py:310` | `test_the_export_writes_only_export_json_and_its_lock_and_works_while_a_process_drives_the_run` |
+| Another export of the run holds `export.lock` | The export waits until the other ends, and only then reads `export.json`. | `workflow/export.py:335`, `workflow/export.py:344` | `test_an_export_waits_while_another_export_of_the_run_holds_export_lock` |
+| ClickHouse doesn't answer, answers as another program, or refuses a request for another reason than its tables | Store down: `wf metrics export` says why, stops at that run, and exits with code 1. `export.json` stays as it was. | `workflow/export.py:182`, `workflow/export.py:198`, `workflow/export.py:206`, `workflow/cli.py:854` | `test_clickhouse_that_doesnt_answer_is_down`, `test_an_address_that_answers_but_not_as_clickhouse_does_is_store_down`, `test_what_clickhouse_answers_decides_the_class_of_the_error`, `test_wf_metrics_export_stops_when_clickhouse_is_down_and_keeps_no_offset`, `test_wf_metrics_export_stops_at_the_first_run_whose_rows_clickhouse_refuses` |
+| A table that the export writes has another column, type, engine or key than `clickhouse.sql` | Schema mismatch: the export writes nothing, and names each difference. When the table is dropped, the next export makes it again. | `workflow/export.py:147`, `workflow/export.py:157`, `workflow/export.py:250` | `test_the_check_names_each_way_that_a_table_differs_from_the_schema`, `test_clickhouse_with_a_table_that_differs_stops_the_export_until_the_table_is_made_again` |
+| ClickHouse refuses the rows of a table for their table or columns | Schema mismatch: the export stops at that table. The next export of the run writes its rows again, also those of the tables before it. | `workflow/export.py:205`, `workflow/export.py:308` | `test_what_clickhouse_answers_decides_the_class_of_the_error`, `test_a_store_that_refuses_the_rows_leaves_the_offset_where_it_was` |
+| A run folder has neither `trace.jsonl` nor `events.jsonl`, wf can't look into it or read it, or wf can't keep `export.json` | Unreadable folder: the export says why, and goes on with the next run. `wf metrics export` then exits with code 1. | `workflow/export.py:316`, `workflow/export.py:324`, `workflow/export.py:303`, `workflow/export.py:312`, `workflow/cli.py:850` | `test_a_folder_without_a_trace_or_events_is_unreadable`, `test_a_trace_that_cant_be_read_or_an_offset_that_cant_be_kept_is_an_unreadable_folder`, `test_a_run_folder_that_cant_be_read_doesnt_stop_the_others` |
 | `metrics.enabled` is `false`, or there's no `[metrics]` | `wf metrics export` says how to turn the export on, and exits with code 1. It opens no connection. | `workflow/cli.py:819` | `test_wf_metrics_export_with_metrics_off_says_how_to_turn_them_on` |
-| A request to ClickHouse | wf signs in as the user of `metrics.url`, in the headers `X-ClickHouse-User` and `X-ClickHouse-Key`. A request that writes or makes a table names the database of the URL, and the tables go there. A column that a table doesn't have fails the insert. | `workflow/export.py:118`, `workflow/export.py:160` | `test_the_store_signs_in_with_headers_as_the_user_of_the_url_and_writes_in_its_database`, `test_the_export_makes_its_database_and_tables_where_the_url_says` |
-| `--all-repos` | `wf metrics export` writes the runs of each repo in the runs folder. It needs a runs folder, and no run ids. | `workflow/cli.py:811`, `workflow/cli.py:826` | `test_wf_metrics_export_all_repos_writes_the_runs_of_each_repo_in_the_runs_folder`, `test_wf_metrics_export_refuses_what_it_cant_do_before_it_opens_clickhouse` |
+| A request to ClickHouse | wf signs in as the user of `metrics.url`, in the headers `X-ClickHouse-User` and `X-ClickHouse-Key`. A request that writes or makes a table names the database of the URL, and the tables go there. A column that a table doesn't have fails the insert. | `workflow/export.py:136`, `workflow/export.py:189` | `test_the_store_signs_in_with_headers_as_the_user_of_the_url_and_writes_in_its_database`, `test_the_export_makes_its_database_and_tables_where_the_url_says` |
+| `--all-repos` | `wf metrics export` writes the runs of each repo in the runs folder. It needs a runs folder, and no run ids. | `workflow/cli.py:811`, `workflow/cli.py:827` | `test_wf_metrics_export_all_repos_writes_the_runs_of_each_repo_in_the_runs_folder`, `test_wf_metrics_export_refuses_what_it_cant_do_before_it_opens_clickhouse` |
 
 ## Validation
 
