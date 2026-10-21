@@ -267,6 +267,18 @@ def test_node_must_say_that_it_runs_typescript(tmp_path, typescript, ok):
         cursor.find_node("no-such-node")
 
 
+def test_paths_node_names_the_node_that_runs_the_host(tmp_path, wf_home):
+    node = tmp_path / "node-22"
+    node.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo v22.18.0; else echo strip; fi\n')
+    node.chmod(0o755)
+    (wf_home / "config.toml").write_text(f'[paths]\nnode = "{node}"\n')
+    assert cursor.find_node() == str(node)
+    (wf_home / "config.toml").write_text(f'[paths]\nnode = "{tmp_path / "gone"}"\n')
+    with pytest.raises(Unavailable, match=f"and {tmp_path / 'gone'} \\(paths.node in {wf_home / 'config.toml'}\\) "
+                                          "isn't a program that you may run"):
+        cursor.find_node()
+
+
 def test_the_wheel_ships_the_host_without_its_installed_packages(tmp_path):
     uv = shutil.which("uv")
     if uv is None:
@@ -286,15 +298,15 @@ def test_the_wheel_ships_the_host_without_its_installed_packages(tmp_path):
 # ---------- which adapter runs `cursor` ----------
 
 
-def test_the_sdk_runs_cursor_unless_a_setting_or_the_environment_asks_for_acp(monkeypatch, wf_home):
+def test_the_sdk_runs_cursor_unless_a_setting_or_the_environment_asks_for_acp(monkeypatch, wf_home, capsys):
     assert isinstance(cursor.create(), cursor.Cursor)
-    (wf_home / "config.yaml").write_text("cursor_runtime: acp\n")
+    (wf_home / "config.toml").write_text('[cursor]\nruntime = "acp"\n')
     assert isinstance(cursor.create(), CursorAcp)
-    monkeypatch.setenv(cursor.RUNTIME_ENV, "sdk")  # the environment wins
+    monkeypatch.setenv("WF_CURSOR_RUNTIME", "sdk")  # the environment wins
     assert isinstance(cursor.create(), cursor.Cursor)
-    monkeypatch.setenv(cursor.RUNTIME_ENV, "cli")
-    with pytest.raises(Unavailable, match="the Cursor runtime must be sdk or acp, not `cli`"):
-        harnesses.create("cursor")
+    monkeypatch.setenv("WF_CURSOR_RUNTIME", "cli")
+    assert cli.main(["validate", "no-such.yaml"]) == 1  # wf starts no command with it
+    assert capsys.readouterr().err == "wf validate: WF_CURSOR_RUNTIME must be sdk or acp, not `cli`\n"
 
 
 @needs_node
@@ -304,7 +316,7 @@ def test_with_acp_chosen_a_run_uses_cursor_agent(repo, monkeypatch, cursor_host)
     acp = Fake("cursor", submit({"summary": "on acp"}))
     monkeypatch.setitem(harnesses.FACTORIES, "cursor", lambda: cursor.create())
     monkeypatch.setattr("workflow.harnesses.cursor_acp.CursorAcp", lambda: acp.factory())
-    monkeypatch.setenv(cursor.RUNTIME_ENV, "acp")
+    monkeypatch.setenv("WF_CURSOR_RUNTIME", "acp")
     Path("flow.yaml").write_text("""
 version: 1
 name: cu
@@ -331,7 +343,7 @@ def test_signin_keeps_the_key_in_the_keychain_and_checks_it(monkeypatch, cursor_
     assert fake_keyring.items[cursor.KEYCHAIN] == KEY
     out = capsys.readouterr().out
     assert "Saved the Cursor API key in the macOS Keychain: the key works: wf tests (someone@example.com), 3 models" in out
-    assert "cursor_api_key_file" not in out
+    assert "api_key_file" not in out
 
 
 @needs_node
@@ -340,10 +352,11 @@ def test_signin_says_when_a_key_file_wins_over_the_keychain(monkeypatch, cursor_
     monkeypatch.setattr(cursor, "HOST", cursor_host)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("getpass.getpass", lambda prompt: KEY)
-    (wf_home / "config.yaml").write_text(f"cursor_api_key_file: {tmp_path / 'old-key'}\n")
+    (wf_home / "config.toml").write_text(f'[cursor]\napi_key_file = "{tmp_path / "old-key"}"\n')
     assert cli.main(["runtimes", "cursor", "signin"]) == 0
     out = capsys.readouterr().out
-    assert f"names {tmp_path / 'old-key'}, and Cursor sessions take the key from there first. Remove that setting" in out
+    assert (f"cursor.api_key_file in {wf_home / 'config.toml'} names {tmp_path / 'old-key'}, and Cursor sessions take the "
+            "API key from there first. Remove api_key_file from [cursor]") in out
 
 
 @needs_node

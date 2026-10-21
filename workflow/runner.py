@@ -53,7 +53,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, settings, spec, steer, validate, workspaces
+from . import ask, capacity, config, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, spec, steer, validate, workspaces
 from .context import RunContext
 from .harnesses.base import short
 
@@ -80,7 +80,7 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         return 1
     try:
         max_agents = capacity.configured()  # a bad cap stops a run before it exists, a detached one too
-    except (capacity.CapError, settings.SettingsError) as error:
+    except config.ConfigError as error:
         print(f"wf run: {error}", file=sys.stderr)
         return 1
     report = validate.check(path)
@@ -160,8 +160,8 @@ def retry(run_id: str, no_input: bool, answers_file: Path | None = None, detach:
         new_limits = limits.parse(limit_pairs or [])
         new_models = overrides.parse(override_pairs or {})
         max_agents = capacity.configured()
-    except (OSError, spec.SpecError, ValueError, limits.LimitError, overrides.OverrideError, capacity.CapError,
-            settings.SettingsError) as error:  # ValueError: not JSON, or not UTF-8
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, overrides.OverrideError,
+            config.ConfigError) as error:  # ValueError: not JSON, or not UTF-8
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:
@@ -341,8 +341,8 @@ def _note_uncommitted(workflows: list[spec.Workflow], read_by_wf: list[Path]) ->
 
 
 def _runs_dir_args(runs_dir: Path | None) -> list[str]:
-    """A background driver inherits WF_RUNS_DIR, but not --runs-dir: pass that on, resolved,
-    so the driver finds the run where this process put it."""
+    """A background driver inherits WF_RUNS_DIR and reads config.toml, but doesn't get --runs-dir: pass
+    that on, resolved, so the driver finds the run where this process put it."""
     return ["--runs-dir", str(runs_dir.expanduser().resolve())] if runs_dir else []
 
 
@@ -696,7 +696,7 @@ def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, a
         workflows = [spec.load(f) for f in validate.check(run.workflow_file).files]
         new_limits = limits.parse(limit_pairs or [])
         max_agents = capacity.configured()
-    except (OSError, spec.SpecError, ValueError, limits.LimitError, capacity.CapError, settings.SettingsError) as error:
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, config.ConfigError) as error:
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:

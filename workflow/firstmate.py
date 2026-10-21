@@ -11,7 +11,7 @@ one JSON response on stdout.
 This module is that executable's logic. A source is one wf run, named by its
 run folder in the source's config reference: `wf-run:/abs/repo/.wf/runs/<id>`,
 or `wf-run:/abs/runs-dir/<repo key>/<id>` for a run kept in a runs folder
-(--runs-dir, WF_RUNS_DIR) outside the repo.
+(--runs-dir, WF_RUNS_DIR or runs_dir in config.toml) outside the repo.
 
     source.poll      wait up to POLL_SECONDS for the run to need attention (operate.wait),
                      with the source as the consumer, so each state is reported once:

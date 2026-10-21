@@ -72,9 +72,14 @@ def test_without_project_instructions_no_setting_source_loads(tmp_path):
     assert o.system_prompt == {"type": "preset", "preset": "claude_code"}  # Claude Code's own prompt stays
 
 
-def test_api_key_auth_can_be_chosen(tmp_path, monkeypatch):
+def test_api_key_auth_can_be_chosen(tmp_path, monkeypatch, wf_home):
     monkeypatch.setenv("WF_CLAUDE_AUTH", "api-key")
     assert options(spec(tmp_path)).env == {}
+    monkeypatch.delenv("WF_CLAUDE_AUTH")
+    (wf_home / "config.toml").write_text('[claude]\nauth = "api-key"\n')
+    assert options(spec(tmp_path)).env == {}
+    monkeypatch.setenv("WF_CLAUDE_AUTH", "subscription")  # the environment wins
+    assert options(spec(tmp_path)).env == {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}
 
 
 def test_opening_finds_the_claude_code_program_as_the_sdk_does(tmp_path, monkeypatch):

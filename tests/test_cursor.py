@@ -296,7 +296,7 @@ def test_with_no_api_key_sessions_run_through_cursor_agents_acp_and_one_warning_
     (warning,) = events("warning")
     assert warning["message"].startswith("no Cursor API key is set, so cursor runs read-only and full sessions "
                                          "through cursor-agent's ACP, which counts no tokens. Create a Cursor API key")
-    assert "`wf runtimes cursor signin`" in warning["message"] and "`cursor_api_key_file`" in warning["message"]
+    assert "`wf runtimes cursor signin`" in warning["message"] and "`api_key_file` under [cursor]" in warning["message"]
     assert capsys.readouterr().out.count("⚠ no Cursor API key is set") == 1
     (line,) = [e for e in attempt_log() if e["kind"] == "runtime"]
     assert line["runtime"] == "acp" and line["why"].startswith("no Cursor API key is set")
@@ -316,16 +316,17 @@ def test_a_refused_api_key_makes_cursor_unavailable(repo, monkeypatch, cursor_ho
 def test_the_api_key_can_come_from_a_file_that_a_setting_names(repo, monkeypatch, cursor_host, wf_home, fake_keyring):
     log = use(monkeypatch, repo, cursor_host, [GOOD], key="key_in_the_keychain")
     (repo / "cursor-key").write_text(f"{KEY}\n")
-    (wf_home / "config.yaml").write_text(f"cursor_api_key_file: {repo / 'cursor-key'}\n")
+    (wf_home / "config.toml").write_text(f'[cursor]\napi_key_file = "{repo / "cursor-key"}"\n')
     assert run() == 0
     assert entries(log, "create")[0]["apiKey"] == KEY  # the file wins over the Keychain
 
 
 def test_a_key_file_that_cannot_be_read_makes_cursor_unavailable(repo, monkeypatch, cursor_host, wf_home, capsys):
     use(monkeypatch, repo, cursor_host)
-    (wf_home / "config.yaml").write_text(f"cursor_api_key_file: {repo / 'nowhere'}\n")
+    (wf_home / "config.toml").write_text(f'[cursor]\napi_key_file = "{repo / "nowhere"}"\n')
     assert run() == 1
-    assert f"cursor is unavailable: can't read the Cursor API key from {repo / 'nowhere'}" in capsys.readouterr().out
+    assert (f"cursor is unavailable: can't read the Cursor API key from {repo / 'nowhere'} (cursor.api_key_file in "
+            f"{wf_home / 'config.toml'})") in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("failure, said", [

@@ -109,6 +109,18 @@ def test_setup_asks_for_the_write_scopes_only_with_write(vendor, fake_keyring, m
         cli.main(["tools", "granola", "setup", "--write"])
 
 
+def test_setup_waits_for_the_redirect_on_signin_port_of_config_toml_unless_port_is_given(vendor, fake_keyring, monkeypatch,
+                                                                                       wf_home):
+    monkeypatch.setattr(sys, "stdin", Terminal())
+    monkeypatch.setattr("webbrowser.open", browser())
+    ports = free_port(), free_port()
+    (wf_home / "config.toml").write_text(f"[tools]\nsignin_port = {ports[0]}\n")
+    assert cli.main(["tools", "linear", "setup"]) == 0
+    assert cli.main(["tools", "linear", "setup", "--port", str(ports[1])]) == 0
+    assert [asked["json"]["redirect_uris"] for asked in vendor.requests("/register")] == [
+        [f"http://localhost:{port}/callback"] for port in ports]
+
+
 def test_discovery_follows_the_401_and_finds_openid_metadata_appended_to_an_issuer_path():
     vendor = FakeVendor(issuer_path="/tenant").start()
     try:

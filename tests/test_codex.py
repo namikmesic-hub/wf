@@ -7,6 +7,7 @@ The opt-in test at the bottom runs the real `codex` (uses your Codex quota):
 """
 
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -71,6 +72,22 @@ def output() -> dict:
 
 
 GOOD = {"tool": {"arguments": {"summary": "hi"}}}
+
+
+def test_paths_codex_names_the_codex_that_wf_runs(repo, monkeypatch, wf_home, capsys):
+    scenario, log, said = repo / "scenario.json", repo / "requests.jsonl", repo / "args"
+    scenario.write_text(json.dumps({"turns": [[GOOD]], "silent": [], "skills": [], "steer": None}))
+    program = repo / "other-install" / "codex"
+    program.parent.mkdir()
+    program.write_text(f'#!/bin/sh\nif [ "$1" = --version ]; then echo codex-cli 0.1.0; exit; fi\necho "$@" > {said}\n'
+                       f"exec {shlex.join([sys.executable, str(FAKE), str(scenario), str(log)])}\n")
+    program.chmod(0o755)
+    (wf_home / "config.toml").write_text(f'[paths]\ncodex = "{program}"\n')
+    monkeypatch.setitem(harnesses.FACTORIES, "codex", lambda: Codex(request_timeout=5))
+    assert run() == 0
+    assert output() == {"out": "hi"}
+    assert said.read_text() == "app-server --disable hooks --disable apps\n"
+    assert "codex 0.1.0 is installed; wf is tested with" in capsys.readouterr().out  # the version of that codex
 
 
 def test_a_thread_is_started_with_every_setting_explicit(repo, monkeypatch):

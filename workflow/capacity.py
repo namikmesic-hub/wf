@@ -7,7 +7,7 @@ more agent sessions at once than the machine, or an account's quota, holds.
 `max_agents` caps them all:
 
     WF_MAX_AGENTS=4                       this process, and the background drivers it starts
-    max_agents: 4   in ~/.wf/config.yaml  every wf process that uses this ~/.wf (settings.py)
+    max_agents = 4  in ~/.wf/config.toml  every wf process that uses this ~/.wf (config/)
 
 The environment variable wins over the file, which is checked all the same.
 With neither there is no cap, and nothing here runs. Give every wf process the
@@ -39,43 +39,19 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from . import settings
-from .workspaces import home
+from . import config
 
-ENV = "WF_MAX_AGENTS"
 POLL_SECONDS = 0.2
 
 
-class CapError(Exception):
-    """The cap is set, but not to a whole number of 1 or more."""
-
-
 def slots_dir() -> Path:
-    return home() / "agent-slots"
-
-
-_UNSET = object()
+    return config.home() / "agent-slots"
 
 
 def configured() -> int | None:
-    """The cap: WF_MAX_AGENTS, else `max_agents` in config.yaml, else None (no cap). The file is
-    checked even when WF_MAX_AGENTS wins. Raises CapError, or settings.SettingsError."""
-    value, where = settings.get("max_agents", missing=_UNSET), f"max_agents in {settings.path()}"
-    in_file = None if value is _UNSET else _at_least_one(value, where, json.dumps(value, default=str))
-    raw = os.environ.get(ENV, "").strip()
-    if not raw:
-        return in_file
-    try:
-        value = int(raw) if raw.isascii() and raw.isdigit() else 0
-    except ValueError:  # more digits than int() reads
-        value = 0
-    return _at_least_one(value, ENV, raw)
-
-
-def _at_least_one(value: object, where: str, shown: str) -> int:
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
-        return value
-    raise CapError(f"{where} must be a whole number of 1 or more, not `{shown}`")
+    """The cap: max_agents (WF_MAX_AGENTS, else config.toml), else None (no cap). The config
+    package checks it: a whole number of 1 or more. Raises config.ConfigError, only outside a command."""
+    return config.get().max_agents
 
 
 class Slot:

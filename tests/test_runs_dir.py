@@ -197,6 +197,33 @@ def test_the_option_wins_over_wf_runs_dir(repo, tmp_path, monkeypatch):
     assert not (tmp_path / "from-env").exists()
 
 
+def test_runs_dir_in_config_toml_keeps_run_folders_outside_the_repo_unless_the_variable_or_the_option_names_another(
+        repo, tmp_path, monkeypatch, wf_home):
+    (wf_home / "config.toml").write_text('runs_dir = "~/wf-test-runs"\n')
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    flow = write(tmp_path / "flaky.yaml", FLAKY)
+    assert cli.main(["run", flow, f"flag={tmp_path}"]) == 0
+    assert len(list((tmp_path / "home" / "wf-test-runs" / runs.repo_key(repo.resolve())).iterdir())) == 1
+    monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "from-env"))
+    assert cli.main(["run", flow, f"flag={tmp_path}"]) == 0
+    assert cli.main(["run", flow, f"flag={tmp_path}", "--runs-dir", str(tmp_path / "given")]) == 0
+    assert [len(list((tmp_path / name).iterdir())) for name in ("from-env", "given")] == [1, 1]
+    assert not (repo / ".wf").exists()
+
+
+def test_a_blank_wf_runs_dir_turns_off_the_runs_folder_of_config_toml(repo, tmp_path, monkeypatch, wf_home):
+    flag = tmp_path / "flag"
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={flag}"]) == 1
+    (run,) = runs.all_runs(repo)
+    (wf_home / "config.toml").write_text(f'runs_dir = "{tmp_path / "runs"}"\n')
+    hint = run.command("retry")
+    assert hint == f"WF_RUNS_DIR= wf retry {run.id}"
+    monkeypatch.setenv("WF_RUNS_DIR", "")  # as the printed command sets it
+    flag.touch()
+    assert cli.main(shlex.split(hint)[2:]) == 0
+    assert run.status()["status"] == "succeeded"
+
+
 def test_a_run_folder_in_a_runs_folder_must_record_its_repo(repo, tmp_path):
     assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--runs-dir", str(tmp_path / "runs")]) == 0
     (folder,) = runs.runs_folder(repo, tmp_path / "runs").iterdir()

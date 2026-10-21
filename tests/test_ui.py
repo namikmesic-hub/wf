@@ -470,12 +470,24 @@ def test_with_all_repos_the_page_lists_the_runs_of_each_repo_in_the_runs_folder(
     assert cli.main(["ui", "--all-repos"]) == 1  # no runs folder to read
 
 
+def test_wf_ui_takes_its_port_and_its_runs_folder_from_config_toml_unless_a_flag_names_them(tmp_path, monkeypatch, wf_home):
+    served = []
+    monkeypatch.setattr(ui, "serve", lambda source, port, opened=None: served.append((source.folder, port)) or 0)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["ui"]) == 0
+    (wf_home / "config.toml").write_text(f'runs_dir = "{tmp_path / "runs"}"\n[ui]\nport = 9001\n')
+    assert cli.main(["ui", "--all-repos"]) == 0  # the runs folder of the file is enough
+    assert cli.main(["ui", "--port", "0"]) == 0
+    assert [port for _, port in served] == [8765, 9001, 0]
+    assert served[1][0] == (tmp_path / "runs").resolve()
+
+
 @pytest.mark.parametrize("port", ["-1", "65536", "70000", "http"])
 def test_a_port_that_is_not_a_port_is_refused_with_a_message(port, capsys):
     with pytest.raises(SystemExit) as stop:  # bad arguments exit with 1, before any server starts
         cli.main(["ui", "--port", port])
     assert stop.value.code == 1
-    assert f"`{port}` isn't a port: use a number from 0 to 65535" in capsys.readouterr().err
+    assert f"argument --port: `{port}` isn't a whole number from 0 to 65535" in capsys.readouterr().err
 
 
 # ---------- the server ----------

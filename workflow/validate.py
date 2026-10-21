@@ -932,7 +932,7 @@ class _Checker:
         where = "limits.tokens" if self.wf.limits.tokens is not None else next(iter(self.token_refs), None)
         if "cursor" in self.no_tokens and where:
             self.warn(where, "cursor doesn't report tokens through cursor-agent's ACP, which runs its `edit` nodes "
-                             "(and every node with `cursor_runtime: acp`, or with no Cursor API key set), "
+                             "(and every node when cursor.runtime is acp, or with no Cursor API key set), "
                              "so that spending isn't counted; limits.duration caps every harness")
 
 

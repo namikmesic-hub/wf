@@ -19,8 +19,8 @@ Then the runner, built on LangGraph:
     context.py     what nodes get that isn't saved (LangGraph's runtime context)
     limits.py      the run's limits: reaching one pauses it, `wf retry --limit` continues it
     overrides.py   another model for a node or an item, for the rest of a run: `wf retry --model`
-    settings.py    wf's own settings for the user, in ~/.wf/config.yaml
-    capacity.py    the cap on live agent sessions across all runs that share a ~/.wf (WF_MAX_AGENTS)
+    config/        wf's own settings for the user, in ~/.wf/config.toml: the keys, the precedence, the checks
+    capacity.py    the cap on live agent sessions across all runs that share a ~/.wf (max_agents)
     runs.py        the run folder on disk
     trace.py       the run's trace: each render with what it read, each route
                    decision, attempt, turn and tool call, and no secrets
@@ -51,6 +51,5 @@ Then the tools around runs, none of which LangGraph knows about:
     progress.py    how far a run is on its way from start to end, as an estimate (`wf status`)
     observe.py     the agent sessions that run now (`wf sessions`), and the event stream (`wf watch`)
     ui.py          `wf ui`: a web page on this machine (ui/: the page) with the graph, progress and transcripts
-    metrics.py     `wf metrics up`: Grafana on ClickHouse, in Docker (../metrics/compose.yaml)
     examples/      two complete workflows (`wf examples` copies them out)
 """
