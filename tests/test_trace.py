@@ -413,6 +413,35 @@ def test_a_secret_item_from_a_literal_list_stays_hidden_in_results_after_a_new_p
     assert of("render", node="tell")[0]["reads"] == [{"path": "results.work[0].item", "value": trace.HIDDEN}]
 
 
+def test_a_secret_item_that_failed_stays_hidden_in_errors_after_a_new_process_continues_the_run(repo, capsys):
+    write("""
+        version: 1
+        name: literal
+        start: {input: {}}
+        nodes:
+          work:
+            needs: [start]
+            for_each: '["tok-err-7c2a", "fine-2b9d"]'
+            on_item_error: continue
+            command: 'test "$TOKEN" = fine-2b9d'
+            env: {TOKEN: "{{ item }}"}
+            secret_env: [TOKEN]
+          approve: {needs: [work], human: "Go on?", output: {ok: {type: boolean}}}
+          tell: {needs: [approve], command: "printf '%s' {{ errors.work[0].item | quote }}"}
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "flow.yaml", "--no-input"]) == 2  # waits for approve, with one item of work failed
+    capsys.readouterr()
+    cli.main(["status", run_dir().name, "--json"])
+    key = json.loads(capsys.readouterr().out)["questions"][0]["key"]
+    Path("answers.json").write_text(json.dumps({key: {"ok": True}}))
+    assert cli.main(["answer", run_dir().name, "answers.json"]) == 0  # a new process: work doesn't run again
+    written = records()
+    start = next(n for n, r in enumerate(written) if r["kind"] == "run" and r["action"] == "retried")
+    assert "tok-err-7c2a" not in json.dumps(written[start:])
+    assert of("render", node="tell")[0]["reads"] == [{"path": "errors.work[0].item", "value": trace.HIDDEN}]
+
+
 def test_the_secret_paths_of_lists_that_read_each_others_results_come_to_an_end():
     workflow = spec.parse(dedent("""
         version: 1
