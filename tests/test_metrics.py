@@ -50,6 +50,7 @@ def test_the_example_compose_file_parses_and_runs_clickhouse_alone_on_127_0_0_1(
                           capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     found = json.loads(done.stdout)
+    assert found["name"] == "wf-clickhouse"  # not wf-metrics, the project of the stack of an older wf
     ((name, service),) = found["services"].items()
     assert name == "clickhouse"
     assert re.fullmatch(r"clickhouse/clickhouse-server:\d+\.\d+\.\d+(\.\d+)?", service["image"])  # 25.8 moves with each patch
@@ -67,6 +68,7 @@ def test_the_readme_gives_the_commands_and_the_url_of_the_example(wf_home):
     text = README.read_text(encoding="utf-8")
     assert "docker compose -f docs/metrics/compose.yaml up -d" in text
     assert "docker compose -f docs/metrics/compose.yaml down" in text
+    assert "`docker compose -p wf-metrics down` stops that stack" in text  # the stack that an older wf started
     service = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]["clickhouse"]
     login = service["environment"]
     url = urlsplit(readme_url())

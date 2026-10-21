@@ -7,6 +7,7 @@ as `runtime` under [cursor]. KEYS lists them all, in the order that `wf config s
 """
 
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -29,6 +30,7 @@ class Wrong(ValueError):
 
 class Kind:
     allowed = ""  # what the kind allows, in words, as "a whole number of 1 or more"
+    allowed_in_text = ""  # what it allows in a variable or a flag, where that is another thing
 
     def from_toml(self, value: object) -> object:
         """The value, from tomllib. Raises Wrong."""
@@ -61,8 +63,13 @@ class Seconds(Kind):
     allowed = "a number of seconds above 0"
 
     def from_toml(self, value: object) -> float:
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
-            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                seconds = float(value)
+            except OverflowError:  # a whole number too big for a float
+                raise Wrong from None
+            if math.isfinite(seconds) and seconds > 0:
+                return value
         raise Wrong
 
     def from_text(self, text: str) -> float:
@@ -87,17 +94,32 @@ class Choice(Kind):
 
 class Location(Kind):
     """A file or a folder. In config.toml it starts with / or ~, because wf reads the file in any
-    folder. From a variable or a flag, a relative path is relative to the folder that wf runs in."""
+    folder. From a variable or a flag, a relative path is relative to the folder that wf runs in.
+    A ~ names the home folder of a user that exists."""
 
-    allowed = "a path that starts with / or ~"
+    allowed = "a path that starts with / or with the ~ of a user"
+    allowed_in_text = "a path, where ~ is the home folder of a user"
 
     def from_toml(self, value: object) -> Path:
-        if isinstance(value, str) and value and Path(value).expanduser().is_absolute():
-            return Path(value).expanduser()
+        path = _expanded(value) if isinstance(value, str) else None
+        if path is not None and path.is_absolute():
+            return path
         raise Wrong
 
     def from_text(self, text: str) -> Path:
-        return Path(text).expanduser()
+        path = _expanded(text)
+        if path is None:
+            raise Wrong
+        return path
+
+
+def _expanded(text: str) -> Path | None:
+    """The path with its ~ expanded, or None for an empty one, one with a NUL, or one with the ~ of a
+    user that doesn't exist (os.path leaves that ~ as it is, where pathlib raises RuntimeError)."""
+    if not text or "\0" in text:
+        return None
+    expanded = os.path.expanduser(text)
+    return None if expanded.startswith("~") else Path(expanded)
 
 
 class Boolean(Kind):
@@ -128,10 +150,12 @@ class ConnectionString(Kind):
 
 
 def key(kind: Kind, default: object = None, *, variable: str | None = None, flag: str | None = None,
-        none: str = "", secret: bool = False):
+        none: str = "", secret: bool = False, blank_is_default: bool = False):
     """A field that is a key: `none` says what no value means, for `wf config show`. A `secret` key's
-    value is never in a message, and `wf config show` shows it masked."""
-    return field(default=default, metadata={"kind": kind, "variable": variable, "flag": flag, "none": none, "secret": secret})
+    value is never in a message, and `wf config show` shows it masked. A blank variable counts as not
+    set, but with `blank_is_default` it gives the default, also over the file."""
+    return field(default=default, metadata={"kind": kind, "variable": variable, "flag": flag, "none": none, "secret": secret,
+                                            "blank_is_default": blank_is_default})
 
 
 @dataclass(frozen=True)
@@ -205,7 +229,8 @@ DEFAULT = Source("default")
 class Config:
     """The keys at the top of config.toml, a section for each of its tables, the file, and the source of each value."""
 
-    runs_dir: Path | None = key(Location(), variable="WF_RUNS_DIR", flag="--runs-dir", none=".wf/runs in each repo")
+    runs_dir: Path | None = key(Location(), variable="WF_RUNS_DIR", flag="--runs-dir", none=".wf/runs in each repo",
+                                blank_is_default=True)  # WF_RUNS_DIR= finds a run in .wf/runs (runs.Run.command)
     max_agents: int | None = key(Whole(1), variable="WF_MAX_AGENTS", none="no cap")
     claude: Claude = field(default_factory=Claude)
     cursor: Cursor = field(default_factory=Cursor)
@@ -247,6 +272,7 @@ class Key:
     flag: str | None  # its command-line flag, as `wf ui --port`
     none: str  # what no value means
     secret: bool
+    blank_is_default: bool
 
     @property
     def section(self) -> str:

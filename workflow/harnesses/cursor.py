@@ -147,8 +147,8 @@ def find_node(node: str | None = None) -> str:
     """The Node program to run the host with (`node`, else paths.node, else node on PATH), if it runs
     TypeScript as it is: Node itself says so, which its version alone doesn't (23.0 to 23.5 don't, and an
     option can switch it off). Raises Unavailable."""
-    chosen = config.get()
-    named = chosen.paths.node if node is None else None
+    chosen = config.get() if node is None else None
+    named = chosen.paths.node if chosen else None
     node = node or str(named or "node")
     found = shutil.which(node)
     if found is None and named:

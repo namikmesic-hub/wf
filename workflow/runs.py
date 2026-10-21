@@ -107,6 +107,13 @@ class Run:
             return f"{text} --runs-dir {shlex.quote(str(self.dir.parent.parent))}"
         return f"{RUNS_DIR}= {text}" if runs_folder(self.repo) != self.dir.parent else text
 
+    def location(self) -> tuple[list[str], dict[str, str]]:
+        """The arguments and the environment that let a new wf process find this run, whatever WF_RUNS_DIR
+        and config.toml say when it starts: --runs-dir for a run in a runs folder, else a blank WF_RUNS_DIR."""
+        if self.dir.parent != self.repo.resolve() / ROOT:
+            return ["--runs-dir", str(self.dir.parent.parent)], {}
+        return [], {RUNS_DIR: ""}
+
     @property
     def checkpoints(self) -> Path:
         return self.dir / "checkpoints.sqlite"

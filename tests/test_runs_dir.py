@@ -131,6 +131,22 @@ def test_a_detached_run_and_answer_find_a_runs_folder_given_by_option(repo, tmp_
     assert not (repo / ".wf").exists()
 
 
+@pytest.mark.parametrize("before, after", [("runs", "elsewhere"), (None, "runs")])
+def test_a_detached_run_finds_its_folder_after_runs_dir_changes_in_config_toml(repo, tmp_path, monkeypatch, capsys,
+                                                                                 wf_home, before, after):
+    def runs_dir(name: str | None) -> None:
+        (wf_home / "config.toml").write_text(f'runs_dir = "{tmp_path / name}"\n' if name else "")
+
+    runs_dir(before)
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--detach", "--json"]) == 0
+    run_id = json_out(capsys)["run"]
+    runs_dir(after)  # while the background driver starts
+    if before is None:
+        monkeypatch.setenv("WF_RUNS_DIR", "")  # the run is in .wf/runs
+    assert cli.main(["wait", run_id, "--timeout", "30", *(["--runs-dir", str(tmp_path / before)] if before else [])]) == 0
+    assert json_out(capsys)["status"] == "succeeded"
+
+
 def test_two_repos_with_the_same_name_keep_their_runs_apart(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setattr(runner, "interactive", lambda: False)

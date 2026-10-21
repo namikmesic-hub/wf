@@ -17,8 +17,12 @@
 # The HTTP port runs a statement only for a request to 127.0.0.1 or localhost with the header X-ClickHouse-User.
 # So a web page can't send one (clickhouse/http-headers.xml).
 # This file makes no tables: the export of runs makes them in the database of the url.
+#
+# Its compose project is wf-clickhouse.
+# An older wf started a stack with Grafana and a Collector as the project wf-metrics.
+# `docker compose -p wf-metrics down` stops that stack, and `down -v` also deletes its data.
 
-name: wf-metrics
+name: wf-clickhouse
 
 services:
   clickhouse:

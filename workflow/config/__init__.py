@@ -78,7 +78,7 @@ def flag(name: str) -> Callable[[str], object]:
         try:
             return kind.from_text(text.strip())
         except Wrong:
-            raise argparse.ArgumentTypeError(f"`{text}` isn't {kind.allowed}") from None
+            raise argparse.ArgumentTypeError(f"`{text}` isn't {kind.allowed_in_text or kind.allowed}") from None
 
     read.__name__ = name
     return read

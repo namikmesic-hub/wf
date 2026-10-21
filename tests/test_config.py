@@ -4,9 +4,12 @@ Each key takes its flag, then its environment variable, then the file, then wf's
 writes the file. A problem stops every command before it starts, and its message names the key or
 the variable, the file, and what is allowed. The password of metrics.url is shown nowhere."""
 
+import ast
 import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from textwrap import dedent
 
@@ -98,13 +101,15 @@ def test_without_a_file_each_key_has_wf_s_default_and_wf_writes_no_file(wf_home)
     assert sorted(path.name for path in wf_home.iterdir()) == []
 
 
-def test_a_blank_variable_gives_its_key_wf_s_default_also_over_the_file(wf_home, monkeypatch):
-    write(wf_home, 'max_agents = 3\nruns_dir = "~/runs"\n[cursor]\nruntime = "acp"\n')
-    for variable in ("WF_MAX_AGENTS", "WF_RUNS_DIR", "WF_CURSOR_RUNTIME"):
+def test_a_blank_variable_counts_as_not_set_but_a_blank_wf_runs_dir_turns_the_runs_folder_off(wf_home, monkeypatch):
+    write(wf_home, 'max_agents = 3\nruns_dir = "~/runs"\n[claude]\nauth = "api-key"\n[cursor]\nruntime = "acp"\n')
+    for variable in ("WF_MAX_AGENTS", "WF_RUNS_DIR", "WF_CLAUDE_AUTH", "WF_CURSOR_RUNTIME"):
         monkeypatch.setenv(variable, "  ")
     loaded = config.load()
-    assert (loaded.max_agents, loaded.runs_dir, loaded.cursor.runtime) == (None, None, "sdk")
-    assert str(loaded.source("cursor.runtime")) == "environment (WF_CURSOR_RUNTIME)"
+    assert (loaded.max_agents, loaded.claude.auth, loaded.cursor.runtime, loaded.runs_dir) == (3, "api-key", "acp", None)
+    assert [str(loaded.source(name)) for name in ("max_agents", "cursor.runtime", "runs_dir")] == [
+        "file", "file", "environment (WF_RUNS_DIR)"]
+    assert [name for name, key in config.KEYS.items() if key.blank_is_default] == ["runs_dir"]
 
 
 def test_a_blank_flag_is_no_flag(capsys, wf_home):
@@ -114,6 +119,10 @@ def test_a_blank_flag_is_no_flag(capsys, wf_home):
     with pytest.raises(SystemExit):
         cli.main(["ui", "--port", "port"])
     assert "argument --port: `port` isn't a whole number from 0 to 65535" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cli.main(["list", "--runs-dir", "~no-such-user-of-wf/runs"])
+    assert ("argument --runs-dir: `~no-such-user-of-wf/runs` isn't a path, where ~ is the home folder of a user"
+            in capsys.readouterr().err)
 
 
 def test_a_command_keeps_the_configuration_that_it_started_with(wf_home):
@@ -138,21 +147,59 @@ def test_commands_that_end_in_another_order_than_they_started_leave_nothing_pinn
     assert config.get().max_agents == 3
 
 
+def environment_keys(tree: ast.Module) -> list[str | None]:
+    """The variable that each read of os.environ or os.getenv in a module names: a string, or a name that
+    the module sets to a string. None for a key that the module computes, which a test can't follow."""
+    constants = {target.id: node.value.value for node in tree.body if isinstance(node, ast.Assign)
+                 and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+                 for target in node.targets if isinstance(target, ast.Name)}
+
+    def environ(node: ast.expr) -> bool:
+        return isinstance(node, ast.Attribute) and node.attr == "environ" or isinstance(node, ast.Name) and node.id == "environ"
+
+    keys = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args and (
+                environ(node.func.value) and node.func.attr in ("get", "pop", "setdefault") or node.func.attr == "getenv"):
+            keys.append(node.args[0])
+        elif isinstance(node, ast.Subscript) and environ(node.value):
+            keys.append(node.slice)
+        elif isinstance(node, ast.Compare) and any(environ(one) for one in node.comparators):
+            keys.append(node.left)
+    return [key.value if isinstance(key, ast.Constant) else constants.get(key.id) if isinstance(key, ast.Name) else None
+            for key in keys]
+
+
+def test_the_tests_collect_where_your_own_configuration_has_problems(tmp_path):
+    (tmp_path / "config.yaml").write_text("max_agents: 4\n")
+    shell = {**os.environ, "WF_HOME": str(tmp_path), "WF_MAX_AGENTS": "0"}
+    done = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+                           "tests/test_cursor_host.py"], cwd=ROOT, env=shell, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
 def test_only_the_config_package_reads_config_toml_or_the_variables_of_its_keys():
-    names = ["WF_HOME", *(key.variable for key in config.KEYS.values() if key.variable)]
+    names = {"WF_HOME", *(key.variable for key in config.KEYS.values() if key.variable)}
     for source in (ROOT / "workflow").rglob("*.py"):
         if source.is_relative_to(ROOT / "workflow" / "config"):
             continue
-        text = source.read_text(encoding="utf-8")
-        assert "tomllib" not in text, source
-        for name in names:
-            assert not re.search(rf"(environ|getenv)\b[^\n]*{name}", text), (source, name)
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        read = environment_keys(tree)
+        assert None not in read and not names & set(read), (source, read)
+        imported = {alias.name for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+                    for alias in node.names} | {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        assert not imported & {"tomllib", "tomli", "toml"}, source
+        assert not {"config.toml", "config.yaml"} & {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)}, source
+    caught = environment_keys(ast.parse("import os\nfrom . import runs\nENV = 'WF_MAX_AGENTS'\nos.environ.get(ENV)\n"
+                                        "os.environ[runs.RUNS_DIR]\n'WF_HOME' in os.environ\nos.getenv('WF_CLAUDE_AUTH')\n"))
+    assert caught == ["WF_MAX_AGENTS", None, "WF_HOME", "WF_CLAUDE_AUTH"]  # each of them fails the check above
 
 
 # ---------- unknown keys and wrong kinds ----------
 
 
 TOP = "The top of the file takes runs_dir and max_agents, and the tables [claude], [cursor], [ui], [tools], [git], [paths] and [metrics]"
+PATH = "a path that starts with / or with the ~ of a user"
 
 
 @pytest.mark.parametrize("text, problem", [
@@ -164,6 +211,8 @@ TOP = "The top of the file takes runs_dir and max_agents, and the tables [claude
     ('[cursor.sdk]\nruntime = "acp"', "unknown key cursor.sdk. [cursor] takes runtime and api_key_file"),
     ('[grafana]\nurl = "http://127.0.0.1:3000"', f"unknown key grafana. {TOP}"),
     ("ui = 9001", "ui must be a table, [ui], with port"),
+    ('"ui.port" = 9001', f'unknown key "ui.port". {TOP} (port goes under [ui])'),
+    ('"metrics.url" = "http://wf:hunter2@127.0.0.1:8123/wf"', f'unknown key "metrics.url". {TOP} (url goes under [metrics])'),
 ])
 def test_an_unknown_key_is_refused_with_the_keys_that_its_place_takes(wf_home, text, problem):
     file = write(wf_home, text + "\n")
@@ -174,17 +223,21 @@ def test_an_unknown_key_is_refused_with_the_keys_that_its_place_takes(wf_home, t
     ('max_agents = "4"', 'max_agents must be a whole number of 1 or more, not `"4"`'),
     ("max_agents = 0", "max_agents must be a whole number of 1 or more, not `0`"),
     ("max_agents = 1979-05-27", "max_agents must be a whole number of 1 or more, not a date or a time"),
-    ('runs_dir = "runs"', 'runs_dir must be a path that starts with / or ~, not `"runs"`'),
+    ('runs_dir = "runs"', f'runs_dir must be {PATH}, not `"runs"`'),
+    ('runs_dir = "~no-such-user-of-wf/runs"', f'runs_dir must be {PATH}, not `"~no-such-user-of-wf/runs"`'),
     ('[claude]\nauth = "token"', 'claude.auth must be subscription or api-key, not `"token"`'),
     ('[cursor]\nruntime = "cli"', 'cursor.runtime must be sdk or acp, not `"cli"`'),
-    ('[cursor]\napi_key_file = ["~/key"]', "cursor.api_key_file must be a path that starts with / or ~, not an array"),
+    ('[cursor]\napi_key_file = ["~/key"]', f"cursor.api_key_file must be {PATH}, not an array"),
+    ('[cursor]\napi_key_file = "/tmp/a\\u0000key"', f'cursor.api_key_file must be {PATH}, not `"/tmp/a\\u0000key"`'),
     ("[ui]\nport = 65536", "ui.port must be a whole number from 0 to 65535, not `65536`"),
     ('[ui]\nport = "8765"', 'ui.port must be a whole number from 0 to 65535, not `"8765"`'),
     ("[tools]\nsignin_port = 0", "tools.signin_port must be a whole number from 1 to 65535, not `0`"),
     ("[git]\nsigning_timeout = 0", "git.signing_timeout must be a number of seconds above 0, not `0`"),
     ("[git]\nsigning_timeout = nan", "git.signing_timeout must be a number of seconds above 0, not `nan`"),
     ("[git]\nsigning_timeout = true", "git.signing_timeout must be a number of seconds above 0, not `true`"),
-    ('[paths]\nnode = "node"', 'paths.node must be a path that starts with / or ~, not `"node"`'),
+    ("[git]\nsigning_timeout = 1" + "0" * 309, "git.signing_timeout must be a number of seconds above 0, not "
+                                               f"`1{'0' * 56}...`"),
+    ('[paths]\nnode = "node"', f'paths.node must be {PATH}, not `"node"`'),
     ('[metrics]\nenabled = "yes"', 'metrics.enabled must be true or false, not `"yes"`'),
     ("[metrics]\nurl = 8123", "metrics.url must be a connection string, as https://user:password@host:port/database, "
                               "not a number"),
@@ -200,6 +253,8 @@ def test_a_value_of_the_wrong_kind_is_refused_with_the_key_the_file_and_what_is_
     ("WF_MAX_AGENTS", "0", "WF_MAX_AGENTS must be a whole number of 1 or more, not `0`"),
     ("WF_CLAUDE_AUTH", "token", "WF_CLAUDE_AUTH must be subscription or api-key, not `token`"),
     ("WF_CURSOR_RUNTIME", "cli", "WF_CURSOR_RUNTIME must be sdk or acp, not `cli`"),
+    ("WF_RUNS_DIR", "~no-such-user-of-wf/runs", "WF_RUNS_DIR must be a path, where ~ is the home folder of a user, "
+                                                "not `~no-such-user-of-wf/runs`"),
 ])
 def test_a_variable_with_a_wrong_value_is_refused(monkeypatch, variable, text, problem):
     monkeypatch.setenv(variable, text)
@@ -220,6 +275,7 @@ def test_every_problem_is_named_at_once_and_stops_every_command(wf_home, monkeyp
     (b"max_agents =\n", "isn't valid TOML: Invalid value (at line 1, column 13)"),
     (b'[metrics]\nurl = "https://wf:hunter2\x01@h:1/wf"\n', "isn't valid TOML: Illegal character (at line 2, column 26)"),
     (b"max_agents = 2\xff\n", "isn't UTF-8 text"),
+    (b"max_agents = 1" + b"0" * 5000 + b"\n", "isn't valid TOML for Python: it has a number with too many digits"),
 ])
 def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, problem):
     (wf_home / "config.toml").write_bytes(data)
@@ -230,22 +286,28 @@ def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, probl
 
 
 @pytest.mark.parametrize("url, problem", [
-    ("http://127.0.0.1:8123/wf", "metrics.url (http://127.0.0.1:8123/wf) lacks the user and the password"),
+    ("http://127.0.0.1:8123/wf", "metrics.url lacks the user and the password."),
     ("https://wf:hunter2@clickhouse.example.com/wf", "metrics.url (https://wf:***@clickhouse.example.com/wf) lacks the port"),
     ("https://wf:hunter2@clickhouse.example.com:8443", "(https://wf:***@clickhouse.example.com:8443) lacks the database"),
     ("https://wf:hunter2@clickhouse.example.com:8443/", "(https://wf:***@clickhouse.example.com:8443/) lacks the database"),
     ("wf:hunter2@clickhouse.example.com:8443/wf", "(wf:***@clickhouse.example.com:8443/wf) lacks the scheme"),
-    ("https://:hunter2@clickhouse.example.com:8443/wf", "(https://:***@clickhouse.example.com:8443/wf) lacks the user"),
-    ("https://wf@clickhouse.example.com:8443/wf", "(https://wf@clickhouse.example.com:8443/wf) lacks the password"),
+    ("https://:hunter2@clickhouse.example.com:8443/wf", "metrics.url lacks the user."),
+    ("https://wf@clickhouse.example.com:8443/wf", "metrics.url lacks the password."),
     ("https://wf:hunter2@:8443/wf", "(https://wf:***@:8443/wf) lacks the host"),
-    ("clickhouse.example.com", "(clickhouse.example.com) lacks the scheme, the user, the password, the port and the database"),
-    ("clickhouse://wf:hunter2@clickhouse.example.com:9000/wf", "has the scheme clickhouse, and wf speaks ClickHouse's HTTP "
-                                                               "interface: use http or https, because a clickhouse:// string "
-                                                               "names the native TCP port"),
-    ("https://wf:hunter2/x@clickhouse.example.com:8443/wf", "metrics.url has a port that isn't a number from 1 to 65535 and "
-                                                            "has more than one name after the port, and the database is one name"),
+    ("clickhouse.example.com", "metrics.url lacks the scheme, the user, the password, the port and the database."),
+    ("https://wf:12345/wf", "metrics.url lacks the user and the password."),  # 12345 may be a password, read as a port
+    ("clickhouse://wf:hunter2@clickhouse.example.com:9000/wf", "(clickhouse://wf:***@clickhouse.example.com:9000/wf) has a "
+                                                               "scheme other than http and https, and wf speaks ClickHouse's "
+                                                               "HTTP interface: a clickhouse:// string names the native TCP port"),
+    ("wf:hunter2@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme."),
+    ("https://wf:[hunter2]@127.0.0.1:8123/wf", "metrics.url doesn't parse as https://user:password@host:port/database."),
+    ("https://wf:12345/hunter2@clickhouse.example.com:8443", "metrics.url has an @ after the host, so a / in the user or the "
+                                                             "password isn't percent-encoded."),
+    ("https://wf:hunter2/x@clickhouse.example.com:8443/wf", "metrics.url has a port that isn't a number from 1 to 65535, has "
+                                                            "an @ after the host, so a / in the user or the password isn't "
+                                                            "percent-encoded and has more than one name after the port"),
     ("https://wf:hunter2#1@clickhouse.example.com:8443/wf", "metrics.url has a ? or a # that isn't percent-encoded"),
-    ("https://wf:hunter2@clickhouse.example.com:84430/wf", "metrics.url has a port that isn't a number from 1 to 65535"),
+    ("https://wf:hunter2@clickhouse.example.com:84430/wf", "metrics.url has a port that isn't a number from 1 to 65535."),
 ])
 def test_with_metrics_enabled_wf_names_each_part_that_the_url_lacks_and_never_its_password(wf_home, url, problem, capsys):
     file = write(wf_home, f'[metrics]\nenabled = true\nurl = "{url}"\n')
@@ -283,14 +345,19 @@ def test_the_user_and_the_password_of_the_url_are_percent_encoded():
     assert Connection.parse("HTTPS://wf:pw@h:1/wf").scheme == "https"
 
 
-@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o620, 0o607])
-def test_a_file_that_holds_the_password_must_be_yours_alone(wf_home, mode, capsys):
-    file = write(wf_home, f'[metrics]\nenabled = false\nurl = "{URL}"\n')
+@pytest.mark.parametrize("url, mode", [
+    (URL, 0o644), (URL, 0o640), (URL, 0o604), (URL, 0o620), (URL, 0o607),
+    ("http://alice:hunter2/word@127.0.0.1:8123/wf", 0o644),  # strings that don't parse, so the password may be anywhere
+    ("https://wf:[hunter2]@127.0.0.1:8123/wf", 0o644),
+    ("wf:hunter2@http://127.0.0.1:8123/wf", 0o644),
+])
+def test_a_file_that_holds_the_password_must_be_yours_alone(wf_home, url, mode, capsys):
+    file = write(wf_home, f'[metrics]\nenabled = false\nurl = "{url}"\n')
     file.chmod(mode)
     assert cli.main(["config", "show"]) == 1
     err = capsys.readouterr().err
-    assert err == (f"wf config: {file} holds the password in metrics.url, and its mode {mode:04o} lets other users "
-                   f"open it. Make it yours alone: chmod 600 {file}\n")
+    assert err == (f"wf config: {file} holds the password in metrics.url, or text that may hold it, and its mode "
+                   f"{mode:04o} lets other users open it. Make it yours alone: chmod 600 {file}\n")
     file.chmod(0o600)
     assert cli.main(["config", "show"]) == 0
     assert SECRET not in err + capsys.readouterr().out
@@ -300,6 +367,19 @@ def test_a_file_that_others_can_read_is_fine_without_a_password(wf_home):
     file = write(wf_home, '[metrics]\nenabled = false\nurl = "http://wf@127.0.0.1:8123/wf"\n')
     file.chmod(0o644)
     assert config.load().metrics.url.user == "wf"
+
+
+@pytest.mark.parametrize("mode", [0o664, 0o646, 0o666])
+def test_a_file_that_other_users_can_change_or_that_another_user_owns_is_refused(wf_home, mode, monkeypatch):
+    file = write(wf_home, '[paths]\ncodex = "/opt/codex/bin/codex"\n')
+    file.chmod(mode)
+    assert problems() == [f"{file} names the programs that wf runs, and its mode {mode:04o} lets other users change "
+                          f"it. Make it yours: chmod go-w {file}"]
+    file.chmod(0o644)
+    assert config.load().paths.codex == Path("/opt/codex/bin/codex")
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(file).st_uid + 1)
+    assert problems() == [f"{file} belongs to another user, who can change the programs that wf runs. Use a "
+                          "config.toml of your own, or set WF_HOME to a folder of yours"]
 
 
 # ---------- config.yaml ----------
@@ -421,11 +501,20 @@ def test_wf_config_show_says_when_there_is_no_file(wf_home, capsys):
     assert found["runs_dir"] == ("none (.wf/runs in each repo)", "default") and found["max_agents"][0] == "none (no cap)"
 
 
-def test_wf_config_show_hides_a_url_that_doesn_t_parse(wf_home, capsys):
-    write(wf_home, '[metrics]\nurl = "https://wf:hunter2/x"\n')  # the / that ends the host might be in the password
+@pytest.mark.parametrize("url, shown", [
+    ("https://wf:hunter2/x", "(not shown, because it doesn't parse)"),  # the / that ends the host might be in the password
+    ("wf:hunter2@http://127.0.0.1:8123/wf", "(not shown, because it doesn't parse)"),
+    ("https://user@host:8443/db@x", "(not shown, because it doesn't parse)"),
+    ("http://127.0.0.1:8123/wf", "(not shown, because it lacks the user or the password)"),
+    ("https://wf:12345/wf", "(not shown, because it lacks the user or the password)"),
+    ("https://team/wf:hunter2", "(not shown, because it lacks the user or the password)"),
+    ("https://wfhunter2@clickhouse.example.com:8443/wf", "(not shown, because it lacks the user or the password)"),
+])
+def test_wf_config_show_hides_a_url_that_doesn_t_parse(wf_home, capsys, url, shown):
+    write(wf_home, f'[metrics]\nurl = "{url}"\n')
     assert cli.main(["config", "show"]) == 0
     out = capsys.readouterr().out
-    assert rows(out)[1]["metrics.url"] == ("(not shown, because it doesn't parse)", "file") and SECRET not in out
+    assert rows(out)[1]["metrics.url"] == (shown, "file") and SECRET not in out
 
 
 def test_the_password_of_a_config_is_never_in_its_repr(wf_home):

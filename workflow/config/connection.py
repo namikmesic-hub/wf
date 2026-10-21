@@ -7,17 +7,22 @@ https. ClickHouse's own clickhouse:// strings name its native TCP port instead. 
 password and the database are percent-encoded: %40 for @, %3A for :, %2F for / and %23 for #.
 
 The password is the one secret of config.toml. str() and repr() of a Connection give `masked`, the
-string with *** for the password, and so does every message and `wf config show`. A string that
-doesn't parse isn't shown at all, because wf can't tell which part of it is the password.
+string with *** for the password, and so does every message and `wf config show`. wf shows the
+string only when it parses and has a user and a password, because only then does wf know which
+part of it is the password. A string that may hold a password (`secret`) makes config.toml need
+mode 0600: one with a password, and one that doesn't parse.
 """
 
+import re
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
 FORM = "https://user:password@host:port/database"
 SCHEMES = ("http", "https")
+SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")  # RFC 3986: a password written before :// doesn't match
 MASK = "***"
-HIDDEN = "(not shown, because it doesn't parse)"
+BROKEN = "(not shown, because it doesn't parse)"
+UNSURE = "(not shown, because it lacks the user or the password)"
 
 
 @dataclass(frozen=True, repr=False)
@@ -30,12 +35,14 @@ class Connection:
     port: int | None = None
     database: str = ""
     missing: tuple[str, ...] = ()  # the parts that it lacks, as "the user"
-    broken: tuple[str, ...] = ()  # why it doesn't parse, in words: then it is never shown
+    broken: tuple[str, ...] = ()  # why it doesn't parse, in words
     scheme_problem: str = ""  # a scheme that isn't http or https
 
     @classmethod
     def parse(cls, text: str) -> "Connection":
         head, sep, rest = text.partition("://")
+        if sep and not SCHEME.fullmatch(head):
+            return cls(text, broken=("has text before :// that isn't a scheme",))
         scheme, rest = (head.lower(), rest) if sep else ("", text)
         try:
             parts = urlsplit("//" + rest)
@@ -53,6 +60,8 @@ class Connection:
             port = 0
         if port == 0:
             broken.append("has a port that isn't a number from 1 to 65535")
+        if "@" in parts.path:
+            broken.append("has an @ after the host, so a / in the user or the password isn't percent-encoded")
         names = [name for name in parts.path.split("/") if name]
         if len(names) > 1:
             broken.append("has more than one name after the port, and the database is one name")
@@ -61,8 +70,8 @@ class Connection:
         missing = tuple(f"the {name}" for name, value in found.items()
                         if not value and not (name == "port" and port == 0) and not (name == "database" and names))
         problem = "" if scheme in SCHEMES or not scheme else (
-            f"has the scheme {scheme}, and wf speaks ClickHouse's HTTP interface: use http or https, "
-            "because a clickhouse:// string names the native TCP port")
+            "has a scheme other than http and https, and wf speaks ClickHouse's HTTP interface: "
+            "a clickhouse:// string names the native TCP port")
         return cls(text, **found, missing=missing, broken=tuple(broken), scheme_problem=problem)
 
     @property
@@ -73,18 +82,26 @@ class Connection:
         return found + ([self.scheme_problem] if self.scheme_problem else [])
 
     @property
+    def visible(self) -> bool:
+        """Can wf show it, with *** for the password? Only when it parses and has a user and a password."""
+        return not self.broken and bool(self.user and self.password)
+
+    @property
+    def secret(self) -> bool:
+        """May it hold a password? One that doesn't parse may, in any of its parts."""
+        return bool(self.password or self.broken)
+
+    @property
     def masked(self) -> str:
-        """The string as it was written, with *** for the password. Everything from the scheme to the
-        last @ is the user and the password, so a raw @ or / in the password stays hidden too."""
-        if self.broken:
-            return HIDDEN
+        """The string as it was written, with *** for the password, or why wf doesn't show it."""
+        if not self.visible:
+            return BROKEN if self.broken else UNSURE
         head, sep, rest = self.text.partition("://")
         if not sep:
             head, rest = "", self.text
-        login, at, place = rest.rpartition("@")
-        if not at or ":" not in login:
-            return self.text
-        return f"{head}{sep}{login.partition(':')[0]}:{MASK}@{place}"
+        place, slash, path = rest.partition("/")
+        login, _, host = place.rpartition("@")
+        return f"{head}{sep}{login.partition(':')[0]}:{MASK}@{host}{slash}{path}"
 
     def __str__(self) -> str:
         return self.masked

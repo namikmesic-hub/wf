@@ -164,8 +164,8 @@ def test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home(monkeypatch, 
     assert capacity.configured() == 3
     monkeypatch.setenv("WF_MAX_AGENTS", "5")  # the environment wins
     assert capacity.configured() == 5
-    monkeypatch.setenv("WF_MAX_AGENTS", "")  # a blank variable gives wf's default, over the file too
-    assert capacity.configured() is None
+    monkeypatch.setenv("WF_MAX_AGENTS", "")  # a blank variable counts as not set
+    assert capacity.configured() == 3
 
 
 def test_another_key_in_the_config_leaves_the_cap_alone(wf_home):

@@ -136,11 +136,13 @@ url = "https://wf:password@clickhouse.example.com:8443/wf"
 A key takes its value from its command-line flag, else from its environment variable, else from the file, else from wf's default.
 The flags are `--runs-dir`, and the `--port` of `wf ui` and of `wf tools <name> setup`.
 The environment variables are `WF_RUNS_DIR`, `WF_MAX_AGENTS`, `WF_CLAUDE_AUTH` and `WF_CURSOR_RUNTIME`.
-A variable that is set but empty gives its key wf's default, also when the file sets the key.
+A variable that is set but empty counts as not set.
+Only an empty `WF_RUNS_DIR` turns the runs folder off, also when the file names one.
 `wf config show` prints the value of each key and where it comes from.
 
 wf doesn't start when the file has an unknown key or a value of the wrong kind.
 Its message names the key, the file and what the key allows.
+The file must be yours, and no other user may change it, because it names programs that wf runs.
 wf doesn't read `~/.wf/config.yaml` any more.
 While that file is there, wf stops, and names the key in `config.toml` for each of its settings.
 
@@ -152,11 +154,14 @@ You run ClickHouse yourself, on this machine or on another one, and `[metrics]` 
 Percent-encode the user and the password, for example `%40` for `@` and `%2F` for `/`.
 With `enabled = true`, the string must have each of its parts, and wf names each part that it lacks and doesn't start.
 With `enabled = false`, or without `[metrics]`, wf exports nothing.
-wf doesn't write the tables of runs yet, so a dashboard of them stays empty for now.
+wf doesn't write the tables of runs yet.
+Until the export of runs makes them, each panel of the example dashboard below shows an error for a missing table.
 
 The password is the one secret of `config.toml`.
 wf never shows it: `wf config show` and each message of wf show `***` in its place.
-When the file holds the password, it must be yours alone, and wf doesn't start until you run `chmod 600 ~/.wf/config.toml`.
+wf doesn't show a string that doesn't parse, or that lacks the user or the password, because it can't find the password there.
+When the file holds the password, or a string that doesn't parse, it must be yours alone.
+Then wf doesn't start until you run `chmod 600 ~/.wf/config.toml`.
 
 `docs/metrics/compose.yaml` is an example that runs ClickHouse in Docker on this machine, with a profile for little memory.
 You start it and you stop it, and wf never runs Docker:
@@ -165,6 +170,10 @@ You start it and you stop it, and wf never runs Docker:
 docker compose -f docs/metrics/compose.yaml up -d     # ClickHouse on 127.0.0.1:8123
 docker compose -f docs/metrics/compose.yaml down      # stop it (down -v also deletes its data)
 ```
+
+Its compose project is `wf-clickhouse`.
+An older wf started a stack with Grafana and a Collector as the compose project `wf-metrics`.
+`docker compose -p wf-metrics down` stops that stack, and `down -v` also deletes its data.
 
 The example sets the user `wf`, the password `wf` and the database `wf`, so these are the lines of `config.toml` for it:
 
