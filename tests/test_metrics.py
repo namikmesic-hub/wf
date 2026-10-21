@@ -5,6 +5,7 @@ volumes. At the end, they remove its containers and volumes. Each start needs th
 ClickHouse plugin, and the first start also for the images. Where Docker doesn't answer, or where pytest
 can't reach grafana.com, pytest skips them (conftest.py)."""
 
+import asyncio
 import base64
 import contextlib
 import http.client
@@ -14,6 +15,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import threading
@@ -26,10 +28,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import yaml
 
 from workflow import cli, metrics
+from workflow.harnesses import codex
 
 DASHBOARD = metrics.COMPOSE.parent / "grafana" / "dashboards" / "wf-runs.json"
+COLLECTOR = metrics.COMPOSE.parent / "collector" / "config.yaml"
 
 
 # ---------- wf metrics up ----------
@@ -53,25 +58,35 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
+class _Collector(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.server.posts.append((self.path, self.rfile.read(int(self.headers.get("Content-Length", 0)))))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
 @pytest.fixture
-def otlp_port():
-    """A server on this machine that answers each POST with 200, as the Collector answers OTLP: its address."""
-
-    class Collector(http.server.BaseHTTPRequestHandler):
-        def do_POST(self):
-            self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            self.send_response(200)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-
-        def log_message(self, *args):
-            pass
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Collector)
+def otlp_server():
+    """A server on this machine that answers each POST with 200, as the Collector answers OTLP.
+    Its attribute posts lists the path and the body of each POST that it got."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Collector)
+    server.posts = []
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"127.0.0.1:{server.server_address[1]}"
+    yield server
     server.shutdown()
     server.server_close()
+
+
+@pytest.fixture
+def otlp_port(otlp_server):
+    """The address of otlp_server."""
+    return f"127.0.0.1:{otlp_server.server_address[1]}"
 
 
 def ports(collector: str, grafana: str = 'echo 127.0.0.1:3000') -> str:
@@ -79,13 +94,31 @@ def ports(collector: str, grafana: str = 'echo 127.0.0.1:3000') -> str:
     return f'case "$*" in *"port collector 4318") echo {collector} ;; *"port grafana 3000") {grafana} ;; esac'
 
 
-def test_wf_metrics_up_starts_the_stack_and_prints_grafana_s_address(tmp_path, monkeypatch, capsys, otlp_port):
+COMPOSE_COMMAND = shlex.join(["docker", "compose", "-f", str(metrics.COMPOSE), "-p", "wf-metrics"])  # as wf metrics up prints it
+
+
+def test_wf_metrics_up_starts_the_stack_in_its_own_project_and_prints_grafana_s_address(tmp_path, monkeypatch, capsys,
+                                                                                       otlp_port):
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "myapp")  # set by the shell for another project
     log = fake_docker(tmp_path, monkeypatch, ports(otlp_port))
     assert cli.main(["metrics", "up"]) == 0
-    compose = f"compose -f {metrics.COMPOSE}"
-    assert log.read_text().splitlines() == [f"{compose} up -d --wait", f"{compose} port collector 4318",
+    compose = COMPOSE_COMMAND.removeprefix("docker ")
+    assert log.read_text().splitlines() == ["compose version", f"{compose} up -d --wait", f"{compose} port collector 4318",
                                             f"{compose} port grafana 3000"]
     assert capsys.readouterr().out == "Grafana: http://127.0.0.1:3000\n"
+
+
+def test_the_project_that_wf_metrics_up_names_is_the_project_of_the_compose_file():
+    assert re.search(r"^name: (\S+)$", metrics.COMPOSE.read_text(), re.M)[1] == metrics.PROJECT == "wf-metrics"
+
+
+def test_wf_metrics_up_needs_docker_compose(tmp_path, monkeypatch, capsys):
+    log = fake_docker(tmp_path, monkeypatch, """echo "docker: 'compose' is not a docker command." >&2
+echo "See 'docker --help'" >&2; exit 1""")
+    assert cli.main(["metrics", "up"]) == 1
+    assert capsys.readouterr().err == ("wf metrics up: needs the Compose plugin of Docker, and `docker compose version` "
+                                       "failed: docker: 'compose' is not a docker command.\n")
+    assert log.read_text().splitlines() == ["compose version"]
 
 
 def test_wf_metrics_up_fails_when_the_collector_doesn_t_take_otlp(tmp_path, monkeypatch, capsys):
@@ -95,19 +128,18 @@ def test_wf_metrics_up_fails_when_the_collector_doesn_t_take_otlp(tmp_path, monk
     assert cli.main(["metrics", "up"]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    compose = shlex.join(["docker", "compose", "-f", str(metrics.COMPOSE)])
-    assert f"the Collector doesn't take OTLP at {closed}. `{compose} logs collector` shows why" in captured.err
+    assert f"the Collector doesn't take OTLP at {closed}. `{COMPOSE_COMMAND} logs collector` shows why" in captured.err
     assert "port grafana" not in log.read_text()
 
 
 def test_wf_metrics_up_fails_when_docker_compose_fails_and_says_where_to_look(tmp_path, monkeypatch, capsys):
-    fake_docker(tmp_path, monkeypatch, "echo 'Bind for 127.0.0.1:3000 failed: port is already allocated' >&2; exit 1")
+    fake_docker(tmp_path, monkeypatch,
+                """case "$*" in *" up "*) echo 'Bind for 127.0.0.1:3000 failed: port is already allocated' >&2; exit 1 ;; esac""")
     assert cli.main(["metrics", "up"]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    compose = shlex.join(["docker", "compose", "-f", str(metrics.COMPOSE)])
-    assert (f"`docker compose up` failed with exit code 1. `{compose} logs` shows what each service said, and "
-            f"`{compose} down` stops them. To move a port that is in use, set WF_METRICS_GRAFANA_PORT, "
+    assert (f"`docker compose up` failed with exit code 1. `{COMPOSE_COMMAND} logs` shows what each service said, and "
+            f"`{COMPOSE_COMMAND} down` stops them. To move a port that is in use, set WF_METRICS_GRAFANA_PORT, "
             "WF_METRICS_CLICKHOUSE_PORT, WF_METRICS_OTLP_GRPC_PORT or WF_METRICS_OTLP_HTTP_PORT to another port") in captured.err
 
 
@@ -155,7 +187,30 @@ def test_each_image_and_plugin_names_its_version():
 # ---------- the stack, in Docker ----------
 
 
-TABLES = ("runs", "attempts", "turns", "tool_calls", "routes", "metric_points")
+TEXT, NAME, TIME, MAYBE_TIME = "String", "LowCardinality(String)", "DateTime64(3, 'UTC')", "Nullable(DateTime64(3, 'UTC'))"
+TOKENS = {"tokens": "UInt64", "input_tokens": "UInt64", "output_tokens": "UInt64", "cache_read_tokens": "UInt64",
+          "cache_write_tokens": "UInt64", "reasoning_tokens": "UInt64"}
+SCHEMA = {  # each column of each wf table and its type, apart from wf.sql, so that a mistake in wf.sql fails
+    "runs": {"run_id": TEXT, "repo_key": NAME, "workflow": NAME, "status": NAME, "dry_run": "Bool", "started": TIME,
+             "ended": MAYBE_TIME, "duration_s": "Nullable(Float64)", "cost_usd": "Float64", "tokens": "UInt64",
+             "source": NAME, "loaded_at": TIME},
+    "attempts": {"run_id": TEXT, "workflow": NAME, "node": NAME, "pass": "UInt16", "item": "Int16", "attempt": "UInt16",
+                 "kind": NAME, "harness": NAME, "model": NAME, "effort": NAME, "access": NAME, "session_id": TEXT,
+                 "session_start": NAME, "started": TIME, "ended": MAYBE_TIME, "duration_s": "Nullable(Float64)",
+                 "outcome": NAME, "error": TEXT, "error_class": NAME, **TOKENS, "cost_usd": "Float64",
+                 "exit_code": "Nullable(Int32)", "loaded_at": TIME},
+    "turns": {"run_id": TEXT, "node": NAME, "pass": "UInt16", "item": "Int16", "attempt": "UInt16", "turn": "UInt16",
+              "started": TIME, "ended": MAYBE_TIME, "duration_s": "Nullable(Float64)", "status": NAME, "message": TEXT,
+              **TOKENS, "cost_usd": "Float64", "loaded_at": TIME},
+    "tool_calls": {"run_id": TEXT, "workflow": NAME, "node": NAME, "pass": "UInt16", "item": "Int16", "attempt": "UInt16",
+                   "turn": "UInt16", "call_id": TEXT, "tool": NAME, "harness": NAME, "model": NAME, "started": TIME,
+                   "duration_ms": "Nullable(Float64)", "is_error": "Nullable(Bool)", "loaded_at": TIME},
+    "routes": {"run_id": TEXT, "node": NAME, "pass": "UInt16", "time": TIME, "taken": "Int16", "to": "Array(String)",
+               "loaded_at": TIME},
+    "metric_points": {"run_id": TEXT, "workflow": NAME, "metric": NAME, "node": NAME, "pass": "UInt16", "item": "Int16",
+                      "time": TIME, "value": "Float64", "labels": "Map(LowCardinality(String), String)", "loaded_at": TIME},
+}
+TABLES = tuple(SCHEMA)
 DAY = timedelta(days=1)
 
 
@@ -174,7 +229,7 @@ def project(**ports: str):
     name = f"wf-metrics-test-{uuid.uuid4().hex[:8]}"
     compose = ["docker", "compose", "-f", str(metrics.COMPOSE), "-p", name]
     with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("COMPOSE_PROJECT_NAME", name)
+        patch.setattr(metrics, "PROJECT", name)
         for variable in metrics.PORTS:
             patch.setenv(variable, ports.get(variable, "0"))
         try:
@@ -231,6 +286,11 @@ def clickhouse(stack: Stack, sql: str, rows: list[dict] | None = None) -> str:
     else:
         url, body = f"{stack.clickhouse}/?{urllib.parse.urlencode({'query': sql})}", "\n".join(map(json.dumps, rows)).encode()
     return _request(url, body, {"X-ClickHouse-User": "wf", "X-ClickHouse-Key": "wf"}).decode()
+
+
+def insert(stack: Stack, table: str, rows: list[dict]) -> None:
+    """Rows into a table of wf. A key that names no column fails the insert, where ClickHouse would skip it by default."""
+    clickhouse(stack, f"INSERT INTO wf.{table} SETTINGS input_format_skip_unknown_fields = 0 FORMAT JSONEachRow", rows)
 
 
 def grafana(stack: Stack, path: str, body: dict | None = None) -> dict:
@@ -359,21 +419,30 @@ PANELS = {
                                 ["deliver-change", 2, "open", 1]],
 }
 
-EVERY_WORKFLOW = re.compile(r"\$__conditionalAll\((.+?), \$workflow\)")
+CONDITIONAL_ALL = re.compile(r"\$__conditionalAll\((.+?), \$\{?(\w+)\}?\)")
 
 
-def as_sent(sql: str, workflow: str | None) -> str:
-    """A panel's SQL as Grafana's ClickHouse plugin sends it, for every workflow (None) or for one."""
-    sql = EVERY_WORKFLOW.sub(lambda m: "1=1" if workflow is None else m[1].replace("${workflow:singlequote}", f"'{workflow}'"),
-                             sql)
-    assert "$workflow" not in sql and "${workflow" not in sql
+def as_sent(sql: str, variable: dict, workflow: str | None) -> str:
+    """A query's SQL as Grafana's ClickHouse plugin sends it, with the dashboard's variable at All (None) or at one
+    workflow. The plugin finds the variable by the name in each $__conditionalAll, and Grafana then puts in its value."""
+    name = variable["name"]
+
+    def expand(macro: re.Match) -> str:
+        assert macro[2] == name, f"$__conditionalAll names ${macro[2]}, and the variable of the dashboard is {name}"
+        return "1=1" if workflow is None else macro[1]
+
+    sql = CONDITIONAL_ALL.sub(expand, sql)
+    if workflow is not None:
+        sql = sql.replace(f"${{{name}:singlequote}}", f"'{workflow}'")
+    assert not re.search(r"\$(?!__)\{?\w", sql), f"a variable that Grafana can't fill in: {sql}"
     return sql
 
 
-def rows(stack: Stack, query: dict, start: datetime, end: datetime, workflow: str | None = None) -> list[list]:
-    """What Grafana's /api/ds/query gives for one query of a panel from start to end: the rows of each frame."""
+def rows(stack: Stack, query: dict, variable: dict, start: datetime, end: datetime, workflow: str | None = None) -> list[list]:
+    """What Grafana's /api/ds/query gives for one query from start to end, with the variable at All or at one workflow:
+    the rows of each frame."""
     span = {"from": str(int(start.timestamp() * 1000)), "to": str(int(end.timestamp() * 1000))}
-    sent = {**query, "rawSql": as_sent(query["rawSql"], workflow), "intervalMs": 600000, "maxDataPoints": 144}
+    sent = {**query, "rawSql": as_sent(query["rawSql"], variable, workflow), "intervalMs": 600000, "maxDataPoints": 144}
     result = grafana(stack, "/api/ds/query", {**span, "queries": [sent]})["results"][query["refId"]]
     assert "error" not in result, result["error"]
     found = []
@@ -416,18 +485,25 @@ def test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables(stack
     clickhouse(stack, "SYSTEM FLUSH LOGS")  # makes the table of each system log that the server's config.xml turns on
     assert clickhouse(stack, "SELECT count() FROM system.tables WHERE database = 'system' AND endsWith(name, '_log')") == "0\n"
 
+    described = {}
+    for line in clickhouse(stack, "SELECT table, name, type FROM system.columns WHERE database = 'wf' "
+                                  "FORMAT JSONEachRow").splitlines():
+        column = json.loads(line)
+        described.setdefault(column["table"], {})[column["name"]] = column["type"]
+    assert described == SCHEMA
+
     now = datetime.now(timezone.utc)
     for table in TABLES:
         assert clickhouse(stack, f"SELECT count() FROM wf.{table}") == "0\n"
         clickhouse(stack, f"SYSTEM STOP MERGES wf.{table}")  # so each old row stays until a query reads FINAL
     exported = wf_rows(now)
     for table, inserted in exported.items():
-        clickhouse(stack, f"INSERT INTO wf.{table} FORMAT JSONEachRow", inserted)
+        insert(stack, table, inserted)
     for table, inserted in exported.items():  # a second export of r1
-        clickhouse(stack, f"INSERT INTO wf.{table} FORMAT JSONEachRow", [row for row in inserted if row["run_id"] == "r1"])
+        insert(stack, table, [row for row in inserted if row["run_id"] == "r1"])
     r2 = next(row for row in exported["runs"] if row["run_id"] == "r2")
-    clickhouse(stack, "INSERT INTO wf.runs FORMAT JSONEachRow",  # r2 while it ran, loaded before its last export
-               [{**r2, "status": "running", "ended": None, "duration_s": None, "loaded_at": at(now, 60)}])
+    insert(stack, "runs",  # r2 while it ran, loaded before its last export
+           [{**r2, "status": "running", "ended": None, "duration_s": None, "loaded_at": at(now, 60)}])
     for table, inserted in exported.items():
         again = sum(row["run_id"] == "r1" for row in inserted) + (table == "runs")
         assert clickhouse(stack, f"SELECT count() FROM wf.{table}") == f"{len(inserted) + again}\n"
@@ -438,21 +514,21 @@ def test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables(stack
     assert [p["title"] for p in dashboard["panels"]] == [p["title"] for p in shipped["panels"]]
     assert sorted(p["title"] for p in dashboard["panels"]) == sorted([*PANELS, "Runs over time"])
     (variable,) = dashboard["templating"]["list"]
-    listed = rows(stack, {"refId": "A", "datasource": variable["datasource"], "editorType": "sql", "format": 1,
-                          "rawSql": variable["query"]["rawSql"]}, now - DAY, now)
+    assert (variable["includeAll"], variable["current"]["value"]) == (True, ["$__all"])  # it opens on every workflow
+    listed = rows(stack, {**variable["query"], "datasource": variable["datasource"]}, variable, now - DAY, now)
     assert listed == [["deliver-change"], ["pr-review"]]
     for panel in dashboard["panels"]:
         (query,) = panel["targets"]
         title = panel["title"]
-        assert EVERY_WORKFLOW.search(query["rawSql"]), f"{title} doesn't follow the workflow variable"
-        found = rows(stack, query, now - DAY, now)
+        assert CONDITIONAL_ALL.search(query["rawSql"]), f"{title} doesn't follow the workflow variable"
+        found = rows(stack, query, variable, now - DAY, now)
         if title == "Runs over time":
             assert sum(count or 0 for row in found for count in row[1:]) == 3, found
         else:
             assert rounded(found) == PANELS[title], title
-        assert rows(stack, query, now - DAY, now, "deliver-change"), f"{title} shows no rows of deliver-change"
-        assert rows(stack, query, now - DAY, now, "no-such-workflow") == [], f"{title} shows other workflows"
-        assert rows(stack, query, now - 30 * DAY, now - DAY) == [], f"{title} shows rows from outside its time range"
+        assert rows(stack, query, variable, now - DAY, now, "deliver-change"), f"{title} shows no rows of deliver-change"
+        assert rows(stack, query, variable, now - DAY, now, "no-such-workflow") == [], f"{title} shows other workflows"
+        assert rows(stack, query, variable, now - 30 * DAY, now - DAY) == [], f"{title} shows rows from outside its time range"
 
 
 @pytest.mark.docker
@@ -560,3 +636,29 @@ def test_the_collector_keeps_three_codex_spans_and_cuts_tool_text_and_account_id
                   "WHERE LogAttributes['event.name'] = 'tool_result'") == [cut]
     assert column("SELECT (SpanAttributes['tool_input'], SpanAttributes['arguments'], SpanAttributes['output']) AS v "
                   "FROM otel.otel_traces WHERE SpanName = 'claude_code.tool'") == [[cut, wide_cut, cut]]
+
+
+@pytest.mark.skipif(shutil.which("codex") is None, reason="codex isn't installed")
+def test_the_codex_that_wf_starts_names_its_service_as_the_collector_s_filter_expects(tmp_path, monkeypatch, otlp_server):
+    """No model call, no quota: wf's adapter starts the app server and stops it, and the server sends its spans."""
+    (condition,) = yaml.safe_load(COLLECTOR.read_text())["processors"]["filter/codex-spans"]["trace_conditions"]
+    service = re.search(r'IsMatch\(resource\.attributes\["service\.name"\], "(.+?)"\)', condition)[1]
+    assert json.loads(re.search(r"ContainsValue\((\[.+?\]), span\.name\)", condition)[1]) == CODEX_KEPT
+    url = f"http://127.0.0.1:{otlp_server.server_address[1]}/v1"
+    flags = [arg for key, signal in (("exporter", "logs"), ("trace_exporter", "traces"), ("metrics_exporter", "metrics"))
+             for arg in ("-c", f'otel.{key}={{otlp-http={{endpoint="{url}/{signal}",protocol="json"}}}}')]
+    (tmp_path / "codex-home").mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))  # none of your login, config or sessions
+
+    async def open_and_close():
+        harness = codex.Codex(command=[*codex.COMMAND, *flags])
+        await harness.open(tmp_path)
+        await harness.close()
+
+    asyncio.run(open_and_close())
+    spans = [({a["key"]: a["value"].get("stringValue") for a in resource["resource"]["attributes"]}["service.name"], span["name"])
+             for path, body in otlp_server.posts if path == "/v1/traces"
+             for resource in json.loads(body)["resourceSpans"] for scope in resource["scopeSpans"] for span in scope["spans"]]
+    assert spans, "the app server sent no spans"
+    assert all(re.search(service, name) for name, _ in spans), spans
+    assert {span for _, span in spans} - set(CODEX_KEPT), "the filter would keep each of them"

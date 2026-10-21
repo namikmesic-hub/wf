@@ -1,5 +1,7 @@
 # The wf metrics stack: Grafana on ClickHouse, on this machine.
-# `wf metrics up` starts it. `docker compose -f metrics/compose.yaml down` stops it, and `down -v` also deletes its data.
+# `wf metrics up` starts it, and `docker compose -f metrics/compose.yaml -p wf-metrics down` stops it.
+# `down -v` also deletes its data. Give each docker compose command -p wf-metrics,
+# because a COMPOSE_PROJECT_NAME in the shell replaces the name below.
 # It doesn't start again by itself when Docker starts again.
 # A start with new volumes needs the internet: Grafana downloads its ClickHouse plugin, and Docker pulls each image that it lacks.
 # An OpenTelemetry Collector takes OTLP from Claude Code and Codex and writes it into the ClickHouse database otel.
@@ -8,7 +10,7 @@
 # Each port listens on 127.0.0.1 only. Each user and program on this machine can read and change the data,
 # because Grafana has no login and ClickHouse has the fixed password wf.
 # Set a WF_METRICS_*_PORT variable to move a port. With 0, Docker picks a free port,
-# and `docker compose -f metrics/compose.yaml port SERVICE PORT` names it.
+# and `docker compose -f metrics/compose.yaml -p wf-metrics port SERVICE PORT` names it.
 # Grafana can't know a port that Docker picks, so it then sends a request for another host name to port 0.
 
 name: wf-metrics

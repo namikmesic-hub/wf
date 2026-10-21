@@ -111,7 +111,8 @@ wf doesn't write the tables of `wf` yet, so the dashboard stays empty for now.
 A start with new volumes also needs the internet, for the images and for Grafana's ClickHouse plugin.
 `wf metrics up` waits until ClickHouse and Grafana are healthy and the Collector takes OTLP.
 The stack doesn't start again by itself when Docker starts again, so then run `wf metrics up` again.
-`docker compose -f metrics/compose.yaml down` stops the stack, and `down -v` also deletes its data.
+`docker compose -f metrics/compose.yaml -p wf-metrics down` stops the stack, and `down -v` also deletes its data.
+Give each such command `-p wf-metrics`, because a `COMPOSE_PROJECT_NAME` in your shell replaces the project name of the file.
 
 Each port listens on 127.0.0.1 only.
 Grafana has no login, and ClickHouse has the fixed user `wf` with the password `wf`.
@@ -121,7 +122,7 @@ Grafana sends a request for another host name, such as localhost, to the same po
 So a web page can't send a statement to either of them, also through a DNS name that points to 127.0.0.1.
 A page on such a DNS name can still send records to the Collector.
 To move a port, set `WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` or `WF_METRICS_OTLP_HTTP_PORT`.
-With 0, Docker picks a free port, and `docker compose -f metrics/compose.yaml port <service> <port>` names it.
+With 0, Docker picks a free port, and `docker compose -f metrics/compose.yaml -p wf-metrics port <service> <port>` names it.
 Grafana can't know a port that Docker picks, so it then sends a request for localhost to port 0.
 The address that `wf metrics up` prints names 127.0.0.1, so it still opens Grafana.
 

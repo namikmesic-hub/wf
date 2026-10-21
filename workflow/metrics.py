@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 COMPOSE = Path(__file__).resolve().parent.parent / "metrics" / "compose.yaml"
+PROJECT = "wf-metrics"  # given with -p, because Compose takes COMPOSE_PROJECT_NAME before the name in the file
 PORTS = ("WF_METRICS_GRAFANA_PORT", "WF_METRICS_CLICKHOUSE_PORT", "WF_METRICS_OTLP_GRPC_PORT", "WF_METRICS_OTLP_HTTP_PORT")
 READY_S = 60  # how long the Collector may take to answer OTLP after docker compose up
 
@@ -28,7 +29,13 @@ def up() -> int:
         print(f"wf metrics up: there's no {COMPOSE}. The stack is part of wf's source: install wf from its "
               "checkout with `uv tool install --editable .`", file=sys.stderr)
         return 1
-    compose = ["docker", "compose", "-f", str(COMPOSE)]
+    plugin = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True)
+    if plugin.returncode != 0:
+        said = (plugin.stderr or plugin.stdout).strip().partition("\n")[0] or f"exit code {plugin.returncode}"
+        print(f"wf metrics up: needs the Compose plugin of Docker, and `docker compose version` failed: {said}",
+              file=sys.stderr)
+        return 1
+    compose = ["docker", "compose", "-f", str(COMPOSE), "-p", PROJECT]
     started = subprocess.run([*compose, "up", "-d", "--wait"])
     if started.returncode != 0:
         print(f"wf metrics up: `docker compose up` failed with exit code {started.returncode}. "

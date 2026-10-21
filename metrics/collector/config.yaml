@@ -11,6 +11,7 @@ receivers:
 processors:
   # A short Codex session sends about 1,000 spans, nearly all of them internal.
   # Keep only its model requests and its turns.
+  # The Codex app server that wf starts names its service codex-app-server.
   filter/codex-spans:
     trace_conditions:
       - >-
