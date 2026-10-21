@@ -93,8 +93,9 @@ WRITTEN = ("runs", "attempts", "turns", "tool_calls", "routes")  # the tables th
 COUNTS = ("tokens", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 CALL = re.compile(r"(.+)\.(t\d+\.c\d+)")  # a tool call's trace id: its attempt's id, and its own id in the attempt
 ITEM_FAILED = re.compile(r"item (\d+): (.*)", re.S)  # node_failed when an item failed (on_item_error: fail)
-# The errors of a pass or job whose last attempt succeeded: in its routes, as it wrote output.json, or as the runner
-# committed the changes of the attempt (git status, add, diff and commit, and signing), but not in the reset before one
+# Errors after the last attempt of a job succeeded: in the routes, in the write of output.json, or in the commit.
+# The commit runs git status, add, diff and commit, and can fail to sign. The reset before an attempt is a part
+# of that attempt, so its errors aren't in the list.
 AFTER_SUCCESS = ("routes: ", "can't write output.json: ", "workspace: git status ", "workspace: git add ",
                  "workspace: git diff ", "workspace: git commit ", "workspace: can't sign the commit ")
 # ClickHouse's error codes for a table, column or type that isn't what a request expects, and for a value
@@ -276,10 +277,10 @@ def differences(wanted: dict, tables: dict, columns: dict, database: str) -> lis
 
 
 def runs_in(folder: Path, every_repo: bool = False) -> list[Run]:
-    """The runs in the runs folder of a repo, or with every_repo, the runs in the folder of each repo in a runs
-    folder, oldest first. A run is a folder with a workflow/manifest.json. A folder that wf can't look into is a
-    run too, so that export() says that it is unreadable, and such folders come first. Raises OSError when wf
-    can't list a folder of runs."""
+    """The runs in the runs folder of a repo, oldest first. With every_repo, the runs in the folder of each repo
+    in a runs folder. A run is a folder with a workflow/manifest.json. A folder that wf can't look into is a run
+    too, so that export() says that it is unreadable, and such folders come first. Raises OSError when wf can't
+    list a folder of runs."""
     if not folder.is_dir():
         return []
     found = []
@@ -296,8 +297,8 @@ def _folders(folder: Path) -> list[Path]:
 
 
 def _made(folder: Path) -> float | None:
-    """When wf made the run in `folder`: the time of its workflow/manifest.json. 0 when wf can't look into the
-    folder, and None when the folder holds no run."""
+    """When wf made the run in `folder`: the time of its workflow/manifest.json. It is 0 when wf can't look into
+    the folder, and None when the folder holds no run."""
     try:
         found = (folder / "workflow" / "manifest.json").stat()
     except (FileNotFoundError, NotADirectoryError):
@@ -308,7 +309,7 @@ def _made(folder: Path) -> float | None:
 
 
 def _run_at(folder: Path) -> Run:
-    """The run in `folder`, with the repo that its run.json names. export() doesn't need the repo, so a run
+    """The run in `folder`, with the repo that its run.json names. The export doesn't need the repo, so a run
     whose repo wf can't tell has its folder as its repo."""
     try:
         return Run.at(folder)
@@ -530,9 +531,9 @@ class _Trace:
                 self._row(table, {**row, word: "cancelled", "ended": _utc(last), "duration_s": _seconds(row["started"], last)})
 
     def _before(self, time: str) -> None:
-        """The rows of the events that a wf from before the trace wrote, for a trace that starts in the
-        middle of the run, at `time`. Today's `wf retry --model` writes its `override` events just before
-        the trace, so they aren't events of the run before it."""
+        """The rows of the events that a wf from before the trace wrote. The trace starts at `time`, in the
+        middle of the run. Today's `wf retry --model` writes its `override` events just before the trace,
+        so they aren't events of the run before it."""
         path = self.run.dir / EVENTS
         if not path.is_file():
             return
@@ -721,14 +722,15 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
       event when status.json doesn't say `running`. When it says `running` but no process holds the
       run's lock, the run is `stopped`. Its tokens and cost are those of its passes.
     - attempts: each attempt that an event names, by node, pass, item and attempt. It starts at its
-      first event, and ends at its `session_ended`, its failure, or else the end of its pass, when the
-      node has no items. It failed with `attempt_failed` (timed_out, when the node's timeout ended it),
-      and was unavailable with `harness_unavailable`. An exception in an attempt writes neither, so the
-      last attempt of a job so far also failed when `item_failed`, or `node_failed` for the job or its
-      item, says that the job failed, but not in its routes, as it wrote output.json, or as the runner
-      committed the changes of the attempt. Any other attempt succeeded when its pass ended. Its tokens and cost are those of its last `agent_usage`.
-      When the node has no items, and the events of a pass have no `agent_usage`, the last agent
-      attempt gets the pass's (`node_finished`).
+      first event. It ends at its `session_ended` or its failure, or else, when the node has no items,
+      at the end of its pass. It failed with `attempt_failed` (timed_out, when the node's timeout ended
+      it), and was unavailable with `harness_unavailable`. An exception in an attempt writes neither.
+      So when `item_failed` or `node_failed` says that a job failed, the last attempt of the job until
+      then failed too. A failure in the routes, in the write of output.json or in the commit of its
+      changes comes after the attempt. It doesn't fail the attempt, but a failure of the reset before an
+      attempt does. Any other attempt succeeded when its pass ended. Its tokens and cost are those of
+      its last `agent_usage`. When the node has no items, and the events of a pass have no `agent_usage`,
+      the last agent attempt gets the pass's (`node_finished`).
     - tool_calls: each `agent_tool`, as the call e1, e2, ... of its attempt, in turn 0, with no duration.
     - routes: each `route`, in the pass of its node that started last.
     """
