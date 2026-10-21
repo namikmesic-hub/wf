@@ -644,10 +644,18 @@ def test_the_event_that_fails_a_job_fails_its_last_attempt_when_no_event_of_the_
         e("23:12:00", "node_failed", "check", **{"pass": 1}, error="routes: unknown name x"),
         e("23:12:00", "node_started", "note", **{"pass": 1}), read("23:12:05", "note"),
         e("23:13:00", "node_failed", "note", **{"pass": 1}, error="can't write output.json: [Errno 28] No space left"),
-        e("23:20:00", "node_started", "review", **{"pass": 1}, items=2),
-        read("23:20:05", "review", index=0), read("23:20:06", "review", index=1),
-        e("23:21:00", "item_failed", "review", index=1, error="RuntimeError: the session closed twice"),  # on_item_error: continue
-        e("23:21:00", "node_finished", "review", **{"pass": 1}),
+        e("23:13:00", "node_started", "sign", **{"pass": 1}), read("23:13:05", "sign"),
+        e("23:14:00", "node_failed", "sign", **{"pass": 1},
+          error="workspace: can't sign the commit with your default key (commit.gpgsign is on): git commit failed: no agent"),
+        e("23:14:00", "node_started", "redo", **{"pass": 1}), read("23:14:05", "redo"),
+        e("23:15:00", "attempt_failed", "redo", **{"pass": 1}, harness="claude-code", attempt=1, error="timed out after 1m"),
+        e("23:15:00", "attempt_started", "redo", **{"pass": 1}, harness="claude-code", attempt=2),
+        e("23:15:01", "node_failed", "redo", **{"pass": 1}, error="workspace: git reset failed: fatal: index.lock exists"),
+        e("23:20:00", "node_started", "patch", **{"pass": 1}, items=2),
+        read("23:20:05", "patch", index=0), read("23:20:06", "patch", index=1),
+        e("23:21:00", "item_failed", "patch", index=0, error="workspace: git commit --quiet failed: fatal: no space"),
+        e("23:21:00", "item_failed", "patch", index=1, error="RuntimeError: the session closed twice"),  # on_item_error: continue
+        e("23:21:00", "node_finished", "patch", **{"pass": 1}),
         e("23:30:00", "node_started", "fix", **{"pass": 1}, items=2),
         read("23:30:05", "fix", index=0), read("23:30:06", "fix", index=1),
         e("23:31:00", "node_failed", "fix", **{"pass": 1}, error="item 0: OSError: can't write session.json")]  # on_item_error: fail
@@ -658,10 +666,13 @@ def test_the_event_that_fails_a_job_fails_its_last_attempt_when_no_event_of_the_
         ("fix", 0, 1, "failed", "OSError: can't write session.json"),
         ("fix", 1, 1, "succeeded", ""),
         ("note", -1, 1, "succeeded", ""),  # its job failed after the attempt succeeded
+        ("patch", 0, 1, "succeeded", ""),  # the commit of the changes of the attempt failed
+        ("patch", 1, 1, "failed", "RuntimeError: the session closed twice"),
         ("plan", -1, 1, "failed", "the wf tool linear isn't set up"),
         ("plan", -1, 2, "succeeded", ""),
-        ("review", 0, 1, "succeeded", ""),
-        ("review", 1, 1, "failed", "RuntimeError: the session closed twice")]
+        ("redo", -1, 1, "timed_out", "timed out after 1m"),
+        ("redo", -1, 2, "failed", "workspace: git reset failed: fatal: index.lock exists"),  # the reset starts the attempt
+        ("sign", -1, 1, "succeeded", "")]
 
 
 def test_the_spending_of_a_pass_in_a_sub_workflow_counts_once_in_its_run(runs_dir):

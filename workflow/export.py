@@ -93,7 +93,10 @@ WRITTEN = ("runs", "attempts", "turns", "tool_calls", "routes")  # the tables th
 COUNTS = ("tokens", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 CALL = re.compile(r"(.+)\.(t\d+\.c\d+)")  # a tool call's trace id: its attempt's id, and its own id in the attempt
 ITEM_FAILED = re.compile(r"item (\d+): (.*)", re.S)  # node_failed when an item failed (on_item_error: fail)
-AFTER_SUCCESS = ("routes: ", "can't write output.json: ")  # the errors of a pass or job whose last attempt succeeded
+# The errors of a pass or job whose last attempt succeeded: in its routes, as it wrote output.json, or as the runner
+# committed the changes of the attempt (git status, add, diff and commit, and signing), but not in the reset before one
+AFTER_SUCCESS = ("routes: ", "can't write output.json: ", "workspace: git status ", "workspace: git add ",
+                 "workspace: git diff ", "workspace: git commit ", "workspace: can't sign the commit ")
 # ClickHouse's error codes for a table, column or type that isn't what a request expects, and for a value
 # that doesn't fit its column. ClickHouse answers them with HTTP 400, 404 or 500.
 SCHEMA_CODES = {"6", "8", "16", "27", "47", "53", "60", "81", "117"}
@@ -722,8 +725,8 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
       node has no items. It failed with `attempt_failed` (timed_out, when the node's timeout ended it),
       and was unavailable with `harness_unavailable`. An exception in an attempt writes neither, so the
       last attempt of a job so far also failed when `item_failed`, or `node_failed` for the job or its
-      item, says that the job failed, but not in its routes or as it wrote output.json. Any other
-      attempt succeeded when its pass ended. Its tokens and cost are those of its last `agent_usage`.
+      item, says that the job failed, but not in its routes, as it wrote output.json, or as the runner
+      committed the changes of the attempt. Any other attempt succeeded when its pass ended. Its tokens and cost are those of its last `agent_usage`.
       When the node has no items, and the events of a pass have no `agent_usage`, the last agent
       attempt gets the pass's (`node_finished`).
     - tool_calls: each `agent_tool`, as the call e1, e2, ... of its attempt, in turn 0, with no duration.
