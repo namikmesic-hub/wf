@@ -18,36 +18,36 @@ that differs is a SchemaMismatch, and the export writes nothing. It doesn't chec
 which nothing writes yet.
 
 An export of a run folder reads its trace.jsonl from the byte offset where the last export stopped.
-A record that starts or ends something gives a row: an `attempt` gives a row with the outcome
+A record that starts or ends something gives a row. An `attempt` gives a row with the outcome
 `running`, and its `attempt_end` gives the whole row again. Turns and tool calls go the same way, and
 a tool call keeps the start of its first record and the tool of its last. Each table is a
-ReplacingMergeTree on the natural key of its rows (run, node, pass, item, attempt, ...), so the
-later row replaces the earlier one. A node inside a sub-workflow has, in front of its own id, the
-trace id of the attempt that runs the sub-workflow, as in build#1[3].a1/implement. So each pass and
-each attempt of a workflow node has rows of its own. A job that isn't an item has the item -1.
+ReplacingMergeTree on the natural key of its rows (run, node, pass, item, attempt, ...). So the later
+row replaces the earlier one. A node inside a sub-workflow has, in front of its id, the trace id of
+the attempt that runs the sub-workflow, as in build#1[3].a1/implement. So each pass and each attempt
+of a workflow node has rows of its own. A job that isn't an item has the item -1.
 
-export.json in the run folder keeps the offset, the identity of the tables that took the rows, and
-what the next export needs of the records before the offset: the attempts, turns and tool calls that
-haven't ended, and the times and spending of the run. A line that is still being written waits for
-the next export. The duration of a run is the time that wf drove it: from each `run` record to its
-`run_stopped`. Its tokens and cost are the sums of its rows in `attempts`.
+export.json in the run folder keeps the offset and the identity of the tables that took the rows. It
+also keeps what the next export needs of the records before the offset. These are the attempts, turns
+and tool calls that haven't ended, and the times and spending of the run. A line that wf still writes
+waits for the next export. The duration of a run is the time that wf drove it: from each `run` record
+to its `run_stopped`. Its tokens and cost are the sums of its rows in `attempts`.
 
 The process that drives a run holds the run's lock. When the trace says that a run runs, but no
-process holds its lock, the process stopped without its `run_stopped`: it crashed or was killed, as
-`wf status` says. The run is then `stopped` at its last record, and each attempt and turn that it
-left running is `cancelled` there. When `wf retry` runs them again, their new rows replace these.
+process holds its lock, the process stopped without its `run_stopped`. It crashed or something killed
+it, as `wf status` says. The run is then `stopped` at its last record, and each attempt and turn that
+it left running is `cancelled` there. When `wf retry` runs them again, their new rows replace these.
 
-So exporting twice changes nothing: the second export finds nothing new and writes nothing. When the
-tables are made again, as after `docker compose down -v`, the identity changes, and the next export
-of each run starts again from the start of its file. So does the export of a run whose export.json
-is gone. Each row that it writes replaces an equal one.
+So exporting twice changes nothing: the second export finds nothing new and writes nothing. When
+ClickHouse makes the tables again, as after `docker compose down -v`, the identity changes. Then the
+next export of each run starts again from the start of its file. So does the export of a run whose
+export.json is gone. Each row that it writes replaces an equal one.
 
 A run folder of a wf from before the trace has only events.jsonl. The export reads that file whole,
-once, and gets less from it (_events): the run, the attempts that events name, their failures, the
-names and times of the tool calls, the routes, and the tokens and cost of each pass. It gets no
-turns, no durations or results of tool calls, and no session ids. When today's wf drives such a run
-again, its trace starts with `wf retry` or `wf continue`, and the events before the trace give the
-rows of the run before it.
+once, and gets less from it (_events). It gets the run, the attempts that events name, and their
+failures. It also gets the names and times of the tool calls, the routes, and the tokens and cost of
+each pass. It gets no turns, no durations or results of tool calls, and no session ids. When today's
+wf drives such a run again, its trace starts with `wf retry` or `wf continue`. Then the events before
+the trace give the rows of the run before it.
 
 The errors have classes, so that a caller can tell what to do:
 
@@ -58,7 +58,7 @@ The errors have classes, so that a caller can tell what to do:
 
 After any of them, export.json stays as it was, so the next export writes the same rows again. One
 export of a run folder at a time holds the folder's export.lock, from the read of export.json to its
-write. The export writes nothing else in the run folder, and it never holds the run's lock: it takes
+write. The export writes nothing else in the run folder, and it never holds the run's lock. It takes
 that lock only for a moment, as `wf status` does, to see whether a process drives a run that runs.
 So no error of the export can fail a run or make it slower.
 """
@@ -282,8 +282,8 @@ def _columns(text: str) -> dict[str, str]:
 
 
 def differences(wanted: dict, tables: dict, columns: dict) -> list[str]:
-    """How the tables that the export writes differ from `wanted` (schema()): a table or a column that is
-    missing, a column of another type, another engine or another key."""
+    """How the tables that the export writes differ from `wanted` (schema()). A difference is a table or a
+    column that is missing, a column of another type, another engine or another key."""
     found = []
     for name in WRITTEN:
         table, have = wanted[name], tables.get(name)
@@ -305,10 +305,10 @@ def differences(wanted: dict, tables: dict, columns: dict) -> list[str]:
 
 
 def runs_in(folder: Path, every_repo: bool = False) -> list[Run]:
-    """The runs in the runs folder of a repo, oldest first. With every_repo, the runs in the folder of each repo
-    in a runs folder. A run is a folder with a workflow/manifest.json. A folder that wf can't look into is a run
-    too, so that export() says that it is unreadable, and such folders come first. Raises OSError when wf can't
-    list a folder of runs."""
+    """The runs in the runs folder of a repo, oldest first. With every_repo, the runs in the folder of
+    each repo in a runs folder, also oldest first and not repo by repo. A run is a folder with a
+    workflow/manifest.json. A folder that wf can't look into is a run too, so that export() says that it
+    is unreadable, and such folders come first. Raises OSError when wf can't list a folder of runs."""
     if not folder.is_dir():
         return []
     found = []
@@ -693,9 +693,9 @@ def keys(table: str) -> tuple[str, ...]:
 
 
 def _place(record: dict, attempt: bool = True) -> dict | None:
-    """Where a record is: node, pass, item, and attempt. None when it doesn't say. The node of a record
-    inside a sub-workflow has in front of it the trace id of the attempt that runs the sub-workflow,
-    which starts the record's own id."""
+    """Where a record is: node, pass, item, and attempt. None when it doesn't say. Inside a sub-workflow,
+    the node has in front of it the trace id of the attempt that runs the sub-workflow. The record's own
+    id starts with that trace id."""
     node, pass_no, item, ident = record.get("node"), record.get("pass"), record.get("index", NO_ITEM), record.get("id")
     numbers = (pass_no, item, record.get("attempt")) if attempt else (pass_no, item)
     if not isinstance(node, str) or not isinstance(ident, str) or not all(isinstance(number, int) for number in numbers):
