@@ -286,6 +286,8 @@ def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(t
             {{ r.harness }} {{ r.model }}{% endfor %}
             {{ results.build[0].item.titel }} {{ results.build[0].output.dun }} {{ results.build[0].cost }} {{ results.plan }}
             {{ results.build | selectattr('output.doen', 'defined') | list }}
+            {{ results.build | map(attribute='output.dnoe', default='') | list }} {{ results.build | sort(attribute='output.done,output.odne') | list }}
+            {{ results.build | map(attribute='output.²') | list }}
         echo:
           needs: [build]
           command: >-
@@ -299,6 +301,10 @@ def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(t
         ("error", "nodes.sum.instruction", "`results.build[0].cost`: no field `cost` (fields: index, item, output, harness, model)"),
         ("error", "nodes.sum.instruction", "`plan` isn't a for_each node, so `results.plan` doesn't exist"),
         ("error", "nodes.sum.instruction", "`results.build[].output.doen`: no field `doen` (fields: done)"),  # also with a type test
+        ("error", "nodes.sum.instruction", "`results.build[].output.dnoe`: no field `dnoe` (fields: done)"),  # and with a default
+        ("warning", "nodes.sum.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("error", "nodes.sum.instruction", "`results.build[].output.odne`: no field `odne` (fields: done)"),  # each field of sort
+        ("error", "nodes.sum.instruction", "`results.build[].output.²`: no field `²` (fields: done)"),  # not a number, and no crash
         ("warning", "nodes.echo.command", "output from `results` into the shell unquoted"),  # the item's title, not its index
         ("warning", "nodes.act.instruction", "reads output from `build`, which has `web: true`"),
     ])
