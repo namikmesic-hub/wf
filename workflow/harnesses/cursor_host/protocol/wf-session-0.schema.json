@@ -591,6 +591,7 @@
       "additionalProperties": false
     },
     "usage": {
+      "description": "input_tokens (the input that the prompt cache did not read or write), cached_input_tokens (read from the cache), cache_write_tokens and output_tokens are the parts of total_tokens. reasoning_tokens is a part of output_tokens.",
       "type": "object",
       "required": [
         "input_tokens",

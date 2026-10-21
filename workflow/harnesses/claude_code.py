@@ -82,6 +82,7 @@ this session, steer() takes none, and the runner sends it as the next turn.
 import asyncio
 import os
 import uuid
+from dataclasses import replace
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -253,7 +254,9 @@ class ClaudeSession:
             raise
 
     def pending_usage(self) -> Usage:
-        return Usage(self._spent.tokens + self._turn.tokens, self._spent.cost_usd)
+        pending = replace(self._spent)
+        pending.add(self._turn)
+        return pending
 
     async def steer(self, text: str, ident: str) -> str | None:
         if not self._working or not self._repeats:
@@ -317,8 +320,7 @@ class ClaudeSession:
             elif isinstance(item, AssistantMessage):
                 if item.usage and item.message_id not in self._seen:  # several messages can share one response
                     self._seen.add(item.message_id)
-                    self._turn.tokens += sum(int(item.usage.get(k) or 0) for k in  # output is a placeholder here
-                                             ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
+                    self._turn.add(_tokens(item.usage))  # output is a placeholder here
                 for block in item.content:
                     if isinstance(block, TextBlock) and block.text.strip():
                         transcript(log, "text", text=block.text)
@@ -366,13 +368,11 @@ class ClaudeSession:
         return status, message
 
     def _usage(self, result: ResultMessage) -> Usage:
-        counts = result.usage or {}
-        tokens = sum(int(counts.get(key) or 0) for key in
-                     ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
+        usage = _tokens(result.usage or {})
         total = result.total_cost_usd or 0.0
-        cost = max(total - self._cost_so_far, 0.0)  # a crashed session can report 0
+        usage.cost_usd = max(total - self._cost_so_far, 0.0)  # a crashed session can report 0
         self._cost_so_far = max(self._cost_so_far, total)
-        return Usage(tokens=tokens, cost_usd=cost)
+        return usage
 
     async def close(self) -> None:
         for ident in self._held:
@@ -384,6 +384,22 @@ class ClaudeSession:
                 await client.disconnect()
             except Exception as error:  # already gone, or teardown failed: keep a trace of it
                 transcript(self.spec.log, "close_failed", error=f"{type(error).__name__}: {error}")
+
+
+def _tokens(counts: dict) -> Usage:
+    """The tokens in the usage of a result or a message. Claude Code counts the cached input apart
+    from input_tokens, and the thinking in output_tokens. output_tokens_details gives the thinking
+    when the SDK has it."""
+    def count(key: str) -> int:
+        return int(counts.get(key) or 0)
+
+    details = counts.get("output_tokens_details")
+    thinking = details.get("thinking_tokens") if isinstance(details, dict) else None
+    usage = Usage(input_tokens=count("input_tokens"), output_tokens=count("output_tokens"),
+                  cache_read_tokens=count("cache_read_input_tokens"), cache_write_tokens=count("cache_creation_input_tokens"),
+                  reasoning_tokens=int(thinking or 0))
+    usage.tokens = usage.input_tokens + usage.output_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+    return usage
 
 
 def _login_problem(result: ResultMessage) -> bool:

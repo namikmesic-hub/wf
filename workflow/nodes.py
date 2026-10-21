@@ -111,7 +111,7 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from dataclasses import replace
+from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -529,8 +529,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
         def tell_usage(turn_so_far: Usage | None = None) -> None:
             nonlocal told
-            so_far = Usage(spent.tokens, spent.cost_usd)
-            so_far.add(turn_so_far or Usage())
+            turn = turn_so_far or Usage()
+            so_far = Usage(spent.tokens + turn.tokens, spent.cost_usd + turn.cost_usd)  # no parts: the event has none
             if so_far != told:
                 told = so_far
                 spec.emit({"event": "agent_usage", "tokens": so_far.tokens, "cost_usd": round(so_far.cost_usd, 6)})
@@ -591,7 +591,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                 spent.add(late)
                 ctx.add_usage(late)
                 tell_usage()
-                record.facts["usage"] = {"tokens": spent.tokens, "cost_usd": spent.cost_usd}
+                record.facts["usage"] = asdict(spent)
                 spec.emit({"event": "session_ended"})
 
     result, number = await _attempts(job, ctx, emit, attempt, names,

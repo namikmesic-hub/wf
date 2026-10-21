@@ -17,6 +17,9 @@ takes the next list of actions:
     {"started": {"type": "commandExecution", "command": "ls"}}  item/started only: the item never completes
     {"tokens": 1200}                                         a response of 1200 tokens: thread/tokenUsage/updated
                                                              (total: the thread's running total, last: 1200)
+    {"tokens": {"inputTokens": 900, "outputTokens": 300}}    a response with these counts (breakdown())
+    {"fill": 272000}                                         the turn overflows a context window of 272000 tokens: the
+                                                             total becomes the window's size, with every part 0
     {"error": {"codexErrorInfo": "usageLimitExceeded", "message": "...", "willRetry": false}}
     {"end": "failed", "message": "..."}                      how the turn ends (default: completed)
     {"hang": true}                                           wait for turn/interrupt
@@ -41,6 +44,14 @@ turns = list(scenario.get("turns", []))
 models = scenario.get("models") or [{"id": "gpt-default", "model": "gpt-default", "isDefault": True, "hidden": False,
                                       "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [],
                                       "description": "", "displayName": "default"}]
+
+
+def breakdown(tokens: int | dict) -> dict:
+    """A TokenUsageBreakdown, as Codex 0.163.0 sends it: `tokens` of input, or these counts. As in
+    Codex, inputTokens holds the cached input too, and totalTokens is input and output."""
+    counts = {"inputTokens": 0, "cachedInputTokens": 0, "cacheWriteInputTokens": 0, "outputTokens": 0,
+              "reasoningOutputTokens": 0, **({"inputTokens": tokens} if isinstance(tokens, int) else tokens)}
+    return {"totalTokens": counts["inputTokens"] + counts["outputTokens"], **counts}
 
 
 def log(kind: str, data) -> None:
@@ -91,13 +102,15 @@ async def main() -> None:
                 if "item" in action:
                     write({"method": "item/completed", "params": {"threadId": thread, "turnId": turn, "item": item}})
             elif "tokens" in action:
-                totals[thread] += action["tokens"]
-                def usage(tokens: int) -> dict:
-                    return {"totalTokens": tokens, "inputTokens": tokens, "cachedInputTokens": 0,
-                            "outputTokens": 0, "reasoningOutputTokens": 0}
+                last = breakdown(action["tokens"])
+                totals[thread] = {key: totals[thread][key] + value for key, value in last.items()}
                 write({"method": "thread/tokenUsage/updated",
-                       "params": {"threadId": thread, "turnId": turn,
-                                  "tokenUsage": {"total": usage(totals[thread]), "last": usage(action["tokens"])}}})
+                       "params": {"threadId": thread, "turnId": turn, "tokenUsage": {"total": totals[thread], "last": last}}})
+            elif "fill" in action:
+                before, totals[thread] = totals[thread]["totalTokens"], {**breakdown(0), "totalTokens": action["fill"]}
+                last = {**breakdown(0), "totalTokens": max(action["fill"] - before, 0)}
+                write({"method": "thread/tokenUsage/updated",
+                       "params": {"threadId": thread, "turnId": turn, "tokenUsage": {"total": totals[thread], "last": last}}})
             elif "error" in action:
                 e = action["error"]
                 write({"method": "error", "params": {"threadId": thread, "turnId": turn, "willRetry": e.get("willRetry", False),
@@ -137,11 +150,11 @@ async def main() -> None:
                                                          for cwd in params.get("cwds") or []]}})
         elif method == "thread/start":
             thread = f"thread-{next(counter)}"
-            totals[thread] = 0
+            totals[thread] = breakdown(0)
             write({"id": request_id, "result": {"thread": {"id": thread}, "model": params.get("model") or "gpt-default"}})
         elif method == "thread/fork":  # a copy of the thread, history (and token total) included
             thread = f"thread-{next(counter)}"
-            totals[thread] = totals.get(params["threadId"], 0)
+            totals[thread] = dict(totals.get(params["threadId"], breakdown(0)))
             write({"id": request_id, "result": {"thread": {"id": thread}, "model": params.get("model") or "gpt-default"}})
         elif method == "turn/start":
             turn = f"turn-{next(counter)}"

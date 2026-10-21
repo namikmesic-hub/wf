@@ -96,6 +96,24 @@ def test_a_session_tells_what_its_attempt_has_used_so_far_while_and_after_each_t
     assert max(n for n, kind in enumerate(kinds) if kind == "agent_usage") < kinds.index("session_ended")
 
 
+def test_a_session_tells_its_usage_again_only_when_the_tokens_or_the_cost_change(repo, monkeypatch):
+    reported = Usage(1200, 0.0, input_tokens=400, output_tokens=200, cache_read_tokens=600)
+
+    async def reported_while_it_runs(session):
+        session.pending = reported  # the harness reports all of the turn before it ends
+        await asyncio.sleep(0.3)
+        session.pending = Usage()
+        session.spec.tool.submit({"summary": "done"})
+        return TurnEnd("done", usage=reported)
+
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", reported_while_it_runs).factory)
+    monkeypatch.setattr(nodes, "USAGE_SECONDS", 0.05)
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    assert cli.main(["run", "flow.yaml"]) == 0
+    events = [json.loads(line) for line in (only_run().dir / "events.jsonl").read_text().splitlines()]
+    assert [(e["tokens"], e["cost_usd"]) for e in events if e["event"] == "agent_usage"] == [(1200, 0.0)]
+
+
 def test_a_session_inside_a_sub_workflow_names_its_transcript_from_the_run_folder(repo, monkeypatch):
     fake = Fake("claude-code", submit({"summary": "done"}))
     monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)

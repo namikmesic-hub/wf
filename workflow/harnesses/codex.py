@@ -43,10 +43,14 @@ left in place), and a workspace-write sandbox gets network access only with
 `web: true`.
 
 Usage: thread/tokenUsage/updated reports the thread's running total, so a
-turn's tokens are the difference. A forked thread (session: continue) starts
-with its source's total, which an earlier pass already counted: the first
-report's total minus its `last` (the response just made) is that inherited
-part, and counting starts from there. Codex reports no dollar cost.
+turn's tokens are the difference. The report has such a total for each part
+of the tokens too: input, cache reads and writes, output, and reasoning. When
+a turn overflows the model's context window, Codex sets the total to the
+window's size with every part 0. That turn then counts tokens and no parts. A
+forked thread (session: continue) starts with its source's total, which an
+earlier pass already counted: the first report's total minus its `last` (the
+response just made) is that inherited part, and counting starts from there.
+Codex reports no dollar cost.
 
 A message from `wf steer` (steer()) goes into the running turn with
 `turn/steer`. The request names the turn it expects, so the message can't land
@@ -79,6 +83,7 @@ import itertools
 import json
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from .. import output_tool
@@ -158,8 +163,8 @@ class CodexSession:
         self.id = ""
         self.events: asyncio.Queue = asyncio.Queue()  # notifications for this thread, from _Connection
         self.turn: str | None = None
-        self._total = 0  # the thread's token count, as last reported
-        self._turn_start = 0
+        self._total = Usage()  # the thread's token counts, as last reported
+        self._turn_start = Usage()
         self._counted = False  # has a token count come in yet?
         self._traced: dict[str, dict] = {}  # call id -> the arguments the trace has for it
 
@@ -226,7 +231,7 @@ class CodexSession:
         return {"project_doc_max_bytes": 0, "skills": {"config": [{"path": path, "enabled": False} for path in paths]}}
 
     def pending_usage(self) -> Usage:
-        return Usage(tokens=self._total - self._turn_start) if self.turn else Usage()
+        return self._total.beyond(self._turn_start) if self.turn else Usage()
 
     async def steer(self, text: str, ident: str) -> str | None:
         if not self.turn or self.rpc.dead:
@@ -243,7 +248,7 @@ class CodexSession:
     async def send(self, text: str) -> TurnEnd:
         log = self.spec.log
         transcript(log, "sent", text=text)
-        self._turn_start = self._total
+        self._turn_start = replace(self._total)
         try:
             result = await self.rpc.request("turn/start", {"threadId": self.id, "input": _input(text)})
         except TimeoutError:
@@ -289,14 +294,14 @@ class CodexSession:
         self.turn = None
         if status == "failed" and not message.startswith("codex"):
             message = f"codex: {message}"
-        return TurnEnd(status, message, Usage(tokens=self._total - self._turn_start))
+        return TurnEnd(status, message, self._total.beyond(self._turn_start))
 
     def _count(self, usage: dict) -> None:
-        total = int((usage.get("total") or {}).get("totalTokens") or self._total)
+        reported = usage.get("total") or {}
+        total = _tokens(reported) if reported.get("totalTokens") else self._total
         if not self._counted:  # the thread's tokens from before this session (a fork's source) aren't ours
             self._counted = True
-            inherited = total - int((usage.get("last") or {}).get("totalTokens") or 0)
-            self._turn_start += max(inherited, 0)
+            self._turn_start.add(total.beyond(_tokens(usage.get("last") or {})))
         self._total = total
 
     def _progress(self, item: dict) -> None:
@@ -524,6 +529,18 @@ def _content_item(block: dict) -> dict:
     if block.get("type") == "image":
         return {"type": "inputImage", "imageUrl": f"data:{block['mimeType']};base64,{block['data']}"}
     return {"type": "inputText", "text": block.get("text", "")}
+
+
+def _tokens(breakdown: dict) -> Usage:
+    """wf's Usage for one of Codex's token usage breakdowns. Codex counts the input that the cache
+    reads or writes in inputTokens, so input_tokens is the rest of it."""
+    def count(key: str) -> int:
+        return int(breakdown.get(key) or 0)
+
+    read, written = count("cachedInputTokens"), count("cacheWriteInputTokens")
+    return Usage(tokens=count("totalTokens"), input_tokens=count("inputTokens") - read - written,
+                 output_tokens=count("outputTokens"), cache_read_tokens=read, cache_write_tokens=written,
+                 reasoning_tokens=count("reasoningOutputTokens"))
 
 
 def _code(error: dict):

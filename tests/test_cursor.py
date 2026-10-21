@@ -112,6 +112,21 @@ def test_tokens_that_the_sdk_reports_count_in_the_run_and_its_events(repo, monke
     assert billed["billed"]["cost"] == {"raw_cost_cents": 1.5, "charged_cents": 0}  # what Cursor bills, for the record
 
 
+def trace(kind: str) -> list[dict]:
+    return [r for r in map(json.loads, (run_folder() / "trace.jsonl").read_text().splitlines()) if r["kind"] == kind]
+
+
+def test_the_trace_keeps_the_parts_of_the_tokens_that_the_sdk_reports(repo, monkeypatch, cursor_host):
+    reported = {"inputTokens": 300, "outputTokens": 250, "cacheReadTokens": 600, "cacheWriteTokens": 50, "reasoningTokens": 120}
+    use(monkeypatch, repo, cursor_host, [{"usage": reported}, {"text": "Looking."}], [{"usage": reported}, GOOD], usage=False)
+    assert run() == 0
+    each = {"tokens": 1200, "cost_usd": 0.0, "input_tokens": 300, "output_tokens": 250, "cache_read_tokens": 600,
+            "cache_write_tokens": 50, "reasoning_tokens": 120}
+    assert [r["usage"] for r in trace("turn_end")] == [each, each]
+    (attempt,) = trace("attempt_end")
+    assert attempt["usage"] == {name: 2 * value for name, value in each.items()}
+
+
 def test_a_token_limit_counts_cursor_work(repo, monkeypatch, cursor_host, capsys):
     use(monkeypatch, repo, cursor_host, [GOOD])
     Path("flow.yaml").write_text(dedent("""
@@ -339,12 +354,15 @@ def test_a_timeout_cancels_the_turn(repo, monkeypatch, cursor_host, capsys):
 
 
 def test_a_turn_that_a_timeout_cancels_still_counts_what_cursor_reports_as_it_ends(repo, monkeypatch, cursor_host):
-    late = {"inputTokens": 900, "outputTokens": 100, "cacheReadTokens": 0, "cacheWriteTokens": 0, "totalTokens": 1000}
+    late = {"inputTokens": 900, "outputTokens": 100, "cacheReadTokens": 0, "cacheWriteTokens": 0}
     use(monkeypatch, repo, cursor_host, [{"hang": True, "usage": late}])
     assert run("retry: 0\ntimeout: 2s\n") == 1
     (failed,) = events("node_failed")
     assert failed["tokens"] == 1000
     assert events("agent_usage")[-1]["tokens"] == 1000
+    (attempt,) = trace("attempt_end")
+    assert attempt["usage"] == {"tokens": 1000, "cost_usd": 0.0, "input_tokens": 900, "output_tokens": 100,
+                                "cache_read_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0}
 
 
 def test_a_lost_connection_as_a_session_opens_fails_the_attempt_and_the_retry_waits(repo, monkeypatch, cursor_host, capsys):
