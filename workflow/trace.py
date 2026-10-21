@@ -53,7 +53,8 @@ occurs. The record then holds {"$blob": "blobs/<sha256>.txt", "size": ..., "star
 Secrets never go into the trace. A command node's `secret_env` names env values
 that are secret. The function find() finds the variable paths those values come
 from. These are what their templates read, also through `item` to what the
-for_each list reads. They go through a sub-workflow's input to the parent's
+for_each list reads, and through `results.<node>` to the node's output and items.
+They go through a sub-workflow's input to the parent's
 `with`, and through a workflow node's output to the sub-workflow's end output.
 An `item` path counts only in the templates of its own node. A value at such a
 path becomes [secret] in each record that has it there: a read, the input, an
@@ -214,7 +215,8 @@ class Secrets:
 
 def find(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozenset(), seen: tuple = ()) -> Secrets:
     """The variable paths whose values become an env value that a command node marks secret.
-    These are what the env templates read, through `item` to what the for_each list reads.
+    These are what the env templates read, through `item` to what the for_each list reads, and
+    through `results.<node>` to the node's output and items.
     They go through a sub-workflow's input to what the parent's `with` reads. They also go
     through a workflow node's output to what the sub-workflow's end output reads. The set
     `outputs` names the end outputs that feed a secret in the parent workflow. The function
@@ -225,8 +227,8 @@ def find(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozen
     def add(node_id: str | None, source: str) -> None:
         anywhere, inside = _sources(workflow, node_id, source)
         found.update(anywhere)
-        if inside:
-            items.setdefault(node_id, set()).update(inside)
+        for node, paths in inside.items():
+            items.setdefault(node, set()).update(paths)
 
     for node_id, node in workflow.nodes.items():
         if node.kind == "command":
@@ -306,27 +308,41 @@ def outputs_reached(node_id: str, node, paths, sub) -> frozenset[str]:
     return frozenset(reached)
 
 
-def _sources(workflow, node_id: str | None, source: str) -> tuple[set[tuple], set[tuple]]:
-    """The paths a template reads: (anywhere in the workflow, under the node's `item`). An item
-    path also counts at what the node's for_each list reads. That is its element when the list
-    is a plain path, or else all that the for_each expression reads."""
-    anywhere, inside = set(), set()
-    each = workflow.nodes[node_id].for_each if node_id else None
+def _sources(workflow, node_id: str | None, source: str) -> tuple[set[tuple], dict[str, set[tuple]]]:
+    """The paths a template of `node_id` reads: (anywhere in the workflow, under the `item` of each
+    node). An item path also counts at what that node's for_each list reads (_listed). A path in
+    `results.<node>` also counts at the node's output and at its `item`, which the entry holds."""
+    anywhere, inside = set(), {}
     for path in _read_paths(source):
         if path[0] in ("item", "index"):
-            if not each:  # only a for_each node has them (validate makes sure)
-                continue
-            inside.add(path)
-            if path[0] == "index":
-                continue
-            listed = templates.pure_path(each, expression=True)
-            if listed:
-                anywhere.add(_general((listed[0], *listed[1], EACH, *path[1:])))
-            else:
-                anywhere |= _read_paths(each, expression=True)
-        else:
-            anywhere.add(path)
+            if node_id and workflow.nodes[node_id].for_each:  # only a for_each node has them (validate makes sure)
+                inside.setdefault(node_id, set()).add(path)
+                anywhere |= _listed(workflow, node_id, path)
+            continue
+        anywhere.add(path)
+        if path[0] != "results":
+            continue
+        named = path[1] if len(path) > 1 and path[1] is not EACH else None  # None: every node's results
+        field = path[3] if len(path) > 3 else EACH  # EACH: all of an entry
+        for node in [n for n, spec in workflow.nodes.items() if spec.for_each is not None and named in (None, n)]:
+            if field in ("output", EACH):
+                anywhere.add((node, EACH, *path[4:]))  # an entry's position isn't its place in the node's list
+            if field in ("item", EACH):
+                inside.setdefault(node, set()).add(("item", *path[4:]))
+                anywhere |= _listed(workflow, node, ("item", *path[4:]))
     return anywhere, inside
+
+
+def _listed(workflow, node_id: str, path: tuple) -> set[tuple]:
+    """What an `item` path of a for_each node reads: the element of its list when the list is a
+    plain path, or else all that the for_each expression reads. An `index` reads nothing."""
+    if path[0] == "index":
+        return set()
+    each = workflow.nodes[node_id].for_each
+    listed = templates.pure_path(each, expression=True)
+    if listed:
+        return {_general((listed[0], *listed[1], EACH, *path[1:]))}
+    return _read_paths(each, expression=True)
 
 
 def _read_paths(source: str, expression: bool = False) -> set[tuple]:

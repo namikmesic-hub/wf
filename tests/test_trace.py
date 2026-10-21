@@ -338,6 +338,34 @@ def test_a_secret_that_a_sub_workflow_item_returns_through_results_is_hidden_ins
     assert note == (0 if note_shows else trace.HIDDEN)
 
 
+@pytest.mark.parametrize("source, secret", [
+    ("{{ results.fetch[0].output.stdout }}", "tok-9f2e-out"),  # the output that the item gave
+    ("{{ results.fetch[0].item }}", "tok-9f2e"),  # the item, and the input that it comes from
+    ("{{ results.fetch | tojson }}", "tok-9f2e"),
+])
+def test_a_secret_read_through_results_is_hidden_where_its_node_and_item_give_it(repo, source, secret):
+    write("""
+        version: 1
+        name: through
+        start: {input: {tokens: {type: array, maxItems: 2, items: {type: string}}}}
+        nodes:
+          fetch:
+            needs: [start]
+            for_each: start.tokens
+            command: 'printf "%s-out" "$TOKEN"'
+            env: {TOKEN: "{{ item }}"}
+          use:
+            needs: [fetch]
+            command: 'test -n "$SECRET"'
+            env: {SECRET: "SOURCE"}
+            secret_env: [SECRET]
+        end: {output: {}}
+    """.replace("SOURCE", source))
+    Path("in.json").write_text(json.dumps({"tokens": ["tok-9f2e"]}))
+    assert cli.main(["run", "flow.yaml", "--input", "in.json"]) == 0
+    assert secret not in everything_written()  # the job_end, job and run records were written before the read
+
+
 def test_a_secret_in_the_output_of_a_for_each_node_is_secret_where_history_and_results_hold_it():
     workflow = spec.parse(dedent("""
         version: 1
