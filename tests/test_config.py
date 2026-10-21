@@ -350,23 +350,34 @@ def test_the_user_and_the_password_of_the_url_are_percent_encoded():
     ("http://alice:hunter2/word@127.0.0.1:8123/wf", 0o644),  # strings that don't parse, so the password may be anywhere
     ("https://wf:[hunter2]@127.0.0.1:8123/wf", 0o644),
     ("wf:hunter2@http://127.0.0.1:8123/wf", 0o644),
+    ("https://wf:12345/wf", 0o644),  # strings without a user or a password, where one may stand in another part
+    ("https://team/wf:hunter2", 0o644),
+    ("http://127.0.0.1:8123/wf", 0o644),
 ])
-def test_a_file_that_holds_the_password_must_be_yours_alone(wf_home, url, mode, capsys):
+def test_a_file_that_sets_metrics_url_must_be_yours_alone(wf_home, url, mode, capsys):
     file = write(wf_home, f'[metrics]\nenabled = false\nurl = "{url}"\n')
     file.chmod(mode)
     assert cli.main(["config", "show"]) == 1
     err = capsys.readouterr().err
-    assert err == (f"wf config: {file} holds the password in metrics.url, or text that may hold it, and its mode "
+    assert err == (f"wf config: {file} sets metrics.url, where the password of ClickHouse goes, and its mode "
                    f"{mode:04o} lets other users open it. Make it yours alone: chmod 600 {file}\n")
     file.chmod(0o600)
     assert cli.main(["config", "show"]) == 0
     assert SECRET not in err + capsys.readouterr().out
 
 
-def test_a_file_that_others_can_read_is_fine_without_a_password(wf_home):
-    file = write(wf_home, '[metrics]\nenabled = false\nurl = "http://wf@127.0.0.1:8123/wf"\n')
+def test_each_test_runs_with_umask_022_whatever_the_shell_has(wf_home):
+    current = os.umask(0o022)
+    os.umask(current)
+    assert current == 0o022  # conftest sets it: under umask 002, each config.toml of a test would be refused
+    (wf_home / "config.toml").write_text("max_agents = 2\n")
+    assert config.load().max_agents == 2
+
+
+def test_a_file_without_metrics_url_can_be_read_by_others(wf_home):
+    file = write(wf_home, '[cursor]\nruntime = "acp"\n[metrics]\nenabled = false\nurl = " "\n')
     file.chmod(0o644)
-    assert config.load().metrics.url.user == "wf"
+    assert (config.load().cursor.runtime, config.load().metrics.url) == ("acp", None)
 
 
 @pytest.mark.parametrize("mode", [0o664, 0o646, 0o666])

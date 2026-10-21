@@ -8,8 +8,8 @@ set. A blank WF_RUNS_DIR is the one that gives its default, also over the file: 
 The checks: config.yaml isn't there (legacy.py), the file is valid TOML, each key is one that wf
 knows and has a value of its kind, and metrics.url is a whole connection string when
 metrics.enabled is true. The file also belongs to the user, and no other user may change it,
-because it names programs that wf runs. A file whose metrics.url may hold a password is the
-user's alone (mode 0600).
+because it names programs that wf runs. A file that sets metrics.url is the user's alone
+(mode 0600), because the password goes there.
 """
 
 import json
@@ -149,15 +149,16 @@ def _metrics(values: dict, file: Path) -> list[str]:
 
 def _guarded(table: dict, facts: os.stat_result | None, file: Path) -> list[str]:
     """The file is the user's, and no other user can change it, since it names the programs that wf
-    runs. When metrics.url may hold a password, no other user can open the file either."""
+    runs. When it sets metrics.url, no other user can open it either: wf can't tell a URL without a
+    password from one with a password where wf reads the host, the port or the database."""
     if facts is None:
         return []
     mode, url = stat.S_IMODE(facts.st_mode), _lookup(table, KEYS["metrics.url"])
     if facts.st_uid not in (os.getuid(), 0):
         return [f"{file} belongs to another user, who can change the programs that wf runs. Use a config.toml of "
                 f"your own, or set WF_HOME to a folder of yours"]
-    if mode & 0o077 and isinstance(url, str) and url.strip() and Connection.parse(url).secret:
-        return [f"{file} holds the password in metrics.url, or text that may hold it, and its mode {mode:04o} lets "
+    if mode & 0o077 and isinstance(url, str) and url.strip():
+        return [f"{file} sets metrics.url, where the password of ClickHouse goes, and its mode {mode:04o} lets "
                 f"other users open it. Make it yours alone: chmod 600 {file}"]
     if mode & 0o022:
         return [f"{file} names the programs that wf runs, and its mode {mode:04o} lets other users change it. "

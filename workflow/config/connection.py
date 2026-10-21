@@ -9,8 +9,8 @@ password and the database are percent-encoded: %40 for @, %3A for :, %2F for / a
 The password is the one secret of config.toml. str() and repr() of a Connection give `masked`, the
 string with *** for the password, and so does every message and `wf config show`. wf shows the
 string only when it parses and has a user and a password, because only then does wf know which
-part of it is the password. A string that may hold a password (`secret`) makes config.toml need
-mode 0600: one with a password, and one that doesn't parse.
+part of it is the password. For the same reason, a config.toml that sets the string at all must
+be the user's alone (load.py).
 """
 
 import re
@@ -85,11 +85,6 @@ class Connection:
     def visible(self) -> bool:
         """Can wf show it, with *** for the password? Only when it parses and has a user and a password."""
         return not self.broken and bool(self.user and self.password)
-
-    @property
-    def secret(self) -> bool:
-        """May it hold a password? One that doesn't parse may, in any of its parts."""
-        return bool(self.password or self.broken)
 
     @property
     def masked(self) -> str:

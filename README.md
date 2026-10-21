@@ -160,7 +160,7 @@ Until the export of runs makes them, each panel of the example dashboard below s
 The password is the one secret of `config.toml`.
 wf never shows it: `wf config show` and each message of wf show `***` in its place.
 wf doesn't show a string that doesn't parse, or that lacks the user or the password, because it can't find the password there.
-When the file holds the password, or a string that doesn't parse, it must be yours alone.
+When the file sets `url` under `[metrics]`, it must be yours alone, because the password goes there.
 Then wf doesn't start until you run `chmod 600 ~/.wf/config.toml`.
 
 `docs/metrics/compose.yaml` is an example that runs ClickHouse in Docker on this machine, with a profile for little memory.
