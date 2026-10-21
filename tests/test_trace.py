@@ -14,7 +14,7 @@ from textwrap import dedent
 import pytest
 
 from fakes import Fake, submit, talk
-from workflow import cli, harnesses, nodes, runner, spec, templates, trace, trace_view
+from workflow import cli, harnesses, nodes, runner, spec, state, templates, trace, trace_view
 from workflow.harnesses.base import TurnEnd
 from workflow.output_tool import REMINDER
 from workflow.runs import Run
@@ -413,7 +413,8 @@ def test_a_secret_item_from_a_literal_list_stays_hidden_in_results_after_a_new_p
     assert of("render", node="tell")[0]["reads"] == [{"path": "results.work[0].item", "value": trace.HIDDEN}]
 
 
-def test_a_secret_item_that_failed_stays_hidden_in_errors_after_a_new_process_continues_the_run(repo, capsys):
+@pytest.mark.parametrize("kept", [True, False])  # False: checkpoints without results, as a wf before results.<node> wrote them
+def test_a_secret_item_that_failed_stays_hidden_in_errors_after_a_new_process_continues_the_run(repo, capsys, monkeypatch, kept):
     write("""
         version: 1
         name: literal
@@ -427,10 +428,13 @@ def test_a_secret_item_that_failed_stays_hidden_in_errors_after_a_new_process_co
             env: {TOKEN: "{{ item }}"}
             secret_env: [TOKEN]
           approve: {needs: [work], human: "Go on?", output: {ok: {type: boolean}}}
-          tell: {needs: [approve], command: "printf '%s' {{ errors.work[0].item | quote }}"}
+          tell: {needs: [approve], command: "printf '%s %s' {{ errors.work[0].item | quote }} {{ results.work | length }}"}
         end: {output: {}}
     """)
-    assert cli.main(["run", "flow.yaml", "--no-input"]) == 2  # waits for approve, with one item of work failed
+    with monkeypatch.context() as patch:
+        if not kept:
+            patch.setattr(state.Progress, "update", lambda self: {k: v for k, v in self.s.items() if k != "results"})
+        assert cli.main(["run", "flow.yaml", "--no-input"]) == 2  # waits for approve, with one item of work failed
     capsys.readouterr()
     cli.main(["status", run_dir().name, "--json"])
     key = json.loads(capsys.readouterr().out)["questions"][0]["key"]
@@ -439,7 +443,8 @@ def test_a_secret_item_that_failed_stays_hidden_in_errors_after_a_new_process_co
     written = records()
     start = next(n for n, r in enumerate(written) if r["kind"] == "run" and r["action"] == "retried")
     assert "tok-err-7c2a" not in json.dumps(written[start:])
-    assert of("render", node="tell")[0]["reads"] == [{"path": "errors.work[0].item", "value": trace.HIDDEN}]
+    assert of("render", node="tell")[0]["reads"][0] == {"path": "errors.work[0].item", "value": trace.HIDDEN}
+    assert of("job_end", node="tell")[0]["output"]["stdout"] == f"{trace.HIDDEN} {2 if kept else 0}"  # 0: results.work is empty
 
 
 def test_the_secret_paths_of_lists_that_read_each_others_results_come_to_an_end():
