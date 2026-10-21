@@ -69,13 +69,15 @@ test("a second turn.start fails even before the first turn begins", () => {
   assert.throws(() => made.startTurn({ text: "two" }), /a turn of this session is still running/);
 });
 
-// One turn on a run that streams these messages, and the events it gave, after turn.started.
-async function turnOf(messages: Array<Record<string, unknown>>, requestId?: string): Promise<Array<[unknown, unknown]>> {
+// One turn on a run that streams these messages, and the events it gave, after turn.started. The run
+// and its result have the request ids in `ids`.
+async function turnOf(messages: Array<Record<string, unknown>>, ids: { run?: string; result?: string } = {}):
+    Promise<Array<[unknown, unknown]>> {
   const { inside, frames } = session();
   const run = {
-    requestId, status: "running", cancel: async () => undefined,
+    requestId: ids.run, status: "running", cancel: async () => undefined,
     async *stream() { yield* messages; },
-    wait: async () => ({ id: "run-1", requestId, status: "finished" }),
+    wait: async () => ({ id: "run-1", requestId: ids.result, status: "finished" }),
   };
   inside.agent = { send: async () => run };
   const [, begin] = (inside as unknown as CursorSession).startTurn({ text: "go" });
@@ -99,8 +101,13 @@ test("the pieces of a block of thinking become one event, with the time that the
 });
 
 test("a turn names each request id once, from the run and from the stream", async () => {
-  const events = await turnOf([{ type: "request", request_id: "req-a" }, { type: "request", request_id: "req-b" }], "req-a");
+  const events = await turnOf([{ type: "request", request_id: "req-a" }, { type: "request", request_id: "req-b" }],
+    { run: "req-a", result: "req-a" });
   assert.deepEqual(events, [["turn.request", { request_id: "req-a" }], ["turn.request", { request_id: "req-b" }]]);
+});
+
+test("a run that has no request id when it starts gives the id of its result", async () => {
+  assert.deepEqual(await turnOf([], { result: "req-late" }), [["turn.request", { request_id: "req-late" }]]);
 });
 
 test("a late answer to a message comes as a steer.status event", async () => {
