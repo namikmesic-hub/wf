@@ -4,7 +4,7 @@
 - The environment variables of config.toml's keys (WF_MAX_AGENTS, WF_RUNS_DIR, ...) that
   are set where the tests run don't apply to them.
 - Runs go in the repo's .wf/runs unless a test sets a runs folder itself.
-- Each test runs with umask 022, whatever the umask of your shell. wf refuses a config.toml
+- Each test starts with umask 022, whatever the umask of your shell. wf refuses a config.toml
   that other users can change, so under umask 002 it would refuse each one that a test writes.
 - The runner's git and the tests' own git commands read none of your global or system
   config, so a global config that signs commits with a key that waits for a touch doesn't

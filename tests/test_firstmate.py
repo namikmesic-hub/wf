@@ -148,6 +148,7 @@ def test_bad_requests_fail_with_a_protocol_error(repo, monkeypatch, capsys):
 
 
 def test_the_package_is_a_bindable_shim_around_this_wf(tmp_path, capsys):
+    os.umask(0o002)  # many accounts have it, so write_package must set each mode itself
     package = tmp_path / "packages" / "wf"
     assert cli.main(["integrate", "firstmate", str(package)]) == 0
     out = capsys.readouterr().out
