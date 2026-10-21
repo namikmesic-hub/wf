@@ -9,8 +9,8 @@
   your ~/.gitconfig);
 - the keyring is an empty one in memory, so no test reads or writes your real Keychain.
 
-A test marked docker is skipped where `docker info` or `docker compose version` fails, or where
-grafana.com can't be reached: the metrics stack downloads a Grafana plugin from it at each start."""
+pytest skips each test marked docker where `docker info` or `docker compose version` fails, or where
+it can't reach grafana.com: the metrics stack downloads a Grafana plugin from there at each start."""
 
 import shutil
 import subprocess

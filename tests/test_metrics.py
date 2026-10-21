@@ -2,17 +2,21 @@
 
 The tests marked docker start the stack from empty volumes, in a compose project of their own on free
 ports, and remove its containers and volumes at the end. Each start needs the internet for Grafana's
-ClickHouse plugin, and the first start also for the images. Where Docker doesn't answer or grafana.com
-can't be reached, pytest skips them (conftest.py)."""
+ClickHouse plugin, and the first start also for the images. Where Docker doesn't answer, or where pytest
+can't reach grafana.com, pytest skips them (conftest.py)."""
 
 import base64
 import contextlib
+import http.client
+import http.server
 import io
 import json
 import os
 import re
 import shlex
+import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -42,12 +46,53 @@ def fake_docker(tmp_path, monkeypatch, script: str):
     return tmp_path / "docker.log"
 
 
-def test_wf_metrics_up_starts_the_stack_and_prints_grafana_s_address(tmp_path, monkeypatch, capsys):
-    log = fake_docker(tmp_path, monkeypatch, 'case "$*" in *"port grafana 3000") echo 127.0.0.1:3000 ;; esac')
+@pytest.fixture
+def otlp_port():
+    """A server on this machine that answers each POST with 200, as the Collector answers OTLP: its address."""
+
+    class Collector(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Collector)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+def ports(collector: str, grafana: str = 'echo 127.0.0.1:3000') -> str:
+    """A script for fake_docker that answers `docker compose port` for the Collector and for Grafana."""
+    return f'case "$*" in *"port collector 4318") echo {collector} ;; *"port grafana 3000") {grafana} ;; esac'
+
+
+def test_wf_metrics_up_starts_the_stack_and_prints_grafana_s_address(tmp_path, monkeypatch, capsys, otlp_port):
+    log = fake_docker(tmp_path, monkeypatch, ports(otlp_port))
     assert cli.main(["metrics", "up"]) == 0
     compose = f"compose -f {metrics.COMPOSE}"
-    assert log.read_text().splitlines() == [f"{compose} up -d --wait", f"{compose} port grafana 3000"]
+    assert log.read_text().splitlines() == [f"{compose} up -d --wait", f"{compose} port collector 4318",
+                                            f"{compose} port grafana 3000"]
     assert capsys.readouterr().out == "Grafana: http://127.0.0.1:3000\n"
+
+
+def test_wf_metrics_up_fails_when_the_collector_doesn_t_take_otlp(tmp_path, monkeypatch, capsys):
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = f"127.0.0.1:{probe.getsockname()[1]}"
+    log = fake_docker(tmp_path, monkeypatch, ports(closed))
+    monkeypatch.setattr(metrics, "READY_S", 0.5)
+    assert cli.main(["metrics", "up"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    compose = shlex.join(["docker", "compose", "-f", str(metrics.COMPOSE)])
+    assert f"the Collector doesn't take OTLP at {closed}. `{compose} logs collector` shows why" in captured.err
+    assert "port grafana" not in log.read_text()
 
 
 def test_wf_metrics_up_fails_when_docker_compose_fails_and_says_where_to_look(tmp_path, monkeypatch, capsys):
@@ -66,8 +111,8 @@ def test_the_ports_that_wf_metrics_up_names_are_the_ports_of_the_compose_file():
     assert sorted(named) == sorted(metrics.PORTS)
 
 
-def test_wf_metrics_up_fails_when_docker_doesn_t_say_where_grafana_listens(tmp_path, monkeypatch, capsys):
-    fake_docker(tmp_path, monkeypatch, 'case "$*" in *"port grafana 3000") echo "no port" >&2; exit 1 ;; esac')
+def test_wf_metrics_up_fails_when_docker_doesn_t_say_where_grafana_listens(tmp_path, monkeypatch, capsys, otlp_port):
+    fake_docker(tmp_path, monkeypatch, ports(otlp_port, grafana='echo "no port" >&2; exit 1'))
     assert cli.main(["metrics", "up"]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -144,12 +189,15 @@ def stack():
 
 
 def status(url: str, body: bytes | None = None, headers: dict | None = None) -> int:
-    request = urllib.request.Request(url, data=body, headers=headers or {})
+    """The status of one request, without following a redirect. A Host in headers replaces the host of the URL."""
+    parts = urllib.parse.urlsplit(url)
+    connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=30)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.status
-    except urllib.error.HTTPError as error:
-        return error.code
+        target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+        connection.request("GET" if body is None else "POST", target, body, headers or {})
+        return connection.getresponse().status
+    finally:
+        connection.close()
 
 
 def _request(url: str, body: bytes | None = None, headers: dict | None = None) -> bytes:
@@ -334,7 +382,13 @@ def test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables(stack
     assert grafana(stack, "/api/dashboards/home")["dashboard"]["uid"] == "wf-runs"
     admin = base64.b64encode(b"admin:admin").decode()
     assert status(stack.grafana + "/api/admin/settings", headers={"Authorization": f"Basic {admin}"}) in (401, 403)
+    keys = {"X-ClickHouse-User": "wf", "X-ClickHouse-Key": "wf"}
+    assert status(f"{stack.clickhouse}/", b"SELECT 1", keys) == 200
     assert status(f"{stack.clickhouse}/?user=wf&password=wf", b"SELECT 1", {"Content-Type": "text/plain"}) == 403
+    # A page on a DNS name that points to 127.0.0.1 sends its requests with that name in Host
+    assert status(f"{stack.clickhouse}/", b"SELECT 1", {**keys, "Host": "attacker.example:8123"}) == 403
+    assert status(f"{stack.grafana}/api/ds/query", b'{"queries": []}',
+                  {"Content-Type": "application/json", "Host": "attacker.example:3000"}) == 301
 
     assert clickhouse(stack, "SELECT name, value FROM system.server_settings WHERE name IN "
                              "('mark_cache_size', 'max_server_memory_usage') ORDER BY name FORMAT TSV") == (

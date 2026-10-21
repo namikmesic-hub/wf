@@ -1,5 +1,6 @@
-<!-- The HTTP port takes the user and the password only in the headers X-ClickHouse-User and X-ClickHouse-Key.
-     A web page can't send those headers to another site without the consent of that site, so it can't send a statement here.
+<!-- The HTTP port runs a statement only for a request to 127.0.0.1 or localhost that has the header X-ClickHouse-User.
+     A page of another site can't send that header without the consent of the port, which it doesn't give.
+     A page on a DNS name that points to 127.0.0.1 can send it, but the Host header then names that DNS name.
      /ping stays open, because the entrypoint of the image waits on it while it runs wf.sql. -->
 <clickhouse>
     <http_handlers>
@@ -13,15 +14,22 @@
         </rule>
         <rule>
             <headers>
-                <X-ClickHouse-User>regex:^$</X-ClickHouse-User>
+                <Host>regex:(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?</Host>
+                <X-ClickHouse-User>regex:.+</X-ClickHouse-User>
             </headers>
+            <handler>
+                <type>dynamic_query_handler</type>
+                <query_param_name>query</query_param_name>
+            </handler>
+        </rule>
+        <rule>
+            <url>regex:.*</url>
             <handler>
                 <type>static</type>
                 <status>403</status>
                 <content_type>text/plain; charset=UTF-8</content_type>
-                <response_content>Send the user and the password in the headers X-ClickHouse-User and X-ClickHouse-Key.&#10;</response_content>
+                <response_content>Send the user and the password in the headers X-ClickHouse-User and X-ClickHouse-Key, to 127.0.0.1 or localhost.&#10;</response_content>
             </handler>
         </rule>
-        <defaults/>
     </http_handlers>
 </clickhouse>

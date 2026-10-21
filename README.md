@@ -107,15 +107,19 @@ The stack has three services:
 - Grafana, whose home page is the dashboard "wf runs", on port 3000
 
 wf doesn't write the tables of `wf` yet, so the dashboard stays empty for now.
-`wf metrics up` needs Docker with Compose, and wf installed from its checkout, because the stack is part of wf's source.
+`wf metrics up` needs Docker with Compose, and an install of wf from its checkout, because the stack is part of wf's source.
 A start with new volumes also needs the internet, for the images and for Grafana's ClickHouse plugin.
+`wf metrics up` waits until ClickHouse and Grafana are healthy and the Collector takes OTLP.
 The stack doesn't start again by itself when Docker starts again, so then run `wf metrics up` again.
 `docker compose -f metrics/compose.yaml down` stops the stack, and `down -v` also deletes its data.
 
 Each port listens on 127.0.0.1 only.
 Grafana has no login, and ClickHouse has the fixed user `wf` with the password `wf`.
 So each user and program on this machine can read and change the data of the stack.
-ClickHouse takes the user and password over HTTP only in the headers `X-ClickHouse-User` and `X-ClickHouse-Key`, so a web page can't send it statements.
+ClickHouse runs a statement over HTTP only for a request to 127.0.0.1 or localhost with the headers `X-ClickHouse-User` and `X-ClickHouse-Key`.
+Grafana sends a request for another host name to 127.0.0.1.
+So a web page can't send a statement to either of them, also through a DNS name that points to 127.0.0.1.
+A page on such a DNS name can still send records to the Collector.
 To move a port, set `WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` or `WF_METRICS_OTLP_HTTP_PORT`.
 With 0, Docker picks a free port, and `docker compose -f metrics/compose.yaml port <service> <port>` names it.
 
@@ -144,7 +148,7 @@ uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
 
-Where Docker answers and grafana.com can be reached, `uv run pytest` also starts the metrics stack in a compose project of its own.
+Where Docker answers and pytest can reach grafana.com, `uv run pytest` also starts the metrics stack in a compose project of its own.
 The tests remove it at the end.
 A `-m` of your own replaces the default `-m 'not harness'`, so leave those tests out with `-m 'not harness and not docker'`.
 

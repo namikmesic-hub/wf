@@ -1482,10 +1482,8 @@ It is three plain files in `workflow/ui/`, with no build step and nothing from a
 ### Metrics in Grafana
 
 `wf metrics up` starts the metrics stack of `metrics/compose.yaml` with `docker compose up -d --wait`, and prints the address of Grafana.
-The stack is part of wf's source, so wf must be installed from its checkout.
+The stack is part of wf's source, so `wf metrics up` works only in an install of wf from its checkout.
 A start with new volumes needs the internet: Docker pulls each image that it lacks, and Grafana downloads its ClickHouse plugin.
-No service starts again by itself.
-So `wf metrics up` fails when a service fails at its start, and it starts the stack again after a restart of Docker.
 The stack has three services, and each of them listens on `127.0.0.1` only:
 
 - An OpenTelemetry Collector takes OTLP from Claude Code and Codex on ports 4317 (gRPC) and 4318 (HTTP).
@@ -1497,10 +1495,19 @@ The stack has three services, and each of them listens on `127.0.0.1` only:
 - Grafana has a ClickHouse datasource, and its home page is the dashboard "wf runs".
   It installs only the ClickHouse plugin, at a fixed version, and it has no admin user.
 
+No service starts again by itself.
+After `docker compose up --wait`, `wf metrics up` also waits up to 60 seconds until the Collector answers an empty OTLP request.
+The Collector starts its receiver only after its exporter has made its tables in ClickHouse.
+So `wf metrics up` fails when a service fails at its start, and it starts the stack again after a restart of Docker.
+
 Grafana has no login, and ClickHouse has the fixed user `wf` with the password `wf`.
 So each user and program on this machine can read and change the data of the stack.
-Over HTTP, ClickHouse takes the user and password only in the headers `X-ClickHouse-User` and `X-ClickHouse-Key`.
-A web page can't send those headers to another site without the consent of that site, so it can't send ClickHouse a statement.
+Over HTTP, ClickHouse runs a statement only for a request to 127.0.0.1 or localhost that has the header `X-ClickHouse-User`.
+A page of another site can't send that header without the consent of the port, which ClickHouse doesn't give.
+A page on a DNS name that points to 127.0.0.1 can send it, but then its request names that DNS name in `Host`.
+Grafana answers only requests for 127.0.0.1, and sends each other request there.
+So a web page can't send a statement to ClickHouse, directly or through Grafana.
+The Collector doesn't check `Host`, so a page on such a DNS name can still send it records.
 
 Before the Collector writes a record, it changes the record:
 
@@ -1522,18 +1529,20 @@ wf doesn't write the tables of `wf` yet.
 With 0, Docker picks a free port, and `docker compose -f metrics/compose.yaml port SERVICE PORT` names it.
 `docker compose -f metrics/compose.yaml down` stops the stack, and `down -v` also deletes its volumes.
 The tests named in the table are in `tests/test_metrics.py`.
-The tests of the stack start it in Docker, and pytest skips them where Docker doesn't answer or grafana.com can't be reached.
+The tests of the stack start it in Docker, and pytest skips them where Docker doesn't answer or where pytest can't reach grafana.com.
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| `wf metrics up` | It runs `docker compose up -d --wait` on `metrics/compose.yaml`, and then prints the address that `docker compose port grafana 3000` gives. | `workflow/metrics.py:28`, `workflow/metrics.py:34` | `test_wf_metrics_up_starts_the_stack_and_prints_grafana_s_address` |
-| There's no `docker` on PATH, or no `metrics/compose.yaml` beside the package | `wf metrics up` says so and exits with code 1, before it runs Docker. | `workflow/metrics.py:20`, `workflow/metrics.py:23` | `test_wf_metrics_up_needs_docker_and_the_stack_s_files` |
-| `docker compose up` fails, or Docker doesn't give the port of Grafana | `wf metrics up` exits with code 1, and prints no address. When `docker compose up` fails, it names the commands that show the logs and stop the stack, and the variables that move the ports. | `workflow/metrics.py:29`, `workflow/metrics.py:36` | `test_wf_metrics_up_fails_when_docker_compose_fails_and_says_where_to_look`, `test_wf_metrics_up_fails_when_docker_doesn_t_say_where_grafana_listens`, `test_the_ports_that_wf_metrics_up_names_are_the_ports_of_the_compose_file` |
-| A service fails at its start | No service restarts by itself, so `docker compose up --wait` fails, and so does `wf metrics up`. | `workflow/metrics.py:29` | `test_no_service_starts_again_by_itself` |
+| `wf metrics up` | It runs `docker compose up -d --wait` on `metrics/compose.yaml`, and waits until the Collector answers an empty OTLP request. Then it prints the address that `docker compose port grafana 3000` gives. | `workflow/metrics.py:32`, `workflow/metrics.py:39`, `workflow/metrics.py:43` | `test_wf_metrics_up_starts_the_stack_and_prints_grafana_s_address` |
+| There's no `docker` on PATH, or no `metrics/compose.yaml` beside the package | `wf metrics up` says so and exits with code 1, before it runs Docker. | `workflow/metrics.py:24`, `workflow/metrics.py:27` | `test_wf_metrics_up_needs_docker_and_the_stack_s_files` |
+| `docker compose up` fails, or Docker doesn't give the port of Grafana | `wf metrics up` exits with code 1, and prints no address. When `docker compose up` fails, it names the commands that show the logs and stop the stack. It also names the variables that move the ports. | `workflow/metrics.py:33`, `workflow/metrics.py:44` | `test_wf_metrics_up_fails_when_docker_compose_fails_and_says_where_to_look`, `test_wf_metrics_up_fails_when_docker_doesn_t_say_where_grafana_listens`, `test_the_ports_that_wf_metrics_up_names_are_the_ports_of_the_compose_file` |
+| The Collector doesn't answer an empty OTLP request within 60 seconds | `wf metrics up` exits with code 1, and prints no address. It names the command that shows the logs of the Collector. | `workflow/metrics.py:39`, `workflow/metrics.py:57` | `test_wf_metrics_up_fails_when_the_collector_doesn_t_take_otlp` |
+| A service fails at its start | No service restarts by itself. So ClickHouse or Grafana makes `docker compose up --wait` fail, and the Collector makes the OTLP check fail. | `workflow/metrics.py:33`, `workflow/metrics.py:39` | `test_no_service_starts_again_by_itself`, `test_wf_metrics_up_fails_when_the_collector_doesn_t_take_otlp` |
 | The stack starts with empty volumes | The six tables of `wf` are there and empty. ClickHouse has its low-memory settings and no system log tables. Grafana has the ClickHouse plugin 4.23.0 and no other plugin, no admin user, and the dashboard as its home page. | `metrics/clickhouse/wf.sql:7`, `metrics/clickhouse/low-memory.xml:4`, `metrics/compose.yaml:54`, `metrics/compose.yaml:58` | `test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables` |
-| A request to the HTTP port of ClickHouse has no header `X-ClickHouse-User` | ClickHouse answers 403 and runs nothing, also when the URL holds the user and the password. | `metrics/clickhouse/http-headers.xml:20` | `test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables` |
-| The tables of `wf` get rows, then a second export of one run, and an older row of another run | Each panel shows the numbers of the last export of each run, over its time range only, and only for the workflows that the variable `workflow` selects. | `metrics/grafana/dashboards/wf-runs.json:674` | `test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables` |
-| Claude Code and Codex send spans, log records and metric points | The Collector drops each Codex span that isn't on its list, removes the fields of the account, and cuts long tool text to 512 bytes at a character boundary. | `metrics/collector/config.yaml:14`, `metrics/collector/config.yaml:22` | `test_the_collector_keeps_three_codex_spans_and_cuts_tool_text_and_account_ids` |
+| A request to the HTTP port of ClickHouse has no header `X-ClickHouse-User`, or names another host than 127.0.0.1 or localhost | ClickHouse answers 403 and runs nothing, also when the URL holds the user and the password. | `metrics/clickhouse/http-headers.xml:17`, `metrics/clickhouse/http-headers.xml:29` | `test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables` |
+| A request to Grafana names another host than 127.0.0.1 | Grafana answers with a redirect to 127.0.0.1, and does nothing more. | `metrics/compose.yaml:61` | `test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables` |
+| The tables of `wf` get rows, then a second export of one run, and an older row of another run | Each panel shows the numbers of the last export of each run, over its time range only. It shows only the workflows that the variable `workflow` selects. | `metrics/grafana/dashboards/wf-runs.json:674` | `test_the_stack_starts_empty_and_each_panel_shows_the_rows_of_wf_tables` |
+| Claude Code and Codex send spans, log records and metric points | The Collector drops each Codex span that isn't on its list, and removes the fields of the account. It cuts long tool text to 512 bytes, at a character boundary. | `metrics/collector/config.yaml:14`, `metrics/collector/config.yaml:22` | `test_the_collector_keeps_three_codex_spans_and_cuts_tool_text_and_account_ids` |
 | An image in `metrics/compose.yaml` has no tag of three numbers, or the ClickHouse plugin has no fixed version | A test fails. | `metrics/compose.yaml:17` | `test_each_image_and_plugin_names_its_version` |
 
 ## Validation
