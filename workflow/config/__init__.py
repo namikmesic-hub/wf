@@ -34,8 +34,8 @@ Read the modules in this order:
     show.py        wf config show
 
 cli.main() loads the configuration when a command starts, and stops with its problems when it has
-some. Then it pins the configuration for that command: get() gives each caller the same values, and
-a change to the file counts from the next command on. Outside a command, get() loads it at each
+some. Then it pins the configuration for that command, so get() gives each caller the same values.
+A change to the file counts from the next command on. Outside a command, get() loads it at each
 call. No other module reads config.toml or the environment variable of a key.
 """
 

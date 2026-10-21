@@ -1,15 +1,15 @@
 """Load: config.toml, the environment and wf's defaults, as one Config, or every problem at once.
 
 Each key's value comes from its environment variable, else from config.toml, else from wf's
-default. A flag wins over all three (Config.given). A variable that is set but blank counts as not
-set. A blank WF_RUNS_DIR is the one that gives its default, also over the file: so
-`WF_RUNS_DIR= wf retry <run-id>` finds a run in .wf/runs. The file is checked all the same.
+default. A flag wins over all three (Config.given). A variable with a blank value counts as no
+variable. A blank WF_RUNS_DIR is the one that gives its default, also over the file: so
+`WF_RUNS_DIR= wf retry <run-id>` finds a run in .wf/runs. wf checks the file all the same.
 
-The checks: config.yaml isn't there (legacy.py), the file is valid TOML, each key is one that wf
-knows and has a value of its kind, and metrics.url is a whole connection string when
-metrics.enabled is true. The file also belongs to the user, and no other user may change it,
-because it names programs that wf runs. A file that sets metrics.url is the user's alone
-(mode 0600), because the password goes there.
+The checks: config.yaml isn't there (legacy.py), the file is valid TOML, wf knows each key, and
+each value is of its key's kind. With metrics.enabled true, metrics.url is a whole connection
+string. The file also belongs to the user, and no other user may change it, because it names
+programs that wf runs. A file that sets metrics.url is the user's alone (mode 0600), because the
+password goes there.
 """
 
 import json
@@ -149,8 +149,8 @@ def _metrics(values: dict, file: Path) -> list[str]:
 
 def _guarded(table: dict, facts: os.stat_result | None, file: Path) -> list[str]:
     """The file is the user's, and no other user can change it, since it names the programs that wf
-    runs. When it sets metrics.url, no other user can open it either: wf can't tell a URL without a
-    password from one with a password where wf reads the host, the port or the database."""
+    runs. When it sets metrics.url, no other user can open it either. A password can stand where wf
+    reads the host, the port or the database, so wf can't tell if a URL holds one."""
     if facts is None:
         return []
     mode, url = stat.S_IMODE(facts.st_mode), _lookup(table, KEYS["metrics.url"])
@@ -167,7 +167,7 @@ def _guarded(table: dict, facts: os.stat_result | None, file: Path) -> list[str]
 
 
 def _shown(value: object, key: Key) -> str:
-    """A value from the file, for a message. A secret key's value is never shown, only its kind."""
+    """A value from the file, for a message. A message never shows the value of a secret key, only its kind."""
     if isinstance(value, dict):
         return "a table"
     if isinstance(value, list):
@@ -182,7 +182,7 @@ def _shown(value: object, key: Key) -> str:
 
 
 def _cut(text: str) -> str:
-    """A value for a message: a long one, as a number of 300 digits, is cut to its start."""
+    """A value for a message: only the start of a long one, as a number of 300 digits."""
     return text if len(text) <= 60 else f"{text[:57]}..."
 
 

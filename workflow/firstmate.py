@@ -8,16 +8,16 @@ trusted extension package implementing `process-event-adapter/1`
 with a verb argument (`handshake` or `invoke`), one JSON request on stdin, and
 one JSON response on stdout.
 
-This module is that executable's logic. A source is one wf run, named by its
-run folder in the source's config reference: `wf-run:/abs/repo/.wf/runs/<id>`,
-or `wf-run:/abs/runs-dir/<repo key>/<id>` for a run kept in a runs folder
-(--runs-dir, WF_RUNS_DIR or runs_dir in config.toml) outside the repo.
+This module is that executable's logic. A source is one wf run. The source's
+config reference names its run folder: `wf-run:/abs/repo/.wf/runs/<id>`, or
+`wf-run:/abs/runs-dir/<repo key>/<id>` for a run in a runs folder. A runs folder,
+outside the repo, comes from --runs-dir, WF_RUNS_DIR or runs_dir in config.toml.
 
     source.poll      wait up to POLL_SECONDS for the run to need attention (operate.wait),
-                     with the source as the consumer, so each state is reported once:
+                     with the source as the consumer. So the poll reports each state once:
                      {status: "result", output: <the run's state as JSON>}, or "no-result".
                      A configuration with problems (config/) refuses the poll before the wait,
-                     with the error "unavailable", so no state is lost
+                     with the error "unavailable", so firstmate loses no state
     result.classify  wf-waiting, wf-failed, wf-stopped, wf-limit or wf-succeeded
     result.terminal  true once the run succeeded; the source then retires (a limit
                      pauses a run: `wf retry --limit` continues it, so the source stays)

@@ -1,8 +1,8 @@
 """Cursor through ACP: agent sessions through `cursor-agent acp`, the Agent Client Protocol over stdio.
 
 wf ran every Cursor session this way before the Cursor host (cursor.py), and keeps it for one
-release: cursor.runtime = "acp" in ~/.wf/config.toml (or WF_CURSOR_RUNTIME=acp) runs every Cursor
-session here, and the Cursor host's harness runs `edit` sessions here too (see cursor.py).
+release. cursor.runtime = "acp" in ~/.wf/config.toml (or WF_CURSOR_RUNTIME=acp) runs every Cursor
+session here. The Cursor host's harness runs `edit` sessions here too (see cursor.py).
 
 ACP is JSON-RPC 2.0, one message per line in both directions, and either side
 can send requests. A session is: initialize, authenticate with `cursor_login`

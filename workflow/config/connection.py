@@ -4,13 +4,13 @@
 
 wf speaks ClickHouse's HTTP interface with Python's standard library, so the scheme is http or
 https. ClickHouse's own clickhouse:// strings name its native TCP port instead. The user, the
-password and the database are percent-encoded: %40 for @, %3A for :, %2F for / and %23 for #.
+password and the database use percent-encoding: %40 for @, %3A for :, %2F for / and %23 for #.
 
 The password is the one secret of config.toml. str() and repr() of a Connection give `masked`, the
 string with *** for the password, and so does every message and `wf config show`. wf shows the
-string only when it parses and has a user and a password, because only then does wf know which
-part of it is the password. For the same reason, a config.toml that sets the string at all must
-be the user's alone (load.py).
+string only when it parses and has a user and a password, since wf then knows where the password
+is. For the same reason, a config.toml that sets the string at all must be the user's alone
+(load.py).
 """
 
 import re
@@ -88,7 +88,7 @@ class Connection:
 
     @property
     def masked(self) -> str:
-        """The string as it was written, with *** for the password, or why wf doesn't show it."""
+        """The text, with *** for the password, or why wf doesn't show it."""
         if not self.visible:
             return BROKEN if self.broken else UNSURE
         head, sep, rest = self.text.partition("://")

@@ -38,9 +38,9 @@ To see runs as they happen (observe.py, ui.py):
 wf's own settings, in ~/.wf/config.toml (config/):
     wf config show                   the value of each key, and where it comes from
 
-Every command that makes or finds runs takes --runs-dir DIR (default: WF_RUNS_DIR, else runs_dir in
-config.toml) to keep run folders outside the repo, in a folder per repo under DIR, instead of in
-./.wf/runs (runs.py).
+Every command that makes or finds runs takes --runs-dir DIR, to keep run folders outside the repo.
+They then go in a folder per repo under DIR, instead of in ./.wf/runs (runs.py). WF_RUNS_DIR, else
+runs_dir in config.toml, gives the default DIR.
 
 main() parses the arguments, loads the configuration, and returns the exit code. A configuration
 with problems stops every command before it starts. The pyproject entry point

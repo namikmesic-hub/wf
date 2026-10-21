@@ -49,8 +49,8 @@ That folder is the SDK's store of the agent: its agents, runs, run events and ch
 no API key and no account details. As with ACP, after a continued attempt fails, the next one
 starts fresh.
 
-For one release, cursor.runtime = "acp" in ~/.wf/config.toml (or WF_CURSOR_RUNTIME=acp, which
-wins) runs every Cursor session through ACP, as before, until the SDK has proven itself in real runs.
+For one release, cursor.runtime = "acp" in ~/.wf/config.toml runs every Cursor session through ACP, as
+before, until the SDK has proven itself in real runs. WF_CURSOR_RUNTIME=acp does the same, and wins over the file.
 paths.node names the Node program for a machine with more than one: else it is `node` on PATH.
 """
 
@@ -145,8 +145,8 @@ def env() -> dict:
 
 def find_node(node: str | None = None) -> str:
     """The Node program to run the host with (`node`, else paths.node, else node on PATH), if it runs
-    TypeScript as it is: Node itself says so, which its version alone doesn't (23.0 to 23.5 don't, and an
-    option can switch it off). Raises Unavailable."""
+    TypeScript as it is. Node itself says so, which its version alone doesn't: 23.0 to 23.5 don't, and an
+    option can switch it off. Raises Unavailable."""
     chosen = config.get() if node is None else None
     named = chosen.paths.node if chosen else None
     node = node or str(named or "node")

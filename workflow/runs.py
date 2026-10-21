@@ -27,7 +27,7 @@ run already in progress. `.wf/` goes into the repo's .git/info/exclude, so run
 folders never show up in `git status`.
 
 A runs folder (runs_dir: --runs-dir, WF_RUNS_DIR or config.toml) keeps run folders
-outside the repo instead: <runs-dir>/<repo key>/<run-id>/, where the key (folder name and a
+outside the repo instead: <runs-dir>/<repo key>/<run-id>/. The key (folder name and a
 hash of its path) keeps two repos' runs apart. Then the repo's working tree and
 .git/info/exclude stay as they were: only `workspace: new` adds branches and
 worktree records under .git. run.json's `repo` workspace is the repo's path,
@@ -99,9 +99,9 @@ class Run:
 
     def command(self, verb: str, *more: str) -> str:
         """The wf command that does `verb` to this run, as typed in its repo, e.g. `wf retry <id>`.
-        For a run in a runs folder it ends in --runs-dir, so it finds the run whatever runs folder is
-        set where it's typed. For one in ./.wf/runs while WF_RUNS_DIR or config.toml sets a runs folder,
-        it starts with `WF_RUNS_DIR=`, which turns the setting off: no --runs-dir value names ./.wf/runs."""
+        For a run in a runs folder it ends in --runs-dir, so it finds the run whatever WF_RUNS_DIR and
+        config.toml say where you type it. For one in ./.wf/runs while WF_RUNS_DIR or config.toml sets a runs folder,
+        it starts with `WF_RUNS_DIR=`, which turns the setting off. No --runs-dir value names ./.wf/runs."""
         text = " ".join(["wf", verb, self.id, *more])
         if self.dir.parent != self.repo.resolve() / ROOT:
             return f"{text} --runs-dir {shlex.quote(str(self.dir.parent.parent))}"
@@ -109,7 +109,7 @@ class Run:
 
     def location(self) -> tuple[list[str], dict[str, str]]:
         """The arguments and the environment that let a new wf process find this run, whatever WF_RUNS_DIR
-        and config.toml say when it starts: --runs-dir for a run in a runs folder, else a blank WF_RUNS_DIR."""
+        and config.toml say when it starts. They are --runs-dir for a run in a runs folder, else a blank WF_RUNS_DIR."""
         if self.dir.parent != self.repo.resolve() / ROOT:
             return ["--runs-dir", str(self.dir.parent.parent)], {}
         return [], {RUNS_DIR: ""}

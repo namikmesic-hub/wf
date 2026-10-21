@@ -1,5 +1,5 @@
-"""The example files for metrics in docs/metrics: a ClickHouse in Docker that you start yourself, the
-dashboard for Grafana, and the configuration of an OpenTelemetry Collector. wf runs none of them.
+"""The example files in docs/metrics: a ClickHouse in Docker that you start yourself, the dashboard
+for Grafana, and the configuration of an OpenTelemetry Collector. wf runs none of them.
 
 The test of compose.yaml needs Docker with Compose, and pytest skips it without them. It starts no
 container: `docker compose config` only reads the file."""

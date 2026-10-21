@@ -136,7 +136,7 @@ url = "https://wf:password@clickhouse.example.com:8443/wf"
 A key takes its value from its command-line flag, else from its environment variable, else from the file, else from wf's default.
 The flags are `--runs-dir`, and the `--port` of `wf ui` and of `wf tools <name> setup`.
 The environment variables are `WF_RUNS_DIR`, `WF_MAX_AGENTS`, `WF_CLAUDE_AUTH` and `WF_CURSOR_RUNTIME`.
-A variable that is set but empty counts as not set.
+A variable with an empty value counts as no variable.
 Only an empty `WF_RUNS_DIR` turns the runs folder off, also when the file names one.
 `wf config show` prints the value of each key and where it comes from.
 
@@ -219,7 +219,7 @@ uv run pytest -m harness       # real agents: uses your Claude Code, Codex and C
 ```
 
 No test starts a container.
-One test reads `docs/metrics/compose.yaml` with `docker compose config`, and pytest skips it where Docker with Compose isn't installed.
+One test reads `docs/metrics/compose.yaml` with `docker compose config`, and pytest skips it on a machine without Docker with Compose.
 
 The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.
 The host has its own TypeScript checks: `npm ci && npm run check && npm test` in `workflow/harnesses/cursor_host`.

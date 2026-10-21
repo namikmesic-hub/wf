@@ -1,8 +1,8 @@
 """Legacy: ~/.wf/config.yaml, where wf kept its settings before config.toml.
 
-wf doesn't read it, and doesn't start while it is there, so that no setting in it is quietly left
-out. The message names each setting that the file holds, and the key of config.toml that takes its
-place. It never shows a value.
+wf doesn't read it, and doesn't start while it is there, so that no setting in it quietly stops
+applying. The message names each setting that the file holds, and the key of config.toml that takes
+its place. It never shows a value.
 """
 
 from pathlib import Path

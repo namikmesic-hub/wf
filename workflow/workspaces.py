@@ -28,9 +28,9 @@ key signs with nobody there (check_signing), so a key that can't fails the run
 before any agent works for it.
 
 git never waits for input: nobody is at a terminal to answer. Each git command
-runs in a session of its own, without one, so a key that asks for a passphrase
-or a PIN fails at once, and signing that takes longer than git.signing_timeout
-(config/), as a key that waits for a touch, is stopped. A commit that fails says signing failed
+runs in its own session, without a terminal, so a key that asks for a passphrase
+or a PIN fails at once. wf stops git when signing takes longer than git.signing_timeout
+(config/), as with a key that waits for a touch. A commit that fails says signing failed
 only when a test shows signing is the cause. git is also stopped when its
 caller is cancelled (stopped_by), on Ctrl-C, and on SIGTERM or a lost terminal
 (stopping_git_on_exit). Stopping git stops whatever it started: it's asked
@@ -61,7 +61,7 @@ from pathlib import Path
 from . import config
 from .config import home
 
-GRACE = 5  # seconds a stopped git gets to remove its temporary and lock files before it's killed
+GRACE = 5  # seconds a stopped git gets to remove its temporary and lock files before wf kills it
 
 
 class WorkspaceError(Exception):

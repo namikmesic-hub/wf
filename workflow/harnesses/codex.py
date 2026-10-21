@@ -109,7 +109,7 @@ class Codex:
     name = "codex"
 
     def __init__(self, command: list[str] | None = None, request_timeout: float = 60):
-        self.own = command is None  # wf's own command, whose Codex version is checked
+        self.own = command is None  # wf's own command, whose Codex version wf checks
         self.command = command or [program(), *APP_SERVER]
         self.request_timeout = request_timeout  # a wedged app server counts as unavailable after this
         self.rpc: _Connection | None = None

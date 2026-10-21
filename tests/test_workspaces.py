@@ -542,8 +542,8 @@ def test_cancelling_a_job_stops_its_git_command_and_the_signing_program(repo, tm
 
     start = time.monotonic()
     asyncio.run(cancel())  # it waits for the thread that ran git, as wf does when it stops
-    assert time.monotonic() - start < 10  # well before git.signing_timeout
-    assert len(signers(tmp_path)) == 1  # and nothing ran after it, not even a test of the key
+    assert time.monotonic() - start < 10  # well before git.signing_timeout.
+    assert len(signers(tmp_path)) == 1  # Nothing ran after it, not even a test of the key.
     assert gone(started(tmp_path)[0])
     assert not workspaces._running
 

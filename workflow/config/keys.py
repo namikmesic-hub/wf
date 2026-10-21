@@ -1,9 +1,9 @@
 """Keys: every key of config.toml, as the fields of typed sections.
 
-Each field of Config and of its sections is one key, made with key(): its kind (what values it
-allows), its default, its environment variable and its command-line flag, if it has them. A key in
-a section is written <section>.<field> here and in messages, as `cursor.runtime`, and in the file
-as `runtime` under [cursor]. KEYS lists them all, in the order that `wf config show` prints them.
+Each field that key() makes, in Config and in its sections, is one key. A key has a kind (the values
+that it allows) and a default, and it can have an environment variable and a command-line flag. Here
+and in messages, a key in a section has the name <section>.<field>, as `cursor.runtime`. In the file
+it is `runtime` under [cursor]. KEYS lists them all, in the order that `wf config show` prints them.
 """
 
 import math
@@ -17,7 +17,7 @@ from .connection import FORM, Connection
 
 class ConfigError(Exception):
     """wf can't start with this configuration. Each problem is one message, which names the key or
-    the variable, the file, and what is allowed."""
+    the variable, the file, and what the key allows."""
 
     def __init__(self, problems: list[str]):
         super().__init__("\n".join(problems))
@@ -114,8 +114,8 @@ class Location(Kind):
 
 
 def _expanded(text: str) -> Path | None:
-    """The path with its ~ expanded, or None for an empty one, one with a NUL, or one with the ~ of a
-    user that doesn't exist (os.path leaves that ~ as it is, where pathlib raises RuntimeError)."""
+    """The path with its ~ expanded. None for an empty path, for a path with a NUL, and for one with
+    the ~ of a user that doesn't exist. os.path leaves that ~ as it is, where pathlib raises RuntimeError."""
     if not text or "\0" in text:
         return None
     expanded = os.path.expanduser(text)
@@ -152,8 +152,8 @@ class ConnectionString(Kind):
 def key(kind: Kind, default: object = None, *, variable: str | None = None, flag: str | None = None,
         none: str = "", secret: bool = False, blank_is_default: bool = False):
     """A field that is a key: `none` says what no value means, for `wf config show`. A `secret` key's
-    value is never in a message, and `wf config show` shows it masked. A blank variable counts as not
-    set, but with `blank_is_default` it gives the default, also over the file."""
+    value is never in a message, and `wf config show` shows it masked. A blank variable counts as no
+    variable, but with `blank_is_default` it gives the default, also over the file."""
     return field(default=default, metadata={"kind": kind, "variable": variable, "flag": flag, "none": none, "secret": secret,
                                             "blank_is_default": blank_is_default})
 
@@ -239,7 +239,7 @@ class Config:
     git: Git = field(default_factory=Git)
     paths: Paths = field(default_factory=Paths)
     metrics: Metrics = field(default_factory=Metrics)
-    file: Path = Path("config.toml")  # the file that it was read from
+    file: Path = Path("config.toml")  # the config.toml that load() looked for
     sources: Mapping[str, Source] = field(default_factory=dict, repr=False, compare=False)
 
     def source(self, name: str) -> Source:
@@ -252,7 +252,7 @@ class Config:
 
     def given(self, flags: Mapping[str, object]) -> "Config":
         """This configuration with the values of flags, by key name. A flag wins over each other source.
-        A flag that isn't given (None) leaves its key as it is."""
+        A flag with the value None leaves its key as it is."""
         chosen = {name: value for name, value in flags.items() if value is not None}
         if not chosen:
             return self

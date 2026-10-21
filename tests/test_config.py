@@ -2,7 +2,7 @@
 
 Each key takes its flag, then its environment variable, then the file, then wf's default. wf never
 writes the file. A problem stops every command before it starts, and its message names the key or
-the variable, the file, and what is allowed. The password of metrics.url is shown nowhere."""
+the variable, the file, and what the key allows. No trace, run folder or output holds the password of metrics.url."""
 
 import ast
 import json
@@ -79,7 +79,7 @@ def test_each_key_takes_its_flag_then_its_variable_then_the_file_then_wf_s_defau
         assert shown(loaded, name) == (from_env, f"environment ({key.variable})")
     if key.flag:
         assert shown(loaded.given({name: flag}), name) == (flag, f"flag ({key.flag})")
-        assert shown(loaded.given({name: None}), name) == shown(loaded, name)  # a flag that isn't given
+        assert shown(loaded.given({name: None}), name) == shown(loaded, name)  # a flag with the value None
 
 
 def test_every_key_has_a_sample_and_the_sources_of_today_stay():
@@ -295,7 +295,7 @@ def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, probl
     ("https://wf@clickhouse.example.com:8443/wf", "metrics.url lacks the password."),
     ("https://wf:hunter2@:8443/wf", "(https://wf:***@:8443/wf) lacks the host"),
     ("clickhouse.example.com", "metrics.url lacks the scheme, the user, the password, the port and the database."),
-    ("https://wf:12345/wf", "metrics.url lacks the user and the password."),  # 12345 may be a password, read as a port
+    ("https://wf:12345/wf", "metrics.url lacks the user and the password."),  # 12345 may be a password, which wf reads as a port
     ("clickhouse://wf:hunter2@clickhouse.example.com:9000/wf", "(clickhouse://wf:***@clickhouse.example.com:9000/wf) has a "
                                                                "scheme other than http and https, and wf speaks ClickHouse's "
                                                                "HTTP interface: a clickhouse:// string names the native TCP port"),
@@ -369,7 +369,7 @@ def test_a_file_that_sets_metrics_url_must_be_yours_alone(wf_home, url, mode, ca
 def test_each_test_runs_with_umask_022_whatever_the_shell_has(wf_home):
     current = os.umask(0o022)
     os.umask(current)
-    assert current == 0o022  # conftest sets it: under umask 002, each config.toml of a test would be refused
+    assert current == 0o022  # conftest sets it: under umask 002, wf would refuse each config.toml of a test
     (wf_home / "config.toml").write_text("max_agents = 2\n")
     assert config.load().max_agents == 2
 

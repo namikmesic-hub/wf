@@ -1,6 +1,6 @@
 """Show: `wf config show`, the value of each key and where it comes from.
 
-The password of metrics.url is never shown: the URL is shown masked (connection.py).
+It never shows the password of metrics.url, and shows the URL only masked (connection.py).
 """
 
 from .connection import Connection

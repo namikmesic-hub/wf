@@ -63,9 +63,9 @@ def entries(log: Path, kind: str) -> list:
 
 
 def real_key() -> str | None:
-    """The Cursor API key this machine has for wf, for the opt-in tests: from the file that
-    cursor.api_key_file in your config.toml names, or from your real Keychain (conftest gives each
-    test an empty one)."""
+    """The Cursor API key this machine has for wf, for the opt-in tests. It comes from the file that
+    cursor.api_key_file in your config.toml names, or from your real Keychain. conftest gives each
+    test an empty keyring."""
     try:
         file = config.load(REAL_WF_HOME).cursor.api_key_file
     except config.ConfigError:
