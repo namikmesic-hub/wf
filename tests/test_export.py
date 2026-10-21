@@ -105,10 +105,11 @@ def r(clock: str, kind: str, ident: str, facts: dict | None = None, **more) -> d
 
 
 def traced(error: dict) -> list[dict]:
-    """The trace of a run of `deliver`: a command that fails once, an agent with two turns and three tool calls,
-    two items of review, one of them on a fallback after a rate limit, and a workflow node whose sub-workflow
-    times out, until `wf retry` runs it again. Before its rate limit, Cursor names a call of a wf tool only in
-    the call's second record, as its ACP does. `error` is the reference to LONG_ERROR in blobs/."""
+    """The trace of a run of `deliver`. A command fails once, and an agent has two turns and three tool calls.
+    The node review has two items, and one of them runs on a fallback after a rate limit. The sub-workflow
+    of a workflow node times out, and `wf retry` runs the node again. Before its rate limit, Cursor names a
+    call of a wf tool only in the call's second record, as its ACP does. `error` is the reference to
+    LONG_ERROR in blobs/."""
     tests = {"node": "tests", "pass": 1, "command": "make test", "cwd": "/repo", "env": {}}
     implement = {"node": "implement", "pass": 1, "attempt": 1, "harness": "claude-code", "model": "claude-opus-5-5",
                  "effort": "high", "access": "edit", "web": False}
