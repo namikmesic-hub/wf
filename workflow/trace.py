@@ -260,6 +260,8 @@ def find(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozen
     found |= {("history", path[0], EACH, *path[1:]) for path in found if path[0] in workflow.nodes}
     found |= {("results", path[0], EACH, "output", *path[2:]) for path in found
               if path[0] in workflow.nodes and workflow.nodes[path[0]].for_each is not None}
+    found |= {(where, node, EACH, "item", *path[1:]) for node, paths in items.items() for path in paths
+              if path[0] == "item" for where in ("results", "errors")}  # a new process learns an item's text only from these
     return Secrets(frozenset(found), {node: frozenset(paths) for node, paths in items.items()})
 
 
