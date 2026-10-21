@@ -126,6 +126,26 @@ def test_a_filter_that_reads_a_field_of_each_element_reads_its_path():
         ("plan", ("tasks",)), ("plan", ("tasks",))]  # a default for a missing field, or no field
 
 
+@pytest.mark.parametrize("source, field", [
+    ("results.b | sum('output.cost')", "cost"),  # the field without its keyword `attribute`
+    ("results.b | unique(false, 'output.cost')", "cost"),
+    ("results.b | sort(false, false, 'output.cost')", "cost"),
+    ("results.b | sort('output.cost')", None),  # the first argument of sort is `reverse`
+    ("results.b | map(attribute='output.done', default=none)", "done"),  # Jinja ignores a default of none
+    ("results.b | map(attribute='output.done', default=start.done)", "done"),  # which can be none
+    ("results.b | map(attribute='output.done', default=[])", None),
+    ("results.b | groupby('output.kind', none)", "kind"),
+    ("results.b | groupby('output.kind', 'other')", None),  # the default without its keyword
+    ("results.b | selectattr('output.done')", "done"),
+    ("results.b | selectattr('output.done', 'equalto', true)", "done"),
+    ("results.b | selectattr('output.done', 'defined')", None),  # a type test can't fail on a missing field
+    ("results.b | rejectattr('output.done', 'none')", None),
+])
+def test_a_filter_reads_the_field_only_where_a_missing_field_can_make_it_fail(source, field):
+    reads = [path for name, path in refs(source, expression=True) if name == "results" and len(path) > 1]
+    assert reads == ([("b", EACH, "output", field)] if field else [])
+
+
 def test_a_position_that_the_template_computes_is_kept_apart_from_a_loop():
     assert refs("{{ results.b[-1].item }} {{ results.b[index].item }} {{ results.b[start.pos + 1].item }}") == [
         ("results", ("b", -1, "item")), ("results", ("b", templates.At("index"), "item")), ("index", ()),

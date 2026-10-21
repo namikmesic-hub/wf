@@ -446,8 +446,13 @@ def _parse(source: str, *, expression: bool):
 _SAME_ELEMENTS = frozenset({"selectattr", "rejectattr", "select", "reject", "sort", "unique", "list", "reverse"})
 # Filters whose result is always a number, so it can't carry text into a command
 _NUMBERS = frozenset({"length", "count", "int", "float", "abs", "round", "sum", "wordcount", "filesizeformat"})
-# Filters that read a field of each element, which `attribute` (or the first argument) names
-_ATTRIBUTE_FILTERS = frozenset({"map", "selectattr", "rejectattr", "sort", "unique", "sum", "min", "max", "groupby"})
+# Filters that read a field of each element, and the positions of their arguments `attribute` and `default`
+# for a template that doesn't name them. So sum("cost") reads the field cost.
+_ATTRIBUTE_FILTERS = {"map": (None, None), "selectattr": (0, None), "rejectattr": (0, None), "sum": (0, None),
+                      "groupby": (0, 1), "unique": (1, None), "min": (1, None), "max": (1, None), "sort": (2, None)}
+# Tests that check only the type or the identity of a value, so a field of none, which is undefined, can't make them fail
+_TYPE_TESTS = frozenset({"defined", "undefined", "none", "boolean", "true", "false", "integer", "float", "number",
+                         "string", "mapping", "sequence", "callable", "sameas", "escaped"})
 # Variables that wf gives as an empty list or map, and never as none: a none check of them proves nothing
 _NEVER_NONE = frozenset({"results", "history", "errors"})
 _UNSUPPORTED = {nodes.Include: "include", nodes.Import: "import", nodes.FromImport: "from ... import", nodes.Extends: "extends"}
@@ -603,18 +608,29 @@ def _kept(node, source: _Local) -> frozenset:
 
 def _filter_attribute(node) -> tuple | None:
     """The field that a filter reads from each element, as a path: ("output", "stdout") for
-    `map(attribute="output.stdout")`. None when it reads none, or gives a default for a missing one."""
+    `map(attribute="output.stdout")`. None when it reads none, or when a missing field can't make it fail.
+    A literal default other than none prevents that, and so does a test of _TYPE_TESTS in selectattr or rejectattr."""
     if not isinstance(node, nodes.Filter) or node.name not in _ATTRIBUTE_FILTERS or node.node is None:
         return None
-    given = {keyword.key: keyword.value for keyword in node.kwargs}
-    value = given.get("attribute")
-    if value is None and node.name in ("selectattr", "rejectattr", "groupby") and node.args:
-        value = node.args[0]
-    if "default" in given or not (isinstance(value, nodes.Const) and isinstance(value.value, str)):
-        return None
-    if not value.value or "," in value.value:  # sort and unique also take several, with commas
+    field_position, default_position = _ATTRIBUTE_FILTERS[node.name]
+    value = _argument(node, "attribute", field_position)
+    if not (isinstance(value, nodes.Const) and isinstance(value.value, str)) or not value.value or "," in value.value:
+        return None  # sort and unique also take several fields, with commas
+    default = _argument(node, "default", default_position)
+    if isinstance(default, (nodes.List, nodes.Tuple, nodes.Dict)) or (isinstance(default, nodes.Const) and default.value is not None):
+        return None  # Jinja uses a default only when it isn't none
+    test = node.args[1] if node.name in ("selectattr", "rejectattr") and len(node.args) > 1 else None
+    if isinstance(test, nodes.Const) and test.value in _TYPE_TESTS:
         return None
     return tuple(int(part) if part.isdigit() else part for part in value.value.split("."))
+
+
+def _argument(node: nodes.Filter, keyword: str, position: int | None):
+    """The argument of a filter that the template names `keyword`, or else gives at `position`. None if neither."""
+    given = {pair.key: pair.value for pair in node.kwargs}
+    if keyword in given:
+        return given[keyword]
+    return node.args[position] if position is not None and position < len(node.args) else None
 
 
 def _target_names(target) -> list[str]:

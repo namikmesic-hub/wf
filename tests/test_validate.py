@@ -338,6 +338,9 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         "by_map": "{{ results.build | map(attribute='output.done') | list }}",
         "map_kept": "{{ results.build | selectattr('output') | map(attribute='output.done') | list }}",
         "map_default": "{{ results.build | map(attribute='output.done', default=false) | list }}",
+        "map_none": "{{ results.build | map(attribute='output.done', default=none) | list }}",  # Jinja ignores a default of none
+        "by_sum": "{{ results.build | sum('output.done') }}",  # the first argument of sum is the field
+        "select_defined": "{{ results.build | selectattr('output.done', 'defined') | list }}",  # a type test can't fail
     }
     beside = {  # these run beside build, which might not have run yet
         "early": "{{ results.build[0].index }}",
@@ -362,6 +365,8 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
                                                     "is set first"),
         ("warning", "nodes.bare_loop.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.by_map.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.map_none.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.by_sum.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.early.instruction", "reads `results.build[0].index`, but `build` might not have run yet; "
                                                "check first with {% if build %}"),
         ("warning", "nodes.early_last.instruction", "reads `results.build[-1].index`, but `build` might not have run yet"),

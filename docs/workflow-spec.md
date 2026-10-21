@@ -1628,7 +1628,9 @@ Warnings:
   A check through a loop variable covers only the reads through that same variable.
 - A template reads a field of an item's `output` in `results.<node>` when the node has `on_item_error: continue`.
   The read is outside an `{% if %}`, a conditional expression or a loop filter that checks the output.
-  A filter that reads a field of each entry, such as `map(attribute='output.done')`, reads that field too, unless it gives a `default`.
+  A filter that reads a field of each entry, such as `map(attribute='output.done')` or `sum('output.cost')`, reads that field too.
+  It doesn't when it gives a literal `default` other than none, such as `default=false`, because Jinja ignores a default of none.
+  It also doesn't when `selectattr` or `rejectattr` checks the field with a test of type or identity, such as `defined` or `none`.
   A read of `item.output.<field>` in a `for_each` over `results.<node>` counts too.
 - A `command` uses node outputs without `env` or `| quote`, or uses a `start` input that a
   parent workflow fills from node output, or a `workspace.<node>.branch` that a `branch`
