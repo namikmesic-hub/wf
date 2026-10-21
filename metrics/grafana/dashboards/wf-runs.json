@@ -671,10 +671,10 @@
           "format": 1,
           "queryType": "table",
           "pluginVersion": "4.23.0",
-          "rawSql": "SELECT p.workflow AS workflow, a.harness AS harness, a.model AS model,\n       count() AS reviews, sum(p.value) AS problems, problems / reviews AS per_review\nFROM wf.metric_points AS p FINAL\nINNER JOIN wf.attempts AS a FINAL\n    ON a.run_id = p.run_id AND a.node = p.node AND a.pass = p.pass AND a.item = p.item\nWHERE p.metric = 'review.problems' AND a.outcome = 'succeeded' AND $__timeFilter(p.time)\n  AND $__conditionalAll(p.workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY workflow, harness, model\nORDER BY problems DESC"
+          "rawSql": "SELECT p.workflow AS workflow, a.harness AS harness, a.model AS model,\n       count() AS reviews, sum(p.value) AS problems, problems / reviews AS per_review\nFROM wf.metric_points AS p FINAL\nINNER JOIN (\n    SELECT run_id, node, pass, item, argMax(harness, attempt) AS harness, argMax(model, attempt) AS model\n    FROM wf.attempts FINAL\n    WHERE outcome = 'succeeded'\n    GROUP BY run_id, node, pass, item\n) AS a ON a.run_id = p.run_id AND a.node = p.node AND a.pass = p.pass AND a.item = p.item\nWHERE p.metric = 'review.problems' AND $__timeFilter(p.time)\n  AND $__conditionalAll(p.workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY workflow, harness, model\nORDER BY problems DESC"
         }
       ],
-      "description": "The problems that each review reported, by the model of the attempt that wrote the review."
+      "description": "The problems that each review reported, by the model of the last attempt of the review that succeeded."
     },
     {
       "id": 8,

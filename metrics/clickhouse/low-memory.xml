@@ -29,4 +29,5 @@
     <crash_log remove="1"/>
     <backup_log remove="1"/>
     <blob_storage_log remove="1"/>
+    <s3queue_log remove="1"/>
 </clickhouse>

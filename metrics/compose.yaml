@@ -1,9 +1,14 @@
 # The wf metrics stack: Grafana on ClickHouse, on this machine.
 # `wf metrics up` starts it. `docker compose -f metrics/compose.yaml down` stops it, and `down -v` also deletes its data.
+# It doesn't start again by itself when Docker starts again.
+# A start with new volumes needs the internet: Grafana downloads its ClickHouse plugin, and Docker pulls each image that it lacks.
 # An OpenTelemetry Collector takes OTLP from Claude Code and Codex and writes it into the ClickHouse database otel.
 # ClickHouse keeps wf's own tables in the database wf, which clickhouse/wf.sql makes.
-# Grafana shows the dashboard "wf runs" with a ClickHouse datasource. It has no login, so keep it on 127.0.0.1.
-# Each port listens on 127.0.0.1 only. Set a WF_METRICS_*_PORT variable to move a port, or to 0 for a free one.
+# Grafana shows the dashboard "wf runs" with a ClickHouse datasource.
+# Each port listens on 127.0.0.1 only. Each user and program on this machine can read and change the data,
+# because Grafana has no login and ClickHouse has the fixed password wf.
+# Set a WF_METRICS_*_PORT variable to move a port. With 0, Docker picks a free port,
+# and `docker compose -f metrics/compose.yaml port SERVICE PORT` names it.
 
 name: wf-metrics
 
@@ -18,7 +23,6 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
-    restart: unless-stopped
 
   clickhouse:
     image: clickhouse/clickhouse-server:25.8.33.6
@@ -28,6 +32,7 @@ services:
     volumes:
       - ./clickhouse/wf.sql:/docker-entrypoint-initdb.d/10-wf.sql:ro
       - ./clickhouse/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+      - ./clickhouse/http-headers.xml:/etc/clickhouse-server/config.d/http-headers.xml:ro
       - ./clickhouse/low-memory-profile.xml:/etc/clickhouse-server/users.d/low-memory-profile.xml:ro
       - clickhouse:/var/lib/clickhouse
     ports:
@@ -40,15 +45,17 @@ services:
       interval: 2s
       timeout: 5s
       retries: 60
-    restart: unless-stopped
 
   grafana:
     image: grafana/grafana:13.0.11
     environment:
       GF_PLUGINS_PREINSTALL_SYNC: grafana-clickhouse-datasource@4.23.0
+      # Grafana installs these plugins by default, each at its latest version. The stack doesn't use them.
+      GF_PLUGINS_DISABLE_PLUGINS: grafana-lokiexplore-app,grafana-pyroscope-app,grafana-exploretraces-app,grafana-metricsdrilldown-app,elasticsearch
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: "true"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
@@ -64,7 +71,6 @@ services:
       interval: 2s
       timeout: 5s
       retries: 150
-    restart: unless-stopped
 
 volumes:
   clickhouse: {}

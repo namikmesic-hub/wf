@@ -9,32 +9,41 @@
   your ~/.gitconfig);
 - the keyring is an empty one in memory, so no test reads or writes your real Keychain.
 
-A test marked docker is skipped where `docker info` or `docker compose version` fails."""
+A test marked docker is skipped where `docker info` or `docker compose version` fails, or where
+grafana.com can't be reached: the metrics stack downloads a Grafana plugin from it at each start."""
 
 import shutil
 import subprocess
+import urllib.request
 
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
 
 
-@pytest.hookimpl(trylast=True)  # after -m has deselected tests, so `-m 'not docker'` never runs docker
+@pytest.hookimpl(trylast=True)  # after -m deselects tests, so a run without the docker tests never calls docker
 def pytest_collection_modifyitems(items):
     marked = [item for item in items if item.get_closest_marker("docker")]
-    if marked and not _docker_answers():
+    lacking = _what_docker_tests_lack() if marked else None
+    if lacking:
         for item in marked:
-            item.add_marker(pytest.mark.skip(reason="needs Docker with Compose, and a Docker daemon that answers"))
+            item.add_marker(pytest.mark.skip(reason=f"needs {lacking}"))
 
 
-def _docker_answers() -> bool:
+def _what_docker_tests_lack() -> str | None:
     if shutil.which("docker") is None:
-        return False
+        return "Docker with Compose"
     try:
-        return all(subprocess.run(["docker", *args], capture_output=True, timeout=30).returncode == 0
-                   for args in (["info"], ["compose", "version"]))
+        if not all(subprocess.run(["docker", *args], capture_output=True, timeout=30).returncode == 0
+                   for args in (["info"], ["compose", "version"])):
+            return "Docker with Compose, and a Docker daemon that answers"
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return "Docker with Compose, and a Docker daemon that answers"
+    try:
+        urllib.request.urlopen("https://grafana.com/api/plugins/grafana-clickhouse-datasource", timeout=10).close()
+    except OSError:
+        return "the internet: the metrics stack downloads Grafana's ClickHouse plugin from grafana.com at each start"
+    return None
 
 
 @pytest.fixture(autouse=True)

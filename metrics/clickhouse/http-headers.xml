@@ -1,0 +1,27 @@
+<!-- The HTTP port takes the user and the password only in the headers X-ClickHouse-User and X-ClickHouse-Key.
+     A web page can't send those headers to another site without the consent of that site, so it can't send a statement here.
+     /ping stays open, because the entrypoint of the image waits on it while it runs wf.sql. -->
+<clickhouse>
+    <http_handlers>
+        <rule>
+            <url>/ping</url>
+            <methods>GET,HEAD</methods>
+            <handler>
+                <type>static</type>
+                <response_content>Ok.&#10;</response_content>
+            </handler>
+        </rule>
+        <rule>
+            <headers>
+                <X-ClickHouse-User>regex:^$</X-ClickHouse-User>
+            </headers>
+            <handler>
+                <type>static</type>
+                <status>403</status>
+                <content_type>text/plain; charset=UTF-8</content_type>
+                <response_content>Send the user and the password in the headers X-ClickHouse-User and X-ClickHouse-Key.&#10;</response_content>
+            </handler>
+        </rule>
+        <defaults/>
+    </http_handlers>
+</clickhouse>

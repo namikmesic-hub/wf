@@ -108,9 +108,16 @@ The stack has three services:
 
 wf doesn't write the tables of `wf` yet, so the dashboard stays empty for now.
 `wf metrics up` needs Docker with Compose, and wf installed from its checkout, because the stack is part of wf's source.
-Each port listens on 127.0.0.1 only, and Grafana has no login.
-To move a port, set `WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` or `WF_METRICS_OTLP_HTTP_PORT`.
+A start with new volumes also needs the internet, for the images and for Grafana's ClickHouse plugin.
+The stack doesn't start again by itself when Docker starts again, so then run `wf metrics up` again.
 `docker compose -f metrics/compose.yaml down` stops the stack, and `down -v` also deletes its data.
+
+Each port listens on 127.0.0.1 only.
+Grafana has no login, and ClickHouse has the fixed user `wf` with the password `wf`.
+So each user and program on this machine can read and change the data of the stack.
+ClickHouse takes the user and password over HTTP only in the headers `X-ClickHouse-User` and `X-ClickHouse-Key`, so a web page can't send it statements.
+To move a port, set `WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` or `WF_METRICS_OTLP_HTTP_PORT`.
+With 0, Docker picks a free port, and `docker compose -f metrics/compose.yaml port <service> <port>` names it.
 
 ## Docs
 
@@ -137,8 +144,9 @@ uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
 
-Where Docker answers, `uv run pytest` also starts the metrics stack, in a compose project of its own, and removes it at the end.
-`-m 'not docker'` leaves those tests out.
+Where Docker answers and grafana.com can be reached, `uv run pytest` also starts the metrics stack in a compose project of its own.
+The tests remove it at the end.
+A `-m` of your own replaces the default `-m 'not harness'`, so leave those tests out with `-m 'not harness and not docker'`.
 
 The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.
 The host has its own TypeScript checks: `npm ci && npm run check && npm test` in `workflow/harnesses/cursor_host`.

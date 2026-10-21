@@ -5,6 +5,7 @@ own tables, and Grafana shows the dashboard of wf runs. The stack is part of wf'
 this package, so `wf metrics up` needs wf installed from its checkout (`uv tool install --editable .`).
 """
 
+import shlex
 import shutil
 import subprocess
 import sys
@@ -26,8 +27,9 @@ def up() -> int:
     compose = ["docker", "compose", "-f", str(COMPOSE)]
     started = subprocess.run([*compose, "up", "-d", "--wait"])
     if started.returncode != 0:
-        print(f"wf metrics up: `docker compose up` failed with exit code {started.returncode}. To move a port that is "
-              f"in use, set {', '.join(PORTS[:-1])} or {PORTS[-1]}, or set it to 0 for a free port", file=sys.stderr)
+        print(f"wf metrics up: `docker compose up` failed with exit code {started.returncode}. "
+              f"`{shlex.join(compose)} logs` shows what each service said, and `{shlex.join(compose)} down` stops them. "
+              f"To move a port that is in use, set {', '.join(PORTS[:-1])} or {PORTS[-1]} to another port", file=sys.stderr)
         return 1
     found = subprocess.run([*compose, "port", "grafana", "3000"], capture_output=True, text=True)
     address = found.stdout.strip()
