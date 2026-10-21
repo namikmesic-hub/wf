@@ -89,6 +89,7 @@ BLOBS = "blobs"
 CAP = 1000  # characters a value may have in a record. A longer one goes to blobs/
 PREVIEW = 80  # characters of a blob shown in its reference
 HIDDEN = "[secret]"
+_LONGEST = 32  # steps of a secret path. A longer one, from lists that read each other's results, is cut: that hides more
 _OWN = frozenset({"kind", "id", "parent", "node", "where", "pass", "index", "attempt", "turn", "field", "started", "ended"})
 
 _everywhere: set[str] = set()  # secrets of this process, such as wf tools' tokens
@@ -311,26 +312,37 @@ def outputs_reached(node_id: str, node, paths, sub) -> frozenset[str]:
 def _sources(workflow, node_id: str | None, source: str) -> tuple[set[tuple], dict[str, set[tuple]]]:
     """The paths a template of `node_id` reads: (anywhere in the workflow, under the `item` of each
     node). An item path also counts at what that node's for_each list reads (_listed). A path in
-    `results.<node>` also counts at the node's output and at its `item`, which the entry holds."""
+    `results.<node>` also counts at the node's output, or at its `item` (_entry_sources). Each path
+    found so counts in turn, as when a for_each list is `results.<other>`."""
     anywhere, inside = set(), {}
-    for path in _read_paths(source):
+    todo = [(node_id, path) for path in _read_paths(source)]
+    while todo:
+        owner, path = todo.pop()
+        path = path[:_LONGEST]
         if path[0] in ("item", "index"):
-            if node_id and workflow.nodes[node_id].for_each:  # only a for_each node has them (validate makes sure)
-                inside.setdefault(node_id, set()).add(path)
-                anywhere |= _listed(workflow, node_id, path)
-            continue
-        anywhere.add(path)
-        if path[0] != "results":
-            continue
-        named = path[1] if len(path) > 1 and path[1] is not EACH else None  # None: every node's results
-        field = path[3] if len(path) > 3 else EACH  # EACH: all of an entry
-        for node in [n for n, spec in workflow.nodes.items() if spec.for_each is not None and named in (None, n)]:
-            if field in ("output", EACH):
-                anywhere.add((node, EACH, *path[4:]))  # an entry's position isn't its place in the node's list
-            if field in ("item", EACH):
-                inside.setdefault(node, set()).add(("item", *path[4:]))
-                anywhere |= _listed(workflow, node, ("item", *path[4:]))
+            if owner is None or not workflow.nodes[owner].for_each or path in inside.get(owner, ()):
+                continue  # only a for_each node has them (validate makes sure)
+            inside.setdefault(owner, set()).add(path)
+            todo += [(None, listed) for listed in _listed(workflow, owner, path)]
+        elif path not in anywhere:
+            anywhere.add(path)
+            if path[0] == "results":
+                todo += _entry_sources(workflow, path)
     return anywhere, inside
+
+
+def _entry_sources(workflow, path: tuple) -> list[tuple[str | None, tuple]]:
+    """Where a path in `results.<node>` takes its value: (None, a path in the node's output), or
+    (the node, a path in its `item`)."""
+    named = path[1] if len(path) > 1 and path[1] is not EACH else None  # None: every node's results
+    field = path[3] if len(path) > 3 else EACH  # EACH: all of an entry
+    found = []
+    for node in [n for n, spec in workflow.nodes.items() if spec.for_each is not None and named in (None, n)]:
+        if field in ("output", EACH):
+            found.append((None, (node, EACH, *path[4:])))  # an entry's position isn't its place in the node's list
+        if field in ("item", EACH):
+            found.append((node, ("item", *path[4:])))
+    return found
 
 
 def _listed(workflow, node_id: str, path: tuple) -> set[tuple]:

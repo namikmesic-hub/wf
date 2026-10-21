@@ -366,6 +366,40 @@ def test_a_secret_read_through_results_is_hidden_where_its_node_and_item_give_it
     assert secret not in everything_written()  # the job_end, job and run records were written before the read
 
 
+@pytest.mark.parametrize("reader, source", [
+    ("use", "{{ results.pick[0].item.output.stdout }}"),  # through pick, whose items are the entries of fetch
+    ("pick", "{{ item.output.stdout }}"),
+])
+def test_a_secret_that_reaches_results_through_a_for_each_list_is_hidden_where_the_first_node_gives_it(repo, reader, source):
+    nodes = {
+        "fetch": {"needs": ["start"], "for_each": "start.tokens", "command": 'printf "%s-out" "$TOKEN"', "env": {"TOKEN": "{{ item }}"}},
+        "pick": {"needs": ["fetch"], "for_each": "results.fetch", "command": "true"},
+        "use": {"needs": ["pick"], "command": "true"},
+    }
+    nodes[reader] |= {"command": 'test -n "$SECRET"', "env": {"SECRET": source}, "secret_env": ["SECRET"]}
+    tokens = {"type": "array", "maxItems": 2, "items": {"type": "string"}}
+    write(json.dumps({"version": 1, "name": "chain", "start": {"input": {"tokens": tokens}}, "nodes": nodes, "end": {"output": {}}}))
+    Path("in.json").write_text(json.dumps({"tokens": ["tok-9f2e"]}))
+    assert cli.main(["run", "flow.yaml", "--input", "in.json"]) == 0
+    assert "tok-9f2e-out" not in everything_written()  # also in the job_end records of fetch
+    assert of("job_end", node="fetch")[0]["output"]["stdout"] == trace.HIDDEN
+
+
+def test_the_secret_paths_of_lists_that_read_each_others_results_come_to_an_end():
+    workflow = spec.parse(dedent("""
+        version: 1
+        name: loop
+        start: {input: {}}
+        nodes:
+          a: {needs: [start], for_each: "results.b[0].item.l", command: x}
+          b: {needs: [start], for_each: "results.a[0].item.l", command: x}
+          use: {needs: [a, b], command: x, env: {TOKEN: "{{ results.a[0].item.x }}"}, secret_env: [TOKEN]}
+        end: {output: {}}
+    """).lstrip())
+    paths = trace.find(workflow, spec.load).paths  # each step of the loop makes the path longer: it is cut
+    assert ("results", "b", 0, "item", "l", EACH, "x") in paths and max(map(len, paths)) <= 32
+
+
 def test_a_secret_in_the_output_of_a_for_each_node_is_secret_where_history_and_results_hold_it():
     workflow = spec.parse(dedent("""
         version: 1
