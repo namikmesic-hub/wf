@@ -294,7 +294,12 @@ class _Checker:
             "session": _SESSION, **({"follow_up": _FOLLOW_UP} if scheduler.follow_up_targets(self.wf, self.topo) else {}),
         }
         lists = [n for n, node in self.nodes.items() if node.for_each is not None]
-        roots["results"] = fields({n: {"type": "array", "items": self._entry(n, one_result(n), roots)} for n in lists})
+        for _ in range(len(lists) + 1):  # a for_each list can read `results` too: each pass resolves one more step of that
+            found = fields({n: {"type": "array", "maxItems": self.wf.setting(n, "max_items"),
+                                "items": self._entry(n, one_result(n), roots)} for n in lists})
+            if found == roots.get("results"):
+                break
+            roots["results"] = found
         return roots
 
     def _entry(self, node_id: str, output: dict, roots: dict) -> dict:
@@ -434,6 +439,7 @@ class _Checker:
         if name == "run" and ref.path[:1] == ("tokens",):
             self.token_refs.append(where)
         self._might_not_have_run(where, ref, node_id, context)
+        self._failed_item(where, ref)
 
     def _might_not_have_run(self, where: str, ref: Ref, node_id: str | None, context: str) -> None:
         name, path = ref.name, ref.path
@@ -443,20 +449,39 @@ class _Checker:
             target, reads_field = path[0], len(path) > 1
             if target == node_id and context == "node":
                 return  # a node's own workspace exists while its templates render
+        elif name == "results" and path and path[0] in self.nodes:  # an empty list until the node runs
+            target, reads_field = path[0], len(path) > 1 and path[1] is not EACH  # a loop over it then reads nothing
         else:
             return
         if not reads_field:
             return  # reading a node that hasn't run just gives none
         ran = self.order.at_end() if context == "end" else self.order.before(node_id) | ({node_id} if context == "when" else set())
-        cleared = target in ran and self.follow_ups.clears(name, target, node_id, context)  # outputs, not workspaces
+        outputs = target if name == "results" else name  # a follow-up clears outputs and results, not workspaces
+        cleared = target in ran and self.follow_ups.clears(outputs, target, node_id, context)
         why = " in a follow-up, which clears the outputs of the nodes that `follow_up.to` can lead to" if cleared else ""
         ran = set() if cleared else ran
-        if target in ran or target in ref.guarded or f"workspace.{target}" in ref.guarded or (where, target) in self._warned:
+        if (target in ran or target in ref.guarded or f"workspace.{target}" in ref.guarded or f"results.{target}" in ref.guarded
+                or (where, target) in self._warned):
             return
         self._warned.add((where, target))
         self.warn(where, f"reads `{_dotted(name, path)}`, but {_not_yet(target)}{why}; check first with "
                          f"{{% if {target} %}}...{{% endif %}}, or in a single value `{_dotted(name, path)} if {target} else none`"
                          + (" (fails the run if it hasn't)" if context == "end" else ""))
+
+    def _failed_item(self, where: str, ref: Ref) -> None:
+        """A field of an item's output in `results.<node>`, with on_item_error: continue, where no check
+        proves the output is set: an item that failed has the output none, and the template then fails."""
+        path = ref.path
+        if ref.name != "results" or not path or len(path) < 4 or path[2] != "output" or path[0] not in self.nodes:
+            return
+        entry = templates.guard("results", path[:3])
+        if (self.wf.setting(path[0], "on_item_error") != "continue" or entry in ref.guarded
+                or (where, entry) in self._warned):
+            return
+        self._warned.add((where, entry))
+        self.warn(where, f"reads `{_dotted('results', path)}`, but with `on_item_error: continue` an item of `{path[0]}` "
+                         "that failed has the output none: check that the output is set first, with {% if ... %} "
+                         "or `... if ... else none`")
 
     def _for_each(self, node_id: str) -> None:
         expression = self.nodes[node_id].for_each
@@ -489,7 +514,8 @@ class _Checker:
             return {"enum": value} if simple else ANY
         path = templates.pure_path(expression, expression=True)
         schema = self._resolve(path, None, roots) if path else None  # not node_id: for_each can't read its own `item`
-        return schemas.field_at(schema, [EACH]) if schema else ANY
+        found = schemas.field_at(schema, [EACH]) if schema else ANY
+        return found if isinstance(found, dict) else ANY  # a schema of true or false, as in `items: true`
 
     def _resolve(self, path: tuple[str, tuple], node_id: str | None = None, roots: dict | None = None) -> dict | None:
         """The schema at a (name, path), or None if it doesn't resolve."""

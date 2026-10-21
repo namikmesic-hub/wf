@@ -284,7 +284,11 @@ def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(t
             {% for r in results.build %}{{ r.index }} {{ r.item.title }} {{ r.output.done if r.output else 'failed' }}
             {{ r.harness }} {{ r.model }}{% endfor %}
             {{ results.build[0].item.titel }} {{ results.build[0].output.dun }} {{ results.build[0].cost }} {{ results.plan }}
-        echo: {needs: [build], command: "echo {{ results.build[0].index }} {{ results.build[0].output.done }} {{ results.build[0].item.title }}"}
+        echo:
+          needs: [build]
+          command: >-
+            echo {{ results.build[0].index }} {{ results.build[0].output.done if results.build[0].output else false }}
+            {{ results.build[0].item.title }}
         act: {needs: [build], access: full, instruction: "{{ results.build | tojson }}"}
     """))
     assert_problems(report, [
@@ -294,6 +298,54 @@ def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(t
         ("error", "nodes.sum.instruction", "`plan` isn't a for_each node, so `results.plan` doesn't exist"),
         ("warning", "nodes.echo.command", "output from `results` into the shell unquoted"),  # the item's title, not its index
         ("warning", "nodes.act.instruction", "reads output from `build`, which has `web: true`"),
+    ])
+
+
+def test_a_for_each_list_from_results_gives_its_items_the_schema_of_the_entries(tmp_path):
+    report = check(tmp_path, flow("""
+        plan:
+          needs: [start]
+          instruction: plan
+          output: {tasks: {type: array, maxItems: 3, items: {type: object, properties: {title: {type: string}}, required: [title], additionalProperties: false}}}
+        a: {needs: [plan], for_each: plan.tasks, instruction: "{{ item.title }}"}
+        b: {needs: [a], for_each: results.a, instruction: "{{ item.item.title }} {{ item.output.summary }}"}
+        c: {needs: [b], for_each: results.b, instruction: "{{ item.item.item.titel }}"}
+        d: {needs: [c], instruction: "{{ results.c[0].item.item.item.title }} {{ results.c[0].item.item.output.summry }}"}
+        each: {needs: [start], for_each: start.values, command: echo ok}
+    """, inputs="task: {type: string}\nvalues: {type: array, maxItems: 5, items: true}"))
+    assert_problems(report, [  # and no warning that results.a has no maxItems: a node's max_items bounds its results
+        ("error", "nodes.c.instruction", "`item.item.item.titel`: no field `titel` (fields: title)"),
+        ("error", "nodes.d.instruction", "`results.c[0].item.item.output.summry`: no field `summry` (fields: summary)"),
+    ])
+
+
+def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_warns(tmp_path):
+    report = check(tmp_path, flow("""
+        side: {needs: [start], command: x}
+        build: {needs: [start], for_each: "[1, 2]", on_item_error: continue, instruction: x, output: {done: {type: boolean}}}
+        all: {needs: [start], for_each: "[1, 2]", instruction: x, output: {done: {type: boolean}}}
+        sum:
+          needs: [build, all]
+          instruction: >-
+            {{ results.build[0].output.done }} {{ results.all[0].output.done }} {{ results.build[0].output }}
+            {% if results.build[1].output %}{{ results.build[1].output.done }}{% endif %}
+            {% for r in results.build %}{{ r.output.done if r.output else 'failed' }}{% endfor %}
+            {% for r in results.build if r.output %}{{ r.output.done }}{% endfor %}
+            {% for r in results.build | selectattr('output') %}{{ r.output.done }}{% endfor %}
+            {% for r in results.build %}{% if r.output is not none %}{{ r.output.done }}{% endif %}{% endfor %}
+            {% for r in results.build %}{{ r.output.done }}{% endfor %}
+        early:
+          needs: [side]
+          instruction: >-
+            {{ results.build[0].index }} {% if build %}{{ results.build[1].index }}{% endif %}
+            {% if results.build %}{{ results.build[1].index }}{% endif %} {% for r in results.build %}{{ r.index }}{% endfor %}
+    """))
+    assert_problems(report, [
+        ("warning", "nodes.sum.instruction", "reads `results.build[0].output.done`, but with `on_item_error: continue` an item "
+                                             "of `build` that failed has the output none: check that the output is set first"),
+        ("warning", "nodes.sum.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.early.instruction", "reads `results.build[0].index`, but `build` might not have run yet; "
+                                               "check first with {% if build %}"),
     ])
 
 

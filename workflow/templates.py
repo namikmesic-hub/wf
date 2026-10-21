@@ -340,7 +340,8 @@ class Ref:
     quoted: ...and that {{ }} ends with `| quote`.
     guarded: names that an enclosing check proves aren't none here, as in
       `{% if review %}` or `x.y if x else none`. "name.field" entries cover
-      checks like `{% if workspace.implement %}`.
+      checks like `{% if workspace.implement %}`. Each checked path is an entry
+      too, as guard() writes it, also when the check reads a loop variable.
     """
 
     name: str
@@ -479,31 +480,59 @@ def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
         node = node.node
 
 
-def _checks(test) -> tuple[frozenset, frozenset]:
-    """Names proven not none (when the test is true, when it is false)."""
+def guard(name: str, path: tuple) -> str:
+    """How Ref.guarded names a checked path: results.build[0].output, or results.build[*].output for any element."""
+    text = name
+    for step in path:
+        text += "[*]" if step is EACH else f"[{step}]" if isinstance(step, int) else f".{step}"
+    return text
+
+
+def _checks(test, scope: dict | None = None) -> tuple[frozenset, frozenset]:
+    """Names proven not none (when the test is true, when it is false). The checked path is one of them,
+    as guard() writes it, with a loop variable in `scope` read as the path it stands for."""
     chain = _chain(test)
     if chain:
         name, path, _ = chain
         tokens = {name.name} | ({f"{name.name}.{path[0]}"} if path and isinstance(path[0], str) else set())
+        local = (scope or {}).get(name.name)
+        if local is None:
+            tokens.add(guard(name.name, path))
+        elif local.name is not None:
+            tokens.add(guard(local.name, local.path + path))
         return frozenset(tokens), frozenset()
     if isinstance(test, nodes.Not):
-        yes, no = _checks(test.node)
+        yes, no = _checks(test.node, scope)
         return no, yes
     if isinstance(test, nodes.And):
-        return _checks(test.left)[0] | _checks(test.right)[0], frozenset()
+        return _checks(test.left, scope)[0] | _checks(test.right, scope)[0], frozenset()
     if isinstance(test, nodes.Or):
-        return frozenset(), _checks(test.left)[1] | _checks(test.right)[1]
+        return frozenset(), _checks(test.left, scope)[1] | _checks(test.right, scope)[1]
     if isinstance(test, nodes.Test) and test.name == "none":
-        return frozenset(), _checks(test.node)[0]
+        return frozenset(), _checks(test.node, scope)[0]
     if isinstance(test, nodes.Compare) and len(test.ops) == 1:
         op, right = test.ops[0].op, test.ops[0].expr
         if isinstance(right, nodes.Const) and right.value is None and op in ("eq", "ne"):
-            tokens = _checks(test.expr)[0]
+            tokens = _checks(test.expr, scope)[0]
             return (tokens, frozenset()) if op == "ne" else (frozenset(), tokens)
         left = _chain(test.expr)
         if left and left[1]:  # `x.a == 1` can only be true if x isn't none
-            return _checks(test.expr)[0], frozenset()
+            return _checks(test.expr, scope)[0], frozenset()
     return frozenset(), frozenset()
+
+
+def _kept(node, source: _Local) -> frozenset[str]:
+    """The fields that a loop's filters keep set on its elements, as guard() writes them: each element
+    of `results.build | selectattr("output")`, or of `| rejectattr("output", "none")`, has an output."""
+    found = set()
+    while isinstance(node, nodes.Filter) and node.name in _SAME_ELEMENTS and node.node is not None:
+        args = [arg.value for arg in node.args if isinstance(arg, nodes.Const)]
+        field = args[0] if args and len(args) == len(node.args) and isinstance(args[0], str) else None
+        keeps = (node.name == "selectattr" and len(args) == 1) or (node.name == "rejectattr" and args[1:] == ["none"])
+        if field and keeps and source.name is not None:
+            found.add(guard(source.name, source.path + (field,)))
+        node = node.node
+    return frozenset(found)
 
 
 def _target_names(target) -> list[str]:
@@ -540,9 +569,11 @@ class _Walker:
             for name in _target_names(node.target):
                 inner[name] = source if isinstance(node.target, nodes.Name) else _Local(sources=source.sources)
             inner["loop"] = _Local()
+            kept = guards | _kept(node.iter, source)
             if node.test is not None:
-                self.expr(node.test, inner, guards)
-            self.stmts(node.body, inner, guards)
+                self.expr(node.test, inner, kept)
+                kept |= _checks(node.test, inner)[0]  # the body runs only for the elements that pass the test
+            self.stmts(node.body, inner, kept)
             self.stmts(node.else_, scope, guards)
         elif isinstance(node, nodes.Assign):
             self.expr(node.node, scope, guards)
@@ -579,12 +610,12 @@ class _Walker:
 
     def _if(self, node, scope, guards) -> None:
         self.expr(node.test, scope, guards)
-        yes, no = _checks(node.test)
+        yes, no = _checks(node.test, scope)
         self.stmts(node.body, scope, guards | yes)
         ruled_out = no
         for branch in node.elif_:
             self.expr(branch.test, scope, guards | ruled_out)
-            yes, no = _checks(branch.test)
+            yes, no = _checks(branch.test, scope)
             self.stmts(branch.body, scope, guards | ruled_out | yes)
             ruled_out |= no
         self.stmts(node.else_, scope, guards | ruled_out)
@@ -606,16 +637,16 @@ class _Walker:
                     self.expr(child, scope, guards)
         elif isinstance(node, nodes.CondExpr):
             self.expr(node.test, scope, guards)
-            yes, no = _checks(node.test)
+            yes, no = _checks(node.test, scope)
             self.expr(node.expr1, scope, guards | yes, output, quoted)
             if node.expr2 is not None:
                 self.expr(node.expr2, scope, guards | no, output, quoted)
         elif isinstance(node, nodes.And):
             self.expr(node.left, scope, guards, output, quoted)
-            self.expr(node.right, scope, guards | _checks(node.left)[0], output, quoted)
+            self.expr(node.right, scope, guards | _checks(node.left, scope)[0], output, quoted)
         elif isinstance(node, nodes.Or):
             self.expr(node.left, scope, guards, output, quoted)
-            self.expr(node.right, scope, guards | _checks(node.left)[1], output, quoted)
+            self.expr(node.right, scope, guards | _checks(node.left, scope)[1], output, quoted)
         elif isinstance(node, nodes.Filter) and node.name in _NUMBERS:
             for child in node.iter_child_nodes():  # `x | length` writes a number, not x
                 self.expr(child, scope, guards)

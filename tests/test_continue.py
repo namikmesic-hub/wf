@@ -1066,6 +1066,25 @@ def test_a_template_that_reads_a_node_a_follow_up_clears_gets_a_warning(repo):
     assert [p.split(":", 2)[1].strip() for p in found if why in p] == ["nodes.review.command", "end.output.passed.value"]
 
 
+def test_a_template_that_reads_results_of_a_node_a_follow_up_clears_gets_a_warning(repo):
+    found = problems("""
+        version: 1
+        name: again
+        start: {input: {}}
+        follow_up: {to: check}
+        nodes:
+          implement: {needs: [start], command: "true"}
+          tests: {needs: [implement], for_each: "[1]", command: "true"}
+          check:
+            needs: [tests]
+            command: "echo {{ results.tests[0].output.exit_code }} {% if follow_up %}{{ follow_up.request | quote }}{% endif %}"
+            routes: [{to: implement, max: 1}, {to: end}]
+        end: {output: {}}
+    """)
+    why = "might not have run yet in a follow-up, which clears the outputs of the nodes that `follow_up.to` can lead to"
+    assert [p.split(":", 2)[1].strip() for p in found if why in p] == ["nodes.check.command"]  # results.tests is [] then
+
+
 # ---------- the workspaces that come back ----------
 
 
