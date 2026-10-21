@@ -167,7 +167,7 @@ def test_a_filter_reads_the_field_only_where_a_missing_field_can_make_it_fail(so
     "results.b | selectattr('output') | join(', ', attribute='output.title')",
 ])
 def test_a_filter_leaves_the_output_unguarded_exactly_where_a_failed_item_fails_the_render_or_writes_undefined(source):
-    template = "{{ " + source + " }}"  # rendered as an instruction is
+    template = "{{ " + source + " }}"  # as wf renders an instruction
     succeeded = {"index": 0, "item": "a", "output": {"done": True, "title": "A", "cost": 1, "kind": "k", "verdict": {"passed": True}},
                  "harness": None, "model": None}
     failed = {"index": 1, "item": "b", "output": None, "harness": None, "model": None}
