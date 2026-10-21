@@ -631,6 +631,39 @@ def test_an_item_that_succeeded_in_a_pass_that_failed_succeeded(runs_dir):
     assert [(row["item"], row["outcome"]) for row in store.final()["attempts"]] == [(0, "succeeded"), (1, "failed")]
 
 
+def test_the_event_that_fails_a_job_fails_its_last_attempt_when_no_event_of_the_attempt_says_how_it_ended(runs_dir):
+    def read(clock: str, node: str, number: int = 1, **index) -> dict:
+        return e(clock, "agent_tool", node, **{"pass": 1}, **index, attempt=number, harness="claude-code", tool="Read")
+
+    events = [  # an exception in an attempt writes no attempt_failed
+        e("23:00:00", "node_started", "plan", **{"pass": 1}), read("23:00:05", "plan"),
+        e("23:01:00", "node_failed", "plan", **{"pass": 1}, error="the wf tool linear isn't set up"),
+        e("23:10:00", "attempt_started", "plan", **{"pass": 1}, harness="claude-code", attempt=2),  # wf retry
+        read("23:10:05", "plan", 2), e("23:11:00", "node_finished", "plan", **{"pass": 1}),
+        e("23:11:00", "node_started", "check", **{"pass": 1}), read("23:11:05", "check"),
+        e("23:12:00", "node_failed", "check", **{"pass": 1}, error="routes: unknown name x"),
+        e("23:12:00", "node_started", "note", **{"pass": 1}), read("23:12:05", "note"),
+        e("23:13:00", "node_failed", "note", **{"pass": 1}, error="can't write output.json: [Errno 28] No space left"),
+        e("23:20:00", "node_started", "review", **{"pass": 1}, items=2),
+        read("23:20:05", "review", index=0), read("23:20:06", "review", index=1),
+        e("23:21:00", "item_failed", "review", index=1, error="RuntimeError: the session closed twice"),  # on_item_error: continue
+        e("23:21:00", "node_finished", "review", **{"pass": 1}),
+        e("23:30:00", "node_started", "fix", **{"pass": 1}, items=2),
+        read("23:30:05", "fix", index=0), read("23:30:06", "fix", index=1),
+        e("23:31:00", "node_failed", "fix", **{"pass": 1}, error="item 0: OSError: can't write session.json")]  # on_item_error: fail
+    store = Memory()
+    export.export(of(folder(runs_dir / REPO, EVENTED, {"events.jsonl": lines(events)}, status="failed")), store)
+    assert [(row["node"], row["item"], row["attempt"], row["outcome"], row["error"]) for row in store.final()["attempts"]] == [
+        ("check", -1, 1, "succeeded", ""),  # its routes failed after its job succeeded
+        ("fix", 0, 1, "failed", "OSError: can't write session.json"),
+        ("fix", 1, 1, "succeeded", ""),
+        ("note", -1, 1, "succeeded", ""),  # its job failed after the attempt succeeded
+        ("plan", -1, 1, "failed", "the wf tool linear isn't set up"),
+        ("plan", -1, 2, "succeeded", ""),
+        ("review", 0, 1, "succeeded", ""),
+        ("review", 1, 1, "failed", "RuntimeError: the session closed twice")]
+
+
 def test_the_spending_of_a_pass_in_a_sub_workflow_counts_once_in_its_run(runs_dir):
     events = [e("23:00:00", "node_started", "build", **{"pass": 1}), e("23:00:00", "node_started", "build/compile", **{"pass": 1}),
               e("23:00:05", "agent_tool", "build/compile", **{"pass": 1}, attempt=1, harness="codex", tool="exec", detail="make"),
@@ -653,11 +686,14 @@ def test_a_trace_that_starts_with_a_retry_of_a_run_from_before_the_trace_keeps_t
                 "started": "2026-10-20T09:00:01.000+02:00", "ended": "2026-10-20T09:00:31.000+02:00", "duration_s": 30.0,
                 "outcome": "succeeded", "usage": used(400, 0.1, 100, 100, 200, 0, 0)},
                {"time": "2026-10-20T09:01:00.000+02:00", "kind": "run_stopped", "id": "run", "status": "succeeded"}]
+    override = {"time": "2026-10-20T08:59:58+02:00", "event": "override", "node": "review", "index": 0, "harness": "codex",
+                "model": "gpt-6.1-sol", "effort": None}  # `wf retry --model` writes it before the trace starts
     later = [{"time": "2026-10-20T09:00:00+02:00", "event": "node_started", "node": "review", "pass": 1, "items": 1},
              {"time": "2026-10-20T09:00:31+02:00", "event": "node_finished", "node": "review", "pass": 1, "cost_usd": 0.1,
               "tokens": 400},
              {"time": "2026-10-20T09:01:00+02:00", "event": "run_finished", "status": "succeeded"}]  # today's wf writes them too
-    path = folder(runs_dir / REPO, EVENTED, {"events.jsonl": lines(EVENTS[:10] + later), "trace.jsonl": lines(retried)})
+    path = folder(runs_dir / REPO, EVENTED, {"events.jsonl": lines(EVENTS[:10] + [override] + later),
+                                             "trace.jsonl": lines(retried)})
     store = Memory()
     export.export(of(path), store)
     found = store.final()
@@ -1022,6 +1058,33 @@ def test_a_run_folder_that_cant_be_read_doesnt_stop_the_others(repo, stores, cap
     assert captured.out == f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes\n"
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads and writes any file")
+def test_a_run_folder_that_wf_cant_look_into_is_unreadable_also_when_wf_metrics_export_lists_the_runs(repo, stores, runs_dir,
+                                                                                                         capsys):
+    parent = runs.runs_folder(repo)
+    traced_folder(parent), traced_folder(runs_dir / REPO)
+    hidden, other = evented_folder(parent), evented_folder(runs_dir / "other-0123456789ab")
+    exported = f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes\n"
+    all_repos = ["metrics", "export", "--all-repos", "--runs-dir", str(runs_dir)]
+    hidden.chmod(0), other.chmod(0)
+    try:
+        for args, out in [([], exported), ([EVENTED, TRACED], f"{TRACED}: nothing new\n")]:
+            assert cli.main(["metrics", "export", *args]) == 1
+            captured = capsys.readouterr()
+            assert (captured.out, captured.err) == (
+                out, f"wf metrics export: run {EVENTED}: can't read {hidden / 'trace.jsonl'}: Permission denied\n")
+        assert cli.main(all_repos) == 1
+        captured = capsys.readouterr()
+        assert (captured.out, captured.err) == (
+            exported, f"wf metrics export: run {EVENTED}: can't read {other / 'trace.jsonl'}: Permission denied\n")
+        (runs_dir / REPO).chmod(0)  # wf can't list the runs of a repo: it can't name them
+        assert cli.main(all_repos) == 1
+        assert capsys.readouterr().err == f"wf metrics export: can't list the runs in {runs_dir / REPO}: Permission denied\n"
+    finally:
+        for path in (hidden, other, runs_dir / REPO):
+            path.chmod(0o755)
+
+
 FLOW = """
 version: 1
 name: flow
@@ -1146,6 +1209,10 @@ def test_a_backfill_into_clickhouse_gives_the_expected_rows_and_a_second_export_
         assert rows_of(empty, table) == expected[table], table
     written = {table: len(rows_of(empty, table, final=False)) for table in export.WRITTEN}
     assert written == {"runs": 2, "attempts": 16, "turns": 3, "tool_calls": 11, "routes": 4}  # each row once
+    named = "replaceRegexpAll(node, '#[0-9]+|[.]a[0-9]+', '')"  # the name that events use
+    assert query(empty, f"SELECT DISTINCT {named} AS name FROM wf.attempts ORDER BY name").split() == [
+        "build", "build/compile", "implement", "review", "tests"]
+    assert query(empty, f"SELECT {named} FROM (SELECT 'build#2[3].a1/implement' AS node)") == "build[3]/implement\n"
 
     assert cli.main(backfill) == 0
     assert sorted(capsys.readouterr().out.splitlines()) == [f"{EVENTED}: nothing new", f"{TRACED}: nothing new"]

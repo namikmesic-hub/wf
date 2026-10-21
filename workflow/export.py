@@ -92,6 +92,8 @@ NO_ITEM = -1
 WRITTEN = ("runs", "attempts", "turns", "tool_calls", "routes")  # the tables that the export writes
 COUNTS = ("tokens", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 CALL = re.compile(r"(.+)\.(t\d+\.c\d+)")  # a tool call's trace id: its attempt's id, and its own id in the attempt
+ITEM_FAILED = re.compile(r"item (\d+): (.*)", re.S)  # node_failed when an item failed (on_item_error: fail)
+AFTER_SUCCESS = ("routes: ", "can't write output.json: ")  # the errors of a pass or job whose last attempt succeeded
 # ClickHouse's error codes for a table, column or type that isn't what a request expects, and for a value
 # that doesn't fit its column. ClickHouse answers them with HTTP 400, 404 or 500.
 SCHEMA_CODES = {"6", "8", "16", "27", "47", "53", "60", "81", "117"}
@@ -265,6 +267,50 @@ def differences(wanted: dict, tables: dict, columns: dict, database: str) -> lis
             elif given != kind:
                 found.append(f"{database}.{name}.{column} is {given}, not {kind}")
     return found
+
+
+# ---------- the runs ----------
+
+
+def runs_in(folder: Path, every_repo: bool = False) -> list[Run]:
+    """The runs in the runs folder of a repo, or with every_repo, the runs in the folder of each repo in a runs
+    folder, oldest first. A run is a folder with a workflow/manifest.json. A folder that wf can't look into is a
+    run too, so that export() says that it is unreadable, and such folders come first. Raises OSError when wf
+    can't list a folder of runs."""
+    if not folder.is_dir():
+        return []
+    found = []
+    for parent in _folders(folder) if every_repo else [folder]:
+        for path in _folders(parent):
+            made = _made(path)
+            if made is not None:
+                found.append((made, path))
+    return [_run_at(path) for _, path in sorted(found)]
+
+
+def _folders(folder: Path) -> list[Path]:
+    return [path for path in folder.iterdir() if not path.name.startswith(".") and path.is_dir()]
+
+
+def _made(folder: Path) -> float | None:
+    """When wf made the run in `folder`: the time of its workflow/manifest.json. 0 when wf can't look into the
+    folder, and None when the folder holds no run."""
+    try:
+        found = (folder / "workflow" / "manifest.json").stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError:
+        return 0.0
+    return found.st_mtime if stat.S_ISREG(found.st_mode) else None
+
+
+def _run_at(folder: Path) -> Run:
+    """The run in `folder`, with the repo that its run.json names. export() doesn't need the repo, so a run
+    whose repo wf can't tell has its folder as its repo."""
+    try:
+        return Run.at(folder)
+    except ValueError:
+        return Run(folder.name, folder, folder)
 
 
 # ---------- a run folder ----------
@@ -482,14 +528,15 @@ class _Trace:
 
     def _before(self, time: str) -> None:
         """The rows of the events that a wf from before the trace wrote, for a trace that starts in the
-        middle of the run, at `time`."""
+        middle of the run, at `time`. Today's `wf retry --model` writes its `override` events just before
+        the trace, so they aren't events of the run before it."""
         path = self.run.dir / EVENTS
         if not path.is_file():
             return
         cut, events = _moment(time).replace(microsecond=0), []  # events have whole seconds
         for event, _ in _lines(path, 0):
             moment = _moment((event or {}).get("time"))
-            if moment is not None and moment < cut:
+            if moment is not None and moment < cut and event.get("event") != "override":
                 events.append(event)
         rows = _events(self.run, events)
         for table in ("attempts", "tool_calls", "routes"):
@@ -673,9 +720,12 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
     - attempts: each attempt that an event names, by node, pass, item and attempt. It starts at its
       first event, and ends at its `session_ended`, its failure, or else the end of its pass, when the
       node has no items. It failed with `attempt_failed` (timed_out, when the node's timeout ended it),
-      was unavailable with `harness_unavailable`, and succeeded when its pass ended without either.
-      Its tokens and cost are those of its last `agent_usage`. When the node has no items, and the
-      events of a pass have no `agent_usage`, the last agent attempt gets the pass's (`node_finished`).
+      and was unavailable with `harness_unavailable`. An exception in an attempt writes neither, so the
+      last attempt of a job so far also failed when `item_failed`, or `node_failed` for the job or its
+      item, says that the job failed, but not in its routes or as it wrote output.json. Any other
+      attempt succeeded when its pass ended. Its tokens and cost are those of its last `agent_usage`.
+      When the node has no items, and the events of a pass have no `agent_usage`, the last agent
+      attempt gets the pass's (`node_finished`).
     - tool_calls: each `agent_tool`, as the call e1, e2, ... of its attempt, in turn 0, with no duration.
     - routes: each `route`, in the pass of its node that started last.
     """
@@ -699,6 +749,12 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
             started[node] = pass_no
         elif kind in ("node_finished", "node_failed") and isinstance(pass_no, int):
             passes[(node, pass_no)] = event
+            if kind == "node_failed":
+                error = _word(event.get("error"))
+                named = ITEM_FAILED.fullmatch(error)
+                _failed(attempts, (node, pass_no, int(named[1]) if named else NO_ITEM), named[2] if named else error)
+        elif kind == "item_failed" and node in started and isinstance(event.get("index"), int):
+            _failed(attempts, (node, started[node], event["index"]), _word(event.get("error")))
         elif kind == "route" and node in started:
             taken, to = event.get("route"), event.get("to")
             routes.append({"run_id": run.id, "node": node, "pass": started[node], "time": _utc(time),
@@ -745,6 +801,16 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
             "duration_s": _seconds(first, ended), "cost_usd": round(sum(used["cost_usd"] for used in spent), 6),
             "tokens": sum(used["tokens"] for used in spent), "source": "events"})
     return rows
+
+
+def _failed(attempts: dict, job: tuple, error: str) -> None:
+    """The job (node, pass, item) failed with `error`. So did its last attempt so far, when no event of that
+    attempt says how it ended, and the job didn't fail after it succeeded."""
+    numbers = [key[3] for key in attempts if key[:3] == job]
+    if numbers and not error.startswith(AFTER_SUCCESS):
+        seen = attempts[(*job, max(numbers))]
+        if "outcome" not in seen:
+            seen["outcome"], seen["error"] = "failed", error
 
 
 def _seen(seen: dict, kind: str, time: str, event: dict) -> None:

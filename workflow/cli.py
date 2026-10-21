@@ -802,7 +802,7 @@ def _metrics_command(commands, runs_dir: dict) -> None:
     exporting.add_argument("run_ids", nargs="*", metavar="run-id")
     exporting.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
     exporting.add_argument("--runs-dir", **runs_dir)
-    exporting.set_defaults(handler=_metrics_export, workflow=None)
+    exporting.set_defaults(handler=_metrics_export)
 
 
 def _metrics_export(args) -> int:
@@ -821,18 +821,10 @@ def _metrics_export(args) -> int:
               f"set enabled = true, and url to {config.KEYS['metrics.url'].kind.allowed}", file=sys.stderr)
         return 1
     folder = runs.runs_folder(Path.cwd(), args.runs_dir)
-    try:
-        if args.all_repos:
-            folder = folder.parent
-            chosen = list(reversed(ui.Source(Path.cwd(), args.runs_dir, every_repo=True).runs().values()))  # oldest first
-        elif args.run_ids:
-            chosen = _chosen(args, None)
-            if chosen is None:
-                return 1
-        else:
-            chosen = runs.all_runs(Path.cwd(), args.runs_dir)
-    except OSError as error:  # a run folder that wf can't look into
-        print(f"wf metrics export: can't list the runs in {folder}: {error.strerror or error}", file=sys.stderr)
+    if args.all_repos:
+        folder = folder.parent
+    chosen = _runs_to_export(args, folder)
+    if chosen is None:
         return 1
     if not chosen:
         print(f"wf metrics export: no runs in {folder}")
@@ -856,6 +848,23 @@ def _metrics_export(args) -> int:
             return 1
         print(f"{run.id}: " + (", ".join(_count(count, ROWS[table]) for table, count in written.items()) or "nothing new"))
     return 1 if failed else 0
+
+
+def _runs_to_export(args, folder: Path) -> list[runs.Run] | None:
+    """The runs named, once each and in their order, or else each run in `folder` (export.runs_in). None, after
+    it said why, when wf can't list `folder` or a run named isn't in it."""
+    try:
+        listed = export.runs_in(folder, every_repo=args.all_repos)
+    except OSError as error:
+        print(f"wf metrics export: can't list the runs in {error.filename or folder}: {error.strerror or error}",
+              file=sys.stderr)
+        return None
+    named = {run.id: run for run in listed}
+    for run_id in args.run_ids:
+        if run_id not in named:
+            print(f"wf metrics export: no run `{run_id}` in {folder}", file=sys.stderr)
+            return None
+    return [named[run_id] for run_id in dict.fromkeys(args.run_ids)] if args.run_ids else listed
 
 
 if __name__ == "__main__":  # `python -m workflow.cli`, as detached runs start it
