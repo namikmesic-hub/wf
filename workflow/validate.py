@@ -472,17 +472,18 @@ class _Checker:
         """A field of an entry's output, from a node with on_item_error: continue, where no check proves
         the output is set: an item that failed has the output none, and the template then fails. The
         entry is one of `results.<node>`, or the `item` of a for_each over it. The `item` of an entry
-        is an entry too, when the for_each list of its node was results of another node."""
+        is an entry too, when the for_each list of its node was results of another node. A for_each
+        list whose filters keep the output set, as `| selectattr("output")` does, gives no such item."""
         path = ref.path or ()
         if ref.name == "results" and len(path) > 2 and path[0] in self.nodes:
-            owner, at = path[0], 2
+            (owner, kept), at = (path[0], frozenset()), 2
         elif ref.name == "item" and node_id is not None:
-            owner, at = self._listed_results(node_id), 0
+            (owner, kept), at = self._listed_results(node_id), 0
         else:
             return
         while owner is not None and at < len(path) and path[at] == "item":
-            owner, at = self._listed_results(owner), at + 1
-        if owner is None or len(path) < at + 2 or path[at] != "output":
+            (owner, kept), at = self._listed_results(owner), at + 1
+        if owner is None or len(path) < at + 2 or path[at] != "output" or ("output",) in kept:
             return
         entry = templates.guard(ref.name, path[:at + 1])
         if (self.wf.setting(owner, "on_item_error") != "continue" or entry in ref.guarded
@@ -493,11 +494,15 @@ class _Checker:
                          "that failed has the output none: check that the output is set first, with {% if ... %} "
                          "or `... if ... else none`")
 
-    def _listed_results(self, node_id: str) -> str | None:
-        """The node whose results.<node> the for_each list of `node_id` is, so that its items are their entries."""
-        listed = templates.pure_path(self.nodes[node_id].for_each or "", expression=True)
-        node = listed[1][0] if listed and listed[0] == "results" and len(listed[1]) == 1 else None
-        return node if node in self.nodes and self.nodes[node].for_each is not None else None
+    def _listed_results(self, node_id: str) -> tuple[str | None, frozenset]:
+        """The node whose results.<node> the for_each list of `node_id` is, also through filters that keep
+        its entries, such as `| list`, so that its items are their entries. Also the fields of an entry
+        that those filters keep set, as paths in the entry."""
+        name, element, kept = templates.elements_of(self.nodes[node_id].for_each or "") or (None, (), frozenset())
+        node = element[0] if name == "results" and len(element) == 2 else None
+        if node not in self.nodes or self.nodes[node].for_each is None:
+            return None, frozenset()
+        return node, frozenset(path[2:] for path in kept)
 
     def _for_each(self, node_id: str) -> None:
         expression = self.nodes[node_id].for_each
@@ -528,7 +533,8 @@ class _Checker:
         if is_constant:
             simple = isinstance(value, list) and value and all(isinstance(v, (str, int, float, bool)) for v in value)
             return {"enum": value} if simple else ANY
-        path = templates.pure_path(expression, expression=True)
+        listed = templates.elements_of(expression)  # a plain path, also through filters that keep its elements
+        path = (listed[0], listed[1][:-1]) if listed else None
         schema = self._resolve(path, None, roots) if path else None  # not node_id: for_each can't read its own `item`
         found = schemas.field_at(schema, [EACH]) if schema else ANY
         return found if isinstance(found, dict) else ANY  # a schema of true or false, as in `items: true`

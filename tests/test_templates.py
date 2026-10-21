@@ -123,27 +123,33 @@ def test_a_filter_that_reads_a_field_of_each_element_reads_its_path():
     assert refs("{{ plan.tasks | sum(attribute='size') }} {{ plan.tasks | sort(attribute='rank') | list }}") == [
         ("plan", ("tasks",)), ("plan", ("tasks", EACH, "size")), ("plan", ("tasks",)), ("plan", ("tasks", EACH, "rank"))]
     assert refs("{{ plan.tasks | map(attribute='x', default='') | list }} {{ plan.tasks | map('upper') | list }}") == [
-        ("plan", ("tasks",)), ("plan", ("tasks",))]  # a default for a missing field, or no field
+        ("plan", ("tasks",)), ("plan", ("tasks", EACH, "x")), ("plan", ("tasks",))]  # with a default too, but map('upper') reads no field
 
 
-@pytest.mark.parametrize("source, field", [
-    ("results.b | sum('output.cost')", "cost"),  # the field without its keyword `attribute`
-    ("results.b | unique(false, 'output.cost')", "cost"),
-    ("results.b | sort(false, false, 'output.cost')", "cost"),
-    ("results.b | sort('output.cost')", None),  # the first argument of sort is `reverse`
-    ("results.b | map(attribute='output.done', default=none)", "done"),  # Jinja ignores a default of none
-    ("results.b | map(attribute='output.done', default=start.done)", "done"),  # which can be none
-    ("results.b | map(attribute='output.done', default=[])", None),
-    ("results.b | groupby('output.kind', none)", "kind"),
-    ("results.b | groupby('output.kind', 'other')", None),  # the default without its keyword
-    ("results.b | selectattr('output.done')", "done"),
-    ("results.b | selectattr('output.done', 'equalto', true)", "done"),
-    ("results.b | join(', ', attribute='output.title')", "title"),
-    ("results.b | join(', ', 'output.title')", "title"),  # the field after the separator, without its keyword
+@pytest.mark.parametrize("source, fields, guarded", [
+    ("results.b | sum('output.cost')", ["cost"], False),  # the field without its keyword `attribute`
+    ("results.b | unique(false, 'output.cost')", ["cost"], False),
+    ("results.b | sort(false, false, 'output.cost')", ["cost"], False),
+    ("results.b | sort(attribute='output.cost,output.title')", ["cost", "title"], False),  # sort takes several fields
+    ("results.b | sort('output.cost')", [], False),  # the first argument of sort is `reverse`
+    ("results.b | map(attribute='output.done', default=none)", ["done"], False),  # Jinja ignores a default of none
+    ("results.b | map(attribute='output.done', default=start.done)", ["done"], False),  # which can be none
+    ("results.b | map(attribute='output.done', default=[])", ["done"], True),  # read for the schema, but it can't fail
+    ("results.b | groupby('output.kind', none)", ["kind"], False),
+    ("results.b | groupby('output.kind', 'other')", ["kind"], True),  # the default without its keyword
+    ("results.b | selectattr('output.done')", ["done"], False),
+    ("results.b | selectattr('output.done', 'equalto', true)", ["done"], False),
+    ("results.b | join(', ', attribute='output.title')", ["title"], False),
+    ("results.b | join(', ', 'output.title')", ["title"], False),  # the field after the separator, without its keyword
 ])
-def test_a_filter_reads_the_field_only_where_a_missing_field_can_make_it_fail(source, field):
-    reads = [path for name, path in refs(source, expression=True) if name == "results" and len(path) > 1]
-    assert reads == ([("b", EACH, "output", field)] if field else [])
+def test_a_filter_reads_the_fields_it_names_and_guards_them_where_a_missing_field_cant_make_it_fail(source, fields, guarded):
+    reads = [r for r in templates.references(source, expression=True) if r.name == "results" and len(r.path) > 1]
+    assert [r.path for r in reads] == [("b", EACH, "output", field) for field in fields]
+    assert all(("results.b[*].output" in r.guarded) is guarded for r in reads)
+
+
+def test_a_field_step_that_isnt_a_decimal_number_stays_a_name():
+    assert refs("results.b | map(attribute='output.²') | list", expression=True)[-1] == ("results", ("b", EACH, "output", "²"))
 
 
 @pytest.mark.parametrize("source", [
@@ -165,6 +171,13 @@ def test_a_filter_reads_the_field_only_where_a_missing_field_can_make_it_fail(so
     "results.b | rejectattr('output.verdict.passed', 'none') | list",
     "results.b | join(', ', attribute='output.title')",
     "results.b | selectattr('output') | join(', ', attribute='output.title')",
+    "results.b | sort(attribute='output.cost,output.title') | list",
+    "results.b | map(attribute='output') | map(attribute='done') | list",  # each element of the first map is an output
+    "results.b | selectattr('output') | map(attribute='output') | map(attribute='done') | list",
+    "results.b | rejectattr('output', 'sameas', none) | map(attribute='output.done') | list",  # tests that let no none through
+    "results.b | selectattr('output', 'ne', none) | map(attribute='output.done') | list",
+    "results.b | selectattr('output', 'mapping') | map(attribute='output.done') | list",
+    "results.b | selectattr('output', 'defined') | map(attribute='output.done') | list",  # a none output is defined
 ])
 def test_a_filter_leaves_the_output_unguarded_exactly_where_a_failed_item_fails_the_render_or_writes_undefined(source):
     template = "{{ " + source + " }}"  # as wf renders an instruction
@@ -244,6 +257,12 @@ def read_of(source: str, last: str = "done") -> Ref:
     "{% for r in results.b %}{% set o = r.output %}{% if r.output %}{{ o.done }}{% endif %}{% endfor %}",
     "{% for r in results.b %}{% if r.output %}{% for p in r.output.parts %}{{ p.done }}{% endfor %}{% endif %}{% endfor %}",
     "{{ results.b | selectattr('output') | map(attribute='output.done') | list }}",
+    "{% for r in results.b | rejectattr('output', 'sameas', none) %}{{ r.output.done }}{% endfor %}",
+    "{% for r in results.b | selectattr('output', 'ne', none) %}{{ r.output.done }}{% endfor %}",
+    "{% for r in results.b | selectattr('output', 'mapping') %}{{ r.output.done }}{% endfor %}",
+    "{% for o in results.b | selectattr('output') | map(attribute='output') %}{{ o.done }}{% endfor %}",
+    "{% for o in results.b | map(attribute='output') %}{% if o %}{{ o.done }}{% endif %}{% endfor %}",
+    "{% for o in results.b | map(attribute='output') | select %}{{ o.done }}{% endfor %}",
 ])
 def test_a_check_guards_the_path_it_reads_also_through_a_loop_variable(source):
     read = read_of(source)
@@ -261,6 +280,8 @@ def test_a_check_guards_the_path_it_reads_also_through_a_loop_variable(source):
     "{% for r in results.b %}{% if r.output %}{{ results.b[-1].output.done }}{% endif %}{% endfor %}",
     "{% if results.b[start.i].output %}{{ results.b[start.j].output.done }}{% endif %}",
     "{{ results.b | map(attribute='output.done') | list }}",
+    "{% for o in results.b | map(attribute='output') %}{{ o.done }}{% endfor %}",  # each o is an output
+    "{% for r in results.b | selectattr('output', 'none') %}{{ r.output.done }}{% endfor %}",  # only the none ones
 ])
 def test_a_check_of_something_else_leaves_the_path_unguarded(source):
     read = read_of(source)

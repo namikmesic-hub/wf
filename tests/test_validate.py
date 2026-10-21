@@ -322,6 +322,23 @@ def test_a_for_each_list_from_results_gives_its_items_the_schema_of_the_entries(
     ])
 
 
+def test_a_read_through_the_item_of_an_entry_or_a_filtered_list_of_entries_warns_too(tmp_path):
+    report = check(tmp_path, flow("""
+        build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, output: {done: {type: boolean}}}
+        pick: {needs: [build], for_each: results.build, instruction: x}
+        again: {needs: [pick], for_each: results.pick, instruction: "{{ item.item.output.done }}"}
+        last: {needs: [pick], instruction: "{{ results.pick[0].item.output.done }}"}
+        listed: {needs: [build], for_each: "results.build | list", instruction: "{{ item.output.done }}"}
+        kept: {needs: [build], for_each: "results.build | selectattr('output') | list", instruction: "{{ item.output.done }} {{ item.output.dun }}"}
+    """))
+    assert_problems(report, [  # the item of each entry of pick is an entry of build
+        ("warning", "nodes.again.instruction", "reads `item.item.output.done`, but with `on_item_error: continue` an item of `build`"),
+        ("warning", "nodes.last.instruction", "reads `results.pick[0].item.output.done`, but with `on_item_error: continue` an item of `build`"),
+        ("warning", "nodes.listed.instruction", "reads `item.output.done`, but with `on_item_error: continue` an item of `build`"),
+        ("error", "nodes.kept.instruction", "`item.output.dun`: no field `dun` (fields: done)"),  # and no warning: each output is set
+    ])
+
+
 def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_warns(tmp_path):
     # Each read is the only one in its template, as wf validate warns once for each template and entry or node
     after = {  # these run after build and all
@@ -353,6 +370,8 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         "if_ran": "{% if build %}{{ results.build[1].index }}{% endif %}",
         "if_any": "{% if results.build %}{{ results.build[1].index }}{% endif %}",
         "in_loop": "{% for r in results.build %}{{ r.index }}{% endfor %}",
+        "join_early": "{{ build | join(', ', attribute='done') }}",  # join fails on none
+        "map_early": "{{ build | map(attribute='done') | list }}",  # where map gives nothing
     }
     nodes = ["side: {needs: [start], command: x}",
              "build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, "
@@ -378,6 +397,7 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
                                                "check first with {% if build %}"),
         ("warning", "nodes.early_last.instruction", "reads `results.build[-1].index`, but `build` might not have run yet"),
         ("warning", "nodes.early_none.instruction", "reads `results.build[1].index`, but `build` might not have run yet"),
+        ("warning", "nodes.join_early.instruction", "reads `build[].done`, but `build` might not have run yet"),
         ("warning", "nodes.pair.instruction", "reads `results.build[index].index`, but `build` might not have run yet"),
         ("warning", "nodes.pick.instruction", "reads `item.output.done`, but with `on_item_error: continue` an item of "
                                               "`build` that failed has the output none"),
