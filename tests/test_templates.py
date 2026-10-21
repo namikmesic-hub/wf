@@ -147,24 +147,37 @@ def test_a_filter_reads_the_field_only_where_a_missing_field_can_make_it_fail(so
 
 
 @pytest.mark.parametrize("source", [
+    "results.b | map(attribute='output.done') | list",  # a list writes the undefined field of a none output as Undefined
+    "results.b | map(attribute='output.done', default=none) | list",
+    "results.b | map(attribute='output.done', default=false) | list",
+    "results.b | selectattr('output') | map(attribute='output.done') | list",
+    "results.b | sum('output.cost')",
+    "results.b | sort(attribute='output.cost') | list",
+    "results.b | unique(attribute='output.kind') | list",
+    "results.b | min(attribute='output.cost')",
+    "results.b | max(attribute='output.cost')",
+    "results.b | groupby('output.kind') | list",
+    "results.b | groupby('output.kind', 'other') | list",
+    "results.b | selectattr('output.done') | list",
     "results.b | selectattr('output.done', 'defined') | list",  # a type test takes the undefined field of a none output
     "results.b | rejectattr('output.done', 'none') | list",
     "results.b | selectattr('output.verdict.passed', 'defined') | list",  # but Jinja can't read passed of an undefined verdict
     "results.b | rejectattr('output.verdict.passed', 'none') | list",
-    "results.b | selectattr('output.done') | list",
     "results.b | join(', ', attribute='output.title')",
     "results.b | selectattr('output') | join(', ', attribute='output.title')",
 ])
-def test_a_filter_leaves_the_output_unguarded_exactly_where_a_failed_item_makes_it_fail(source):
-    entries = [{"index": 0, "item": "a", "output": {"done": True, "title": "A", "verdict": {"passed": True}}, "harness": None, "model": None},
-               {"index": 1, "item": "b", "output": None, "harness": None, "model": None}]
+def test_a_filter_leaves_the_output_unguarded_exactly_where_a_failed_item_fails_the_render_or_writes_undefined(source):
+    template = "{{ " + source + " }}"  # rendered as an instruction is
+    succeeded = {"index": 0, "item": "a", "output": {"done": True, "title": "A", "cost": 1, "kind": "k", "verdict": {"passed": True}},
+                 "harness": None, "model": None}
+    failed = {"index": 1, "item": "b", "output": None, "harness": None, "model": None}
+    assert "Undefined" not in templates.render(template, {"results": {"b": [succeeded, succeeded]}})
     try:
-        templates.evaluate(source, {"results": {"b": entries}})
-        fails = False
+        broken = "Undefined" in templates.render(template, {"results": {"b": [succeeded, failed]}})
     except TemplateError:
-        fails = True
-    (read,) = [r for r in templates.references(source, expression=True) if r.name == "results" and len(r.path) > 3]
-    assert (templates.guard("results", read.path[:3]) not in read.guarded) is fails
+        broken = True
+    reads = [r for r in templates.references(template) if r.name == "results" and len(r.path) > 3]
+    assert any(templates.guard("results", r.path[:3]) not in r.guarded for r in reads) is broken
 
 
 def test_a_position_that_the_template_computes_is_kept_apart_from_a_loop():
