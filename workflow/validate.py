@@ -439,7 +439,7 @@ class _Checker:
         if name == "run" and ref.path[:1] == ("tokens",):
             self.token_refs.append(where)
         self._might_not_have_run(where, ref, node_id, context)
-        self._failed_item(where, ref, node_id)
+        self._failed_item(where, ref)
 
     def _might_not_have_run(self, where: str, ref: Ref, node_id: str | None, context: str) -> None:
         name, path = ref.name, ref.path
@@ -468,41 +468,21 @@ class _Checker:
                          f"{{% if {target} %}}...{{% endif %}}, or in a single value `{_dotted(name, path)} if {target} else none`"
                          + (" (fails the run if it hasn't)" if context == "end" else ""))
 
-    def _failed_item(self, where: str, ref: Ref, node_id: str | None) -> None:
-        """A field of an entry's output, from a node with on_item_error: continue, where no check proves
-        the output is set: an item that failed has the output none, and the template then fails. The
-        entry is one of `results.<node>`, or the `item` of a for_each over it. The `item` of an entry
-        is an entry too, when the for_each list of its node was results of another node. A for_each
-        list whose filters keep the output set, as `| selectattr("output")` does, gives no such item."""
+    def _failed_item(self, where: str, ref: Ref) -> None:
+        """A field of an entry's output that the template reads at a position of `results.<node>` itself,
+        as results.build[0].output.done, from a node with on_item_error: continue, where no check of that
+        output comes first: an item that failed has the output none, and the template then fails.
+        A read through a name or a filter isn't checked."""
         path = ref.path or ()
-        if ref.name == "results" and len(path) > 2 and path[0] in self.nodes:
-            (owner, kept), at = (path[0], frozenset()), 2
-        elif ref.name == "item" and node_id is not None:
-            (owner, kept), at = self._listed_results(node_id), 0
-        else:
+        if ref.name != "results" or ref.local or len(path) < 4 or path[0] not in self.nodes or path[2] != "output":
             return
-        while owner is not None and at < len(path) and path[at] == "item":
-            (owner, kept), at = self._listed_results(owner), at + 1
-        if owner is None or len(path) < at + 2 or path[at] != "output" or ("output",) in kept:
-            return
-        entry = templates.guard(ref.name, path[:at + 1])
-        if (self.wf.setting(owner, "on_item_error") != "continue" or entry in ref.guarded
-                or (where, entry) in self._warned):
+        entry = templates.guard(ref.name, path[:3])
+        if self.wf.setting(path[0], "on_item_error") != "continue" or entry in ref.guarded or (where, entry) in self._warned:
             return
         self._warned.add((where, entry))
-        self.warn(where, f"reads `{_dotted(ref.name, path)}`, but with `on_item_error: continue` an item of `{owner}` "
+        self.warn(where, f"reads `{_dotted(ref.name, path)}`, but with `on_item_error: continue` an item of `{path[0]}` "
                          "that failed has the output none: check that the output is set first, with {% if ... %} "
                          "or `... if ... else none`")
-
-    def _listed_results(self, node_id: str) -> tuple[str | None, frozenset]:
-        """The node whose results.<node> the for_each list of `node_id` is, also through filters that keep
-        its entries, such as `| list`, so that its items are their entries. Also the fields of an entry
-        that those filters keep set, as paths in the entry."""
-        name, element, kept = templates.elements_of(self.nodes[node_id].for_each or "") or (None, (), frozenset())
-        node = element[0] if name == "results" and len(element) == 2 else None
-        if node not in self.nodes or self.nodes[node].for_each is None:
-            return None, frozenset()
-        return node, frozenset(path[2:] for path in kept)
 
     def _for_each(self, node_id: str) -> None:
         expression = self.nodes[node_id].for_each

@@ -41,11 +41,10 @@ have run, unquoted agent output in shell commands.
 """
 
 import contextvars
-import itertools
 import json
 import shlex
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from jinja2 import StrictUndefined, TemplateSyntaxError, Undefined, nodes
@@ -335,22 +334,17 @@ class Ref:
     """One use of an outside name in a template.
 
     path: the fields read from it, e.g. ("tasks", 0, "title"); EACH stands for
-      "an element of this list" (from a for loop, or a filter such as map), and
-      At("i") for the element at a position that the template computes, as in
-      tasks[i]. None means the template reads something derived from the name
-      that we can't follow.
+      "an element of this list" (from a for loop), and At("i") for the element
+      at a position that the template computes, as in tasks[i]. None means the
+      template reads something derived from the name that we can't follow.
     output: the value is written into the text by {{ }}, not just tested or looped over.
     quoted: ...and that {{ }} ends with `| quote`.
     guarded: names that an enclosing check proves aren't none here, as in
       `{% if review %}` or `x.y if x else none`. "name.field" entries cover
-      checks like `{% if workspace.implement %}`. Each checked path is an entry
-      too, as guard() writes it, also when the check reads a loop variable.
-      A check through a loop variable covers only the reads through that same
-      variable, or through a name set from it. A type test in selectattr or
-      rejectattr adds the path before the last step of its field, because a
-      none there can't make the test fail. A literal default adds each path
-      before the field's last step, because Jinja then puts the default in
-      place of each missing step.
+      checks like `{% if workspace.implement %}`. Each path that the check reads
+      itself is an entry too, as guard() writes it.
+    local: the read goes through a name that the template defines: a loop
+      variable, or a name that set, with or a macro gives.
     """
 
     name: str
@@ -359,6 +353,7 @@ class Ref:
     output: bool = False
     quoted: bool = False
     guarded: frozenset[str] = frozenset()
+    local: bool = False
 
 
 def references(source: str, *, expression: bool = False) -> list[Ref]:
@@ -448,20 +443,8 @@ def _parse(source: str, *, expression: bool):
 # Filters whose result holds the same elements as their input, so a loop over
 # `build | selectattr("passed")` still loops over elements of `build`.
 _SAME_ELEMENTS = frozenset({"selectattr", "rejectattr", "select", "reject", "sort", "unique", "list", "reverse"})
-# Filters of _SAME_ELEMENTS that can drop elements, so that a position in their result can name another element
-_DROPS = frozenset({"selectattr", "rejectattr", "select", "reject", "unique"})
-# Filters that give nothing for none, where the others fail
-_NONE_IS_EMPTY = frozenset({"map", "select", "reject", "selectattr", "rejectattr"})
 # Filters whose result is always a number, so it can't carry text into a command
 _NUMBERS = frozenset({"length", "count", "int", "float", "abs", "round", "sum", "wordcount", "filesizeformat"})
-# Filters that read a field of each element, and the positions of their arguments `attribute` and `default`
-# for a template that doesn't name them. So sum("cost") reads the field cost.
-_ATTRIBUTE_FILTERS = {"map": (None, None), "selectattr": (0, None), "rejectattr": (0, None), "sum": (0, None),
-                      "groupby": (0, 1), "unique": (1, None), "min": (1, None), "max": (1, None), "sort": (2, None),
-                      "join": (1, None)}
-# Tests that check only the type or the identity of a value, so a field of none, which is undefined, can't make them fail
-_TYPE_TESTS = frozenset({"defined", "undefined", "none", "boolean", "true", "false", "integer", "float", "number",
-                         "string", "mapping", "sequence", "callable", "sameas", "escaped"})
 # Variables that wf gives as an empty list or map, and never as none: a none check of them proves nothing
 _NEVER_NONE = frozenset({"results", "history", "errors"})
 _UNSUPPORTED = {nodes.Include: "include", nodes.Import: "import", nodes.FromImport: "from ... import", nodes.Extends: "extends"}
@@ -483,27 +466,12 @@ class _Local:
 
     If its value is a known path into an outside name (`t` in `for t in
     plan.tasks`), `name` and `path` say which. `sources` lists every outside
-    name its value came from, so tainted data can still be followed. `loops`
-    names the for loops whose current element it is, or is inside of.
-    A list through filters keeps the path of the list. `each` is the field that
-    map(attribute=...) takes from each element: after `{% set outs =
-    results.b | map(attribute="output") %}`, outs[0] is results.b[0].output.
-    `kept` holds the fields that the filters keep set on each element, as
-    paths from the element at a position of `path`. Only a loop over the list
-    counts them. `moved` says that a filter can drop elements, so that a
-    position in the list can name another element of `path`, or none.
-    `filled` is the path of a value that a map with a literal default gives,
-    with EACH at its position: a read that ends there can't be undefined.
+    name its value came from, so tainted data can still be followed.
     """
 
     name: str | None = None
     path: tuple = ()
     sources: tuple[str, ...] = ()
-    loops: frozenset[int] = frozenset()
-    each: tuple = ()
-    kept: frozenset[tuple] = frozenset()
-    moved: bool = False
-    filled: tuple = ()
 
 
 def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
@@ -551,28 +519,22 @@ def _text(node) -> str:
 
 
 def guard(name: str, path: tuple) -> str:
-    """How Ref.guarded names a checked path: results.build[0].output, results.build[index].output,
-    or results.build[*].output for an element of a loop."""
+    """How Ref.guarded names a checked path: results.build[0].output or results.build[index].output."""
     text = name
     for step in path:
-        text += "[*]" if step is EACH else f"[{step}]" if isinstance(step, (int, At)) else f".{step}"
+        text += f"[{step}]" if isinstance(step, (int, At)) else f".{step}"
     return text
 
 
 def _checks(test, scope: dict | None = None) -> tuple[frozenset, frozenset]:
-    """Names proven not none (when the test is true, when it is false). The checked path is one of them,
-    as guard() writes it, with a loop variable in `scope` read as the path it stands for. A path through
-    the element of a loop is bound to that loop, as (its loops, the path), so that it counts only for the
-    reads through the same element (_plain)."""
+    """Names proven not none (when the test is true, when it is false). A path of an outside name that
+    the test reads itself is one of them, as guard() writes it. A name in `scope` is the template's own."""
     chain = _chain(test)
     if chain:
         name, path, _ = chain
         tokens = {name.name} | ({f"{name.name}.{path[0]}"} if path and isinstance(path[0], str) else set())
-        local = (scope or {}).get(name.name)
-        if local is None:
+        if name.name not in (scope or {}):
             tokens.add(guard(name.name, path))
-        elif local.name is not None:
-            tokens.add(_bound(local, guard(local.name, _through(local, path))))
         return frozenset(tokens), frozenset()
     if isinstance(test, nodes.Not):
         yes, no = _checks(test.node, scope)
@@ -603,130 +565,19 @@ def _not_none(node, scope: dict | None) -> frozenset:
     return _checks(node, scope)[0]
 
 
-def _bound(local: _Local, checked: str):
-    """The guard token of a path checked through `local`: the path itself, or (its loops, the path)."""
-    return (local.loops, checked) if local.loops else checked
-
-
-def _through(local: _Local, path: tuple) -> tuple:
-    """The outside path that `path` reads through `local`. In a list that map(attribute=...) gives,
-    the first step picks the element, and the field that map takes comes after it."""
-    return (*local.path, path[0], *local.each, *path[1:]) if local.each and path else (*local.path, *path)
-
-
-def _filled(local: _Local, read: tuple) -> frozenset[str]:
-    """The guards of a read through `local` that ends at the field that a map with a literal default takes.
-    Jinja puts the default in place of each missing step of it, so they are the guards of the map's own read."""
-    pattern = local.filled
-    if not pattern or len(read) != len(pattern) or any(p is not EACH and p != r for p, r in zip(pattern, read)):
-        return frozenset()
-    start = len(pattern) - pattern[::-1].index(EACH)  # the field starts after the position of the element
-    return frozenset(guard(local.name, read[:k]) for k in range(start, len(read)))
-
-
-def _plain(guards: frozenset, loops: frozenset = frozenset()) -> frozenset[str]:
-    """The guards of a read through a local in `loops`: each plain path, and each path that a check
-    through the elements of those loops gave. A check of another loop's element doesn't count."""
-    return frozenset(g if isinstance(g, str) else g[1] for g in guards if isinstance(g, str) or g[0] <= loops)
-
-
-def _field_path(text: str) -> tuple:
-    """A field as an attribute argument names it, "output.items.0", as a path: ("output", "items", 0)."""
-    return tuple(int(part) if part.isdecimal() else part for part in text.split("."))
-
-
-def _keeps(node) -> tuple | None:
-    """The field that select, reject, selectattr or rejectattr keeps set on each element it lets through,
-    as a path (() for the element itself), else None. Its test decides, as Jinja runs it on none:
-    `selectattr("output")`, `rejectattr("output", "none")` and `selectattr("output", "ne", none)` let no
-    output of none through."""
-    if not isinstance(node, nodes.Filter) or node.name not in _NONE_IS_EMPTY - {"map"} or node.kwargs or node.dyn_args or node.dyn_kwargs:
-        return None
-    if not all(isinstance(arg, nodes.Const) for arg in node.args):
-        return None
-    values = [arg.value for arg in node.args]
-    if node.name.endswith("attr"):
-        if not values or not isinstance(values[0], str) or not values[0]:
-            return None
-        field, test = _field_path(values[0]), values[1:]
-    else:
-        field, test = (), values
-    if test and not isinstance(test[0], str):
-        return None
-    try:
-        passes = bool(ENV.call_test(test[0], None, test[1:])) if test else False  # without a test, none is false
-    except Exception:  # an unknown test, or one that fails on none
-        return None
-    return field if passes == node.name.startswith("reject") else None
-
-
-def _mapped(node) -> tuple | None:
-    """The field that `map(attribute=...)` takes from each element, as a path, else None."""
-    if not isinstance(node, nodes.Filter) or node.name != "map" or node.node is None or node.args:
-        return None
-    value = _argument(node, "attribute", None)
-    return _field_path(value.value) if isinstance(value, nodes.Const) and isinstance(value.value, str) and value.value else None
-
-
-def _unwrap(node) -> tuple[Any, list]:
-    """The list under the filters that keep its elements (_SAME_ELEMENTS) or take a field of each
-    (map(attribute=...)), and those filters, from the list out."""
-    filters = []
-    while isinstance(node, nodes.Filter) and node.node is not None and (node.name in _SAME_ELEMENTS or _mapped(node)):
-        filters.append(node)
-        node = node.node
-    return node, filters[::-1]
-
-
-def elements_of(expression: str) -> tuple[str, tuple, frozenset] | None:
+def elements_of(expression: str) -> tuple[str, tuple] | None:
     """For an expression that gives the elements of a plain path, also through filters that keep them,
-    as `results.build | selectattr("output") | list` does: (name, the path of an element, the paths
-    that the filters keep set on each element). None for any other expression."""
+    as `plan.tasks | selectattr("ready") | list` does: (name, the path of an element). None for any other."""
     try:
-        inner, filters = _unwrap(_parse(expression, expression=True))
+        node = _parse(expression, expression=True)
     except TemplateError:
         return None
-    chain = _chain(inner)
-    if chain is None or chain[2] or any(f.name == "map" for f in filters):
+    while isinstance(node, nodes.Filter) and node.name in _SAME_ELEMENTS and node.node is not None:
+        node = node.node
+    chain = _chain(node)
+    if chain is None or chain[2]:
         return None
-    element = (*chain[1], EACH)
-    return chain[0].name, element, frozenset((*element, *field) for f in filters if (field := _keeps(f)) is not None)
-
-
-def _filter_fields(node) -> list[tuple]:
-    """The fields that a filter reads from each element, as paths: [("output", "stdout")] for
-    `map(attribute="output.stdout")`. sort takes several, with commas: sort(attribute="a,b")."""
-    if not isinstance(node, nodes.Filter) or node.name not in _ATTRIBUTE_FILTERS or node.node is None:
-        return []
-    if node.name == "map" and node.args:  # map("upper") runs a filter, and reads no field
-        return []
-    value = _argument(node, "attribute", _ATTRIBUTE_FILTERS[node.name][0])
-    if not (isinstance(value, nodes.Const) and isinstance(value.value, str)):
-        return []
-    names = value.value.split(",") if node.name == "sort" else [value.value]
-    return [_field_path(name) for name in names if name]
-
-
-def _defaulted(node: nodes.Filter) -> bool:
-    """Whether the filter gives a literal default other than none. Jinja puts it in place of each missing
-    step of the field, so that a missing field can't make the filter fail. Jinja ignores a default of none."""
-    default = _argument(node, "default", _ATTRIBUTE_FILTERS[node.name][1])
-    return isinstance(default, (nodes.List, nodes.Tuple, nodes.Dict)) or (isinstance(default, nodes.Const) and default.value is not None)
-
-
-def _type_tested(node: nodes.Filter) -> bool:
-    """Whether selectattr or rejectattr runs a test of _TYPE_TESTS on its field. The test takes the
-    undefined value of a missing last step, but Jinja can't read a step after a missing one."""
-    test = node.args[1] if node.name in ("selectattr", "rejectattr") and len(node.args) > 1 else None
-    return isinstance(test, nodes.Const) and test.value in _TYPE_TESTS
-
-
-def _argument(node: nodes.Filter, keyword: str, position: int | None):
-    """The argument of a filter that the template names `keyword`, or else gives at `position`. None if neither."""
-    given = {pair.key: pair.value for pair in node.kwargs}
-    if keyword in given:
-        return given[keyword]
-    return node.args[position] if position is not None and position < len(node.args) else None
+    return chain[0].name, (*chain[1], EACH)
 
 
 def _target_names(target) -> list[str]:
@@ -738,7 +589,6 @@ class _Walker:
 
     def __init__(self):
         self.refs: list[Ref] = []
-        self.loops = itertools.count(1)  # a key for each for loop, which binds the checks of its element
 
     # ----- statements -----
 
@@ -760,15 +610,13 @@ class _Walker:
         elif isinstance(node, nodes.For):
             self.expr(node.iter, scope, guards)
             inner = dict(scope)
-            source, kept = self._elements(node.iter, scope, next(self.loops))
+            source = self._local(node.iter, scope, each=True)
             for name in _target_names(node.target):
                 inner[name] = source if isinstance(node.target, nodes.Name) else _Local(sources=source.sources)
             inner["loop"] = _Local()
-            kept |= guards
             if node.test is not None:
-                self.expr(node.test, inner, kept)
-                kept |= _checks(node.test, inner)[0]  # the body runs only for the elements that pass the test
-            self.stmts(node.body, inner, kept)
+                self.expr(node.test, inner, guards)
+            self.stmts(node.body, inner, guards)
             self.stmts(node.else_, scope, guards)
         elif isinstance(node, nodes.Assign):
             self.expr(node.node, scope, guards)
@@ -845,79 +693,35 @@ class _Walker:
         elif isinstance(node, nodes.Filter) and node.name in _NUMBERS:
             for child in node.iter_child_nodes():  # `x | length` writes a number, not x
                 self.expr(child, scope, guards)
-            self._attribute(node, scope, guards)
         else:
             for child in node.iter_child_nodes():
                 self.expr(child, scope, guards, output, quoted)
-            self._attribute(node, scope, guards)
-
-    def _attribute(self, node, scope, guards) -> None:
-        """`x | map(attribute="output.stdout")` reads that field of each element of x, as a loop over x
-        does. Where a missing field can't make the filter fail, the read is guarded: at each step but
-        the last after a literal default, and at the step before the last after a type test. Over none,
-        only map, select, reject, selectattr and rejectattr read nothing, so only they need no check of x."""
-        fields = _filter_fields(node)
-        source, kept = self._elements(node.node, scope) if fields else (_Local(), frozenset())
-        if source.name is None:
-            return
-        listed, filters = _unwrap(node.node)
-        if (filters[0] if filters else node).name in _NONE_IS_EMPTY:
-            kept |= _checks(listed, scope)[0]
-        if _defaulted(node):
-            kept |= {_bound(source, guard(source.name, source.path + field[:k])) for field in fields for k in range(len(field))}
-        elif _type_tested(node):
-            kept |= {_bound(source, guard(source.name, source.path + field[:-1])) for field in fields}
-        for field in fields:
-            self.refs.append(Ref(source.name, source.path + field, node.lineno, guarded=_plain(guards | kept, source.loops)))
-
-    def _elements(self, node, scope, loop: int | None = None) -> tuple[_Local, frozenset]:
-        """What each element of the list `node` is, and the guards of the fields that its filters keep set
-        on it. Through map(attribute=...), each element is that field: each element of
-        `results.b | map(attribute="output")` is results.b[*].output. The guards of a for loop's
-        element are bound to that `loop`."""
-        listed = self._local(node, scope)
-        if listed.name is None:
-            return listed, frozenset()
-        loops = listed.loops | ({loop} if loop is not None else set())
-        element = _Local(listed.name, _through(listed, (EACH,)), listed.sources, loops, filled=listed.filled)
-        return element, frozenset(_bound(element, guard(listed.name, (*listed.path, EACH, *field))) for field in listed.kept)
 
     def _use(self, name: nodes.Name, path: tuple, scope, guards, output, quoted) -> None:
         local = scope.get(name.name)
         if local is None:
-            self.refs.append(Ref(name.name, path, name.lineno, output, quoted, _plain(guards)))
+            self.refs.append(Ref(name.name, path, name.lineno, output, quoted, guards))
         elif local.name is not None:
-            read = _through(local, path)
-            filled = frozenset() if local.moved and path else _filled(local, read)
-            self.refs.append(Ref(local.name, read, name.lineno, output, quoted, _plain(guards | filled, local.loops)))
+            self.refs.append(Ref(local.name, local.path + path, name.lineno, output, quoted, guards, local=True))
         else:
             for source in local.sources:
-                self.refs.append(Ref(source, None, name.lineno, output, quoted, _plain(guards)))
+                self.refs.append(Ref(source, None, name.lineno, output, quoted, guards, local=True))
 
-    def _local(self, node, scope) -> _Local:
-        """What a local name assigned from `node` refers to. Through the filters that keep the elements
-        of a list or take a field of each, it is still that list (see _Local)."""
-        inner, filters = _unwrap(node)
-        chain = _chain(inner)
+    def _local(self, node, scope, each: bool = False) -> _Local:
+        """What a local name assigned from `node` refers to."""
+        unwrapped = node
+        while isinstance(unwrapped, nodes.Filter) and unwrapped.name in _SAME_ELEMENTS and unwrapped.node is not None:
+            unwrapped = unwrapped.node
+        chain = _chain(unwrapped)
         if chain and not chain[2]:
             name, path, _ = chain
+            suffix = (EACH,) if each else ()
             local = scope.get(name.name)
             if local is None:
-                value = _Local(name.name, path, (name.name,))
-            elif local.name is not None:
-                value = local if not path else replace(local, path=_through(local, path), each=(), kept=frozenset(),
-                                                       moved=False, filled=() if local.moved else local.filled)
-            else:
-                return _Local(sources=local.sources)
-            for applied in filters:
-                if (field := _mapped(applied)) is not None:
-                    each = value.each + field
-                    value = replace(value, each=each, filled=(*value.path, EACH, *each) if _defaulted(applied) else ())
-                elif applied.name in _DROPS:
-                    value = replace(value, moved=True)
-                    if (field := _keeps(applied)) is not None:
-                        value = replace(value, kept=value.kept | {value.each + field})
-            return value
+                return _Local(name.name, path + suffix, (name.name,))
+            if local.name is not None:
+                return _Local(local.name, local.path + path + suffix, local.sources)
+            return _Local(sources=local.sources)
         sources: list[str] = []
         for found in node.find_all(nodes.Name):
             if found.ctx != "load":

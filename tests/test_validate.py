@@ -285,9 +285,6 @@ def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(t
             {% for r in results.build %}{{ r.index }} {{ r.item.title }} {{ r.output.done if r.output else 'failed' }}
             {{ r.harness }} {{ r.model }}{% endfor %}
             {{ results.build[0].item.titel }} {{ results.build[0].output.dun }} {{ results.build[0].cost }} {{ results.plan }}
-            {{ results.build | selectattr('output.doen', 'defined') | list }}
-            {{ results.build | map(attribute='output.dnoe', default='') | list }} {{ results.build | sort(attribute='output.done,output.odne') | list }}
-            {{ results.build | map(attribute='output.²') | list }}
         echo:
           needs: [build]
           command: >-
@@ -300,11 +297,6 @@ def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(t
         ("error", "nodes.sum.instruction", "`results.build[0].output.dun`: no field `dun` (fields: done)"),
         ("error", "nodes.sum.instruction", "`results.build[0].cost`: no field `cost` (fields: index, item, output, harness, model)"),
         ("error", "nodes.sum.instruction", "`plan` isn't a for_each node, so `results.plan` doesn't exist"),
-        ("error", "nodes.sum.instruction", "`results.build[].output.doen`: no field `doen` (fields: done)"),  # also with a type test
-        ("error", "nodes.sum.instruction", "`results.build[].output.dnoe`: no field `dnoe` (fields: done)"),  # and with a default
-        ("warning", "nodes.sum.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
-        ("error", "nodes.sum.instruction", "`results.build[].output.odne`: no field `odne` (fields: done)"),  # each field of sort
-        ("error", "nodes.sum.instruction", "`results.build[].output.²`: no field `²` (fields: done)"),  # not a number, and no crash
         ("warning", "nodes.echo.command", "output from `results` into the shell unquoted"),  # the item's title, not its index
         ("warning", "nodes.act.instruction", "reads output from `build`, which has `web: true`"),
     ])
@@ -328,20 +320,15 @@ def test_a_for_each_list_from_results_gives_its_items_the_schema_of_the_entries(
     ])
 
 
-def test_a_read_through_the_item_of_an_entry_or_a_filtered_list_of_entries_warns_too(tmp_path):
+def test_a_filtered_for_each_list_of_results_gives_its_items_the_schema_of_the_entries(tmp_path):
     report = check(tmp_path, flow("""
         build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, output: {done: {type: boolean}}}
-        pick: {needs: [build], for_each: results.build, instruction: x}
-        again: {needs: [pick], for_each: results.pick, instruction: "{{ item.item.output.done }}"}
-        last: {needs: [pick], instruction: "{{ results.pick[0].item.output.done }}"}
-        listed: {needs: [build], for_each: "results.build | list", instruction: "{{ item.output.done }}"}
-        kept: {needs: [build], for_each: "results.build | selectattr('output') | list", instruction: "{{ item.output.done }} {{ item.output.dun }}"}
+        listed: {needs: [build], for_each: "results.build | list", instruction: "{{ item.output.done }} {{ item.output.dun }}"}
+        kept: {needs: [build], for_each: "results.build | selectattr('output') | list", instruction: "{{ item.output.dnoe }}"}
     """))
-    assert_problems(report, [  # the item of each entry of pick is an entry of build
-        ("warning", "nodes.again.instruction", "reads `item.item.output.done`, but with `on_item_error: continue` an item of `build`"),
-        ("warning", "nodes.last.instruction", "reads `results.pick[0].item.output.done`, but with `on_item_error: continue` an item of `build`"),
-        ("warning", "nodes.listed.instruction", "reads `item.output.done`, but with `on_item_error: continue` an item of `build`"),
-        ("error", "nodes.kept.instruction", "`item.output.dun`: no field `dun` (fields: done)"),  # and no warning: each output is set
+    assert_problems(report, [  # and no warning about item.output.done: a read through item isn't checked
+        ("error", "nodes.listed.instruction", "`item.output.dun`: no field `dun` (fields: done)"),
+        ("error", "nodes.kept.instruction", "`item.output.dnoe`: no field `dnoe` (fields: done)"),
     ])
 
 
@@ -349,35 +336,20 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
     # Each read is the only one in its template, as wf validate warns once for each template and entry or node
     after = {  # these run after build and all
         "bare_index": "{{ results.build[0].output.done }}",
-        "bare_loop": "{% for r in results.build %}{{ r.output.done }}{% endfor %}",
         "by_if": "{% if results.build[1].output %}{{ results.build[1].output.done }}{% endif %}",
-        "by_else": "{% for r in results.build %}{% if not r.output %}failed{% else %}{{ r.output.done }}{% endif %}{% endfor %}",
-        "by_value": "{% for r in results.build %}{{ r.output.done if r.output else 'failed' }}{% endfor %}",
-        "by_and": "{% for r in results.build %}{{ r.output and r.output.done }}{% endfor %}",
-        "by_not_none": "{% for r in results.build %}{% if r.output is not none %}{{ r.output.done }}{% endif %}{% endfor %}",
-        "by_for_if": "{% for r in results.build if r.output %}{{ r.output.done }}{% endfor %}",
-        "by_select": "{% for r in results.build | selectattr('output') %}{{ r.output.done }}{% endfor %}",
-        "by_reject": "{% for r in results.build | rejectattr('output', 'none') %}{{ r.output.done }}{% endfor %}",
+        "by_else": "{% if not results.build[1].output %}failed{% else %}{{ results.build[1].output.done }}{% endif %}",
+        "by_value": "{{ results.build[1].output.done if results.build[1].output else 'failed' }}",
+        "by_and": "{{ results.build[1].output and results.build[1].output.done }}",
+        "by_not_none": "{% if results.build[1].output is not none %}{{ results.build[1].output.done }}{% endif %}",
+        "by_last": "{% if results.build[-1].output %}{{ results.build[-1].output.done }}{% endif %}",
+        "other_item": "{% if results.build[0].output %}{{ results.build[1].output.done }}{% endif %}",
         "on_fail": "{{ results.all[0].output.done }}",  # on_item_error: fail leaves no output none
         "whole": "{{ results.build[0].output }}",  # the output itself, and no field of it
-        "by_map": "{{ results.build | map(attribute='output.done') | list }}",
-        "map_kept": "{{ results.build | selectattr('output') | map(attribute='output.done') | list }}",
-        "map_default": "{{ results.build | map(attribute='output.done', default=false) | list }}",
-        "map_none": "{{ results.build | map(attribute='output.done', default=none) | list }}",  # Jinja ignores a default of none
-        "by_sum": "{{ results.build | sum('output.done') }}",  # the first argument of sum is the field
-        "select_defined": "{{ results.build | selectattr('output.done', 'defined') | list }}",  # a type test can't fail
-        "select_deep": "{{ results.build | selectattr('output.verdict.passed', 'defined') | list }}",  # passed of an undefined verdict
-        "by_join": "{{ results.build | join(', ', attribute='output.done') }}",
-        "by_set": "{% set outs = results.build | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
-        "set_index": "{% set outs = results.build | map(attribute='output') | list %}{{ outs[0].done }}",
-        "by_with": "{% with outs = results.build | map(attribute='output') %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
-        "set_checked": "{% set outs = results.build | map(attribute='output') | list %}{% if outs[0] %}{{ outs[0].done }}{% endif %}",
-        "set_kept": "{% set ok = results.build | selectattr('output') | map(attribute='output') | list %}{% for o in ok %}{{ o.done }}{% endfor %}",
-        "set_entries": "{% set ok = results.build | selectattr('output') | list %}{% for r in ok %}{{ r.output.done }}{% endfor %}",
-        "set_entry_index": "{% set ok = results.build | selectattr('output') | list %}{{ ok[1].output.done }}",  # ok can be shorter
-        "set_default": "{% set dones = results.build | map(attribute='output.done', default=false) | list %}{% for d in dones %}{{ d }}{% endfor %}",
-        "default_index": "{% set dones = results.build | map(attribute='output.done', default=false) | list %}{{ dones[1] }}",
-        "loop_default": "{% for d in results.build | map(attribute='output.done', default=false) %}{{ d }}{% endfor %}",
+        "in_loop": "{% for r in results.build %}{{ r.output.done }}{% endfor %}",  # through a name: not checked
+        "by_set": "{% set first = results.build[0] %}{{ first.output.done }}",
+        "by_with": "{% with outs = results.build | map(attribute='output') | list %}{{ outs[0].done }}{% endwith %}",
+        "by_select": "{% set ok = results.build | selectattr('output') | list %}{{ ok[1].output.done }}",
+        "by_map": "{{ results.build | map(attribute='output.done') | list }}",  # through a filter: not checked
     }
     beside = {  # these run beside build, which might not have run yet
         "early": "{{ results.build[0].index }}",
@@ -385,42 +357,26 @@ def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_
         "early_none": "{% if results.build is not none %}{{ results.build[1].index }}{% endif %}",  # never none
         "if_ran": "{% if build %}{{ results.build[1].index }}{% endif %}",
         "if_any": "{% if results.build %}{{ results.build[1].index }}{% endif %}",
-        "in_loop": "{% for r in results.build %}{{ r.index }}{% endfor %}",
-        "join_early": "{{ build | join(', ', attribute='done') }}",  # join fails on none
-        "map_early": "{{ build | map(attribute='done') | list }}",  # where map gives nothing
+        "in_loop_early": "{% for r in results.build %}{{ r.index }}{% endfor %}",
     }
     nodes = ["side: {needs: [start], command: x}",
-             "build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, "
-             "output: {done: {type: boolean}, verdict: {type: object, properties: {passed: {type: boolean}}}}}",
+             "build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, output: {done: {type: boolean}}}",
              "all: {needs: [start], for_each: '[1, 2]', instruction: x, output: {done: {type: boolean}}}"]
     nodes += [f"{name}: {{needs: [build, all], instruction: {json.dumps(text)}}}" for name, text in after.items()]
     nodes += [f"{name}: {{needs: [side], instruction: {json.dumps(text)}}}" for name, text in beside.items()]
     nodes += ["pair: {needs: [side], for_each: '[0, 1]', instruction: '{{ results.build[index].index }}'}",  # by its position
-              "pick: {needs: [build], for_each: results.build, instruction: '{{ item.output.done }}'}",  # each entry
-              "pick_checked: {needs: [build], for_each: results.build, instruction: '{% if item.output %}{{ item.output.done }}{% endif %}'}"]
+              "pick: {needs: [build], for_each: results.build, instruction: '{{ item.output.done }}'}"]  # through item: not checked
     report = check(tmp_path, flow("\n".join(nodes)))
     assert_problems(report, [
         ("warning", "nodes.bare_index.instruction", "reads `results.build[0].output.done`, but with `on_item_error: continue` "
                                                     "an item of `build` that failed has the output none: check that the output "
                                                     "is set first"),
-        ("warning", "nodes.bare_loop.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
-        ("warning", "nodes.by_map.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
-        ("warning", "nodes.map_none.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
-        ("warning", "nodes.by_sum.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
-        ("warning", "nodes.select_deep.instruction", "reads `results.build[].output.verdict.passed`, but with `on_item_error: continue`"),
-        ("warning", "nodes.by_join.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
-        ("warning", "nodes.by_set.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
-        ("warning", "nodes.set_index.instruction", "reads `results.build[0].output.done`, but with `on_item_error: continue`"),
-        ("warning", "nodes.by_with.instruction", "reads `results.build[].output.done`, but with `on_item_error: continue`"),
-        ("warning", "nodes.set_entry_index.instruction", "reads `results.build[1].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.other_item.instruction", "reads `results.build[1].output.done`, but with `on_item_error: continue`"),
         ("warning", "nodes.early.instruction", "reads `results.build[0].index`, but `build` might not have run yet; "
                                                "check first with {% if build %}"),
         ("warning", "nodes.early_last.instruction", "reads `results.build[-1].index`, but `build` might not have run yet"),
         ("warning", "nodes.early_none.instruction", "reads `results.build[1].index`, but `build` might not have run yet"),
-        ("warning", "nodes.join_early.instruction", "reads `build[].done`, but `build` might not have run yet"),
         ("warning", "nodes.pair.instruction", "reads `results.build[index].index`, but `build` might not have run yet"),
-        ("warning", "nodes.pick.instruction", "reads `item.output.done`, but with `on_item_error: continue` an item of "
-                                              "`build` that failed has the output none"),
     ])
 
 

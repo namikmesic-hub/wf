@@ -113,110 +113,40 @@ def test_loop_variables_resolve_to_the_list_they_loop_over():
 def test_filters_that_keep_elements_keep_the_path():
     assert refs("{% for b in build | selectattr('passed') | list %}{{ b.summary }}{% endfor %}") == [
         ("build", ()),
-        ("build", (EACH, "passed")),  # the field that selectattr reads from each element
         ("build", (EACH, "summary")),
     ]
 
 
-def test_a_filter_that_reads_a_field_of_each_element_reads_its_path():
-    assert refs("{{ results.b | map(attribute='output.stdout') | join }}") == [("results", ("b",)), ("results", ("b", EACH, "output", "stdout"))]
-    assert refs("{{ plan.tasks | sum(attribute='size') }} {{ plan.tasks | sort(attribute='rank') | list }}") == [
-        ("plan", ("tasks",)), ("plan", ("tasks", EACH, "size")), ("plan", ("tasks",)), ("plan", ("tasks", EACH, "rank"))]
-    assert refs("{{ plan.tasks | map(attribute='x', default='') | list }} {{ plan.tasks | map('upper') | list }}") == [
-        ("plan", ("tasks",)), ("plan", ("tasks", EACH, "x")), ("plan", ("tasks",))]  # with a default too, but map('upper') reads no field
-
-
-@pytest.mark.parametrize("source, fields, guarded", [
-    ("results.b | sum('output.cost')", ["cost"], False),  # the field without its keyword `attribute`
-    ("results.b | unique(false, 'output.cost')", ["cost"], False),
-    ("results.b | sort(false, false, 'output.cost')", ["cost"], False),
-    ("results.b | sort(attribute='output.cost,output.title')", ["cost", "title"], False),  # sort takes several fields
-    ("results.b | sort('output.cost')", [], False),  # the first argument of sort is `reverse`
-    ("results.b | map(attribute='output.done', default=none)", ["done"], False),  # Jinja ignores a default of none
-    ("results.b | map(attribute='output.done', default=start.done)", ["done"], False),  # which can be none
-    ("results.b | map(attribute='output.done', default=[])", ["done"], True),  # read for the schema, but it can't fail
-    ("results.b | groupby('output.kind', none)", ["kind"], False),
-    ("results.b | groupby('output.kind', 'other')", ["kind"], True),  # the default without its keyword
-    ("results.b | selectattr('output.done')", ["done"], False),
-    ("results.b | selectattr('output.done', 'equalto', true)", ["done"], False),
-    ("results.b | join(', ', attribute='output.title')", ["title"], False),
-    ("results.b | join(', ', 'output.title')", ["title"], False),  # the field after the separator, without its keyword
-])
-def test_a_filter_reads_the_fields_it_names_and_guards_them_where_a_missing_field_cant_make_it_fail(source, fields, guarded):
-    reads = [r for r in templates.references(source, expression=True) if r.name == "results" and len(r.path) > 1]
-    assert [r.path for r in reads] == [("b", EACH, "output", field) for field in fields]
-    assert all(("results.b[*].output" in r.guarded) is guarded for r in reads)
-
-
-def test_a_field_step_that_isnt_a_decimal_number_stays_a_name():
-    assert refs("results.b | map(attribute='output.²') | list", expression=True)[-1] == ("results", ("b", EACH, "output", "²"))
-
-
-@pytest.mark.parametrize("source", [
-    "results.b | map(attribute='output.done') | list",  # a list writes the undefined field of a none output as Undefined
-    "results.b | map(attribute='output.done', default=none) | list",
-    "results.b | map(attribute='output.done', default=false) | list",
-    "results.b | selectattr('output') | map(attribute='output.done') | list",
-    "results.b | sum('output.cost')",
-    "results.b | sort(attribute='output.cost') | list",
-    "results.b | unique(attribute='output.kind') | list",
-    "results.b | min(attribute='output.cost')",
-    "results.b | max(attribute='output.cost')",
-    "results.b | groupby('output.kind') | list",
-    "results.b | groupby('output.kind', 'other') | list",
-    "results.b | selectattr('output.done') | list",
-    "results.b | selectattr('output.done', 'defined') | list",  # a type test takes the undefined field of a none output
-    "results.b | rejectattr('output.done', 'none') | list",
-    "results.b | selectattr('output.verdict.passed', 'defined') | list",  # but Jinja can't read passed of an undefined verdict
-    "results.b | rejectattr('output.verdict.passed', 'none') | list",
-    "results.b | join(', ', attribute='output.title')",
-    "results.b | selectattr('output') | join(', ', attribute='output.title')",
-    "results.b | sort(attribute='output.cost,output.title') | list",
-    "results.b | map(attribute='output') | map(attribute='done') | list",  # each element of the first map is an output
-    "results.b | selectattr('output') | map(attribute='output') | map(attribute='done') | list",
-    "results.b | rejectattr('output', 'sameas', none) | map(attribute='output.done') | list",  # tests that let no none through
-    "results.b | selectattr('output', 'ne', none) | map(attribute='output.done') | list",
-    "results.b | selectattr('output', 'mapping') | map(attribute='output.done') | list",
-    "results.b | selectattr('output', 'defined') | map(attribute='output.done') | list",  # a none output is defined
-])
-def test_a_filter_leaves_the_output_unguarded_exactly_where_a_failed_item_fails_the_render_or_writes_undefined(source):
-    assert_unguarded_exactly_where_a_failed_item_breaks_the_render("{{ " + source + " }}")  # as wf renders an instruction
-
-
 @pytest.mark.parametrize("template", [
-    "{% set outs = results.b | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
-    "{% set outs = results.b | map(attribute='output') | list %}{{ outs[1].done }}",
-    "{% set outs = results.b | map(attribute='output') | list %}{% if outs[1] %}{{ outs[1].done }}{% endif %}",
-    "{% set outs = results.b | map(attribute='output') %}{{ outs | join(', ', attribute='title') }}",
-    "{% with outs = results.b | map(attribute='output') %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
-    "{% with outs = results.b | map(attribute='output') | select %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
-    "{% set outs = results.b | selectattr('output') | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
-    "{% set ok = results.b | selectattr('output') | list %}{{ ok[1].output.done }}",  # the filter moves the positions
-    "{% set ok = results.b | selectattr('output') | list %}{{ ok[0].output.done }}",  # and leaves none when each item failed
-    "{% set dones = results.b | map(attribute='output.done', default=false) | list %}{% for d in dones %}{{ d }}{% endfor %}",
-    "{% set dones = results.b | map(attribute='output.done', default=false) | list %}{{ dones[1] }}",
-    "{% set dones = results.b | map(attribute='output.done', default=false) | select | list %}{{ dones[1] }}",
-    "{% for d in results.b | map(attribute='output.done', default=false) %}{{ d }}{% endfor %}",
-    "{% for o in results.b | map(attribute='output', default={}) %}{{ o.done }}{% endfor %}",  # Jinja keeps an output of none
-    "{% for v in results.b | map(attribute='output.verdict', default={}) %}{{ v.passed }}{% endfor %}",  # a field in the default
+    "{{ results.b[1].output.done }}",
+    "{{ results.b[0].output.done }}",
+    "{% if results.b[1].output %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if not results.b[1].output %}x{% else %}{{ results.b[1].output.done }}{% endif %}",
+    "{{ results.b[1].output.done if results.b[1].output else 'x' }}",
+    "{{ results.b[1].output and results.b[1].output.done }}",
+    "{% if results.b[1].output is not none %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if results.b[0].output %}{{ results.b[1].output.done }}{% endif %}",  # another item
+    "{% if results.b[-1].output %}{{ results.b[-1].output.done }}{% endif %}",
+    "{{ results.b[1].output }}",  # the output itself, and no field of it
 ])
-def test_a_read_through_a_name_leaves_the_output_unguarded_exactly_where_a_failed_item_fails_the_render(template):
-    assert_unguarded_exactly_where_a_failed_item_breaks_the_render(template)
-
-
-def assert_unguarded_exactly_where_a_failed_item_breaks_the_render(template: str) -> None:
-    succeeded = {"index": 0, "item": "a", "output": {"done": True, "title": "A", "cost": 1, "kind": "k", "verdict": {"passed": True}},
-                 "harness": None, "model": None}
+def test_a_direct_read_is_unguarded_exactly_where_a_failed_item_fails_the_render(template):
+    succeeded = {"index": 0, "item": "a", "output": {"done": True}, "harness": None, "model": None}
     failed = {"index": 1, "item": "b", "output": None, "harness": None, "model": None}
     assert "Undefined" not in templates.render(template, {"results": {"b": [succeeded, succeeded]}})
     broken = False
-    for entries in ([succeeded, failed], [failed, failed]):
+    for entries in ([succeeded, failed], [failed, succeeded], [failed, failed]):
         try:
             broken |= "Undefined" in templates.render(template, {"results": {"b": entries}})
         except TemplateError:
             broken = True
-    reads = [r for r in templates.references(template) if r.name == "results" and len(r.path or ()) > 3]
+    reads = [r for r in templates.references(template) if r.name == "results" and len(r.path) > 3]
     assert any(templates.guard("results", r.path[:3]) not in r.guarded for r in reads) is broken
+
+
+def test_a_read_through_a_name_that_the_template_defines_is_marked_local():
+    source = ("{{ results.b[0].output.done }}{% for r in results.b %}{{ r.output.done }}{% endfor %}"
+              "{% set first = results.b[0] %}{{ first.output.done }}{% with o = results.b[1].output %}{{ o.done }}{% endwith %}")
+    assert [r.local for r in templates.references(source) if r.path and r.path[-1] == "done"] == [False, True, True, True]
 
 
 def test_a_position_that_the_template_computes_is_kept_apart_from_a_loop():
@@ -269,56 +199,24 @@ def read_of(source: str, last: str = "done") -> Ref:
 
 @pytest.mark.parametrize("source", [
     "{% if results.b[1].output %}{{ results.b[1].output.done }}{% endif %}",
-    "{% for r in results.b %}{% if r.output %}{{ r.output.done }}{% endif %}{% endfor %}",
-    "{% for r in results.b %}{% if not r.output %}x{% else %}{{ r.output.done }}{% endif %}{% endfor %}",
-    "{% for r in results.b %}{% if r.output is not none %}{{ r.output.done }}{% endif %}{% endfor %}",
-    "{% for r in results.b %}{{ r.output.done if r.output else 'x' }}{% endfor %}",
-    "{% for r in results.b %}{{ r.output and r.output.done }}{% endfor %}",
-    "{% for r in results.b if r.output %}{{ r.output.done }}{% endfor %}",
-    "{% for r in results.b | selectattr('output') %}{{ r.output.done }}{% endfor %}",
-    "{% for r in results.b | rejectattr('output', 'none') | list %}{{ r.output.done }}{% endfor %}",
+    "{% if not results.b[1].output %}x{% else %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if results.b[1].output is not none %}{{ results.b[1].output.done }}{% endif %}",
+    "{{ results.b[1].output.done if results.b[1].output else 'x' }}",
+    "{{ results.b[1].output and results.b[1].output.done }}",
     "{% if results.b[-1].output %}{{ results.b[-1].output.done }}{% endif %}",
     "{% if results.b[start.i].output %}{{ results.b[start.i].output.done }}{% endif %}",
-    "{% for a in results.b %}{% for c in results.b %}{% if c.output %}{{ c.output.done }}{% endif %}{% endfor %}{% endfor %}",
-    "{% for r in results.b %}{% set o = r.output %}{% if r.output %}{{ o.done }}{% endif %}{% endfor %}",
-    "{% for r in results.b %}{% if r.output %}{% for p in r.output.parts %}{{ p.done }}{% endfor %}{% endif %}{% endfor %}",
-    "{{ results.b | selectattr('output') | map(attribute='output.done') | list }}",
-    "{% for r in results.b | rejectattr('output', 'sameas', none) %}{{ r.output.done }}{% endfor %}",
-    "{% for r in results.b | selectattr('output', 'ne', none) %}{{ r.output.done }}{% endfor %}",
-    "{% for r in results.b | selectattr('output', 'mapping') %}{{ r.output.done }}{% endfor %}",
-    "{% for o in results.b | selectattr('output') | map(attribute='output') %}{{ o.done }}{% endfor %}",
-    "{% for o in results.b | map(attribute='output') %}{% if o %}{{ o.done }}{% endif %}{% endfor %}",
-    "{% for o in results.b | map(attribute='output') | select %}{{ o.done }}{% endfor %}",
-    "{% set outs = results.b | map(attribute='output') | list %}{% for o in outs if o %}{{ o.done }}{% endfor %}",
-    "{% set outs = results.b | map(attribute='output') | list %}{% if outs[1] %}{{ outs[1].done }}{% endif %}",
-    "{% set outs = results.b | selectattr('output') | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
-    "{% with outs = results.b | map(attribute='output') | select %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
-    "{% set ok = results.b | selectattr('output') | list %}{% for r in ok %}{{ r.output.done }}{% endfor %}",
 ])
-def test_a_check_guards_the_path_it_reads_also_through_a_loop_variable(source):
+def test_a_check_guards_the_path_it_reads(source):
     read = read_of(source)
-    assert templates.guard("results", read.path[:3]) in read.guarded  # results.b[1].output or results.b[*].output
+    assert templates.guard("results", read.path[:3]) in read.guarded  # results.b[1].output, results.b[start.i].output
 
 
 @pytest.mark.parametrize("source", [
-    "{% for r in results.b %}{{ r.output.done }}{% endfor %}",
+    "{{ results.b[1].output.done }}",
     "{% if results.b[0].output %}{{ results.b[1].output.done }}{% endif %}",  # another item
-    "{% for r in results.b %}{% if r.index %}{{ r.output.done }}{% endif %}{% endfor %}",
-    "{% for r in results.b if r %}{{ r.output.done }}{% endfor %}",
-    "{% for r in results.b | selectattr('output', 'defined') %}{{ r.output.done }}{% endfor %}",  # set, but maybe none
-    "{% for r in results.b %}{% if r.output %}x{% endif %}{{ r.output.done }}{% endfor %}",  # after the check
-    "{% for a in results.b %}{% for c in results.b %}{% if c.output %}{{ a.output.done }}{% endif %}{% endfor %}{% endfor %}",
-    "{% for r in results.b %}{% if r.output %}{{ results.b[-1].output.done }}{% endif %}{% endfor %}",
+    "{% if results.b[1].index %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if results.b[1].output %}x{% endif %}{{ results.b[1].output.done }}",  # after the check
     "{% if results.b[start.i].output %}{{ results.b[start.j].output.done }}{% endif %}",
-    "{{ results.b | map(attribute='output.done') | list }}",
-    "{% for o in results.b | map(attribute='output') %}{{ o.done }}{% endfor %}",  # each o is an output
-    "{% for r in results.b | selectattr('output', 'none') %}{{ r.output.done }}{% endfor %}",  # only the none ones
-    "{% set outs = results.b | map(attribute='output') | list %}{% for o in outs %}{{ o.done }}{% endfor %}",
-    "{% set outs = results.b | map(attribute='output') | list %}{{ outs[1].done }}",  # outs[1] is results.b[1].output
-    "{% set outs = results.b | map(attribute='output') | list %}{% if outs[0] %}{{ outs[1].done }}{% endif %}",
-    "{% with outs = results.b | map(attribute='output') %}{% for o in outs %}{{ o.done }}{% endfor %}{% endwith %}",
-    "{% set outs = results.b | map(attribute='output') %}{% set again = outs | list %}{{ again[1].done }}",
-    "{% set ok = results.b | selectattr('output') | list %}{{ ok[0].output.done }}",  # empty when each item failed
 ])
 def test_a_check_of_something_else_leaves_the_path_unguarded(source):
     read = read_of(source)
