@@ -307,12 +307,29 @@ def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, probl
     ("wf:hunter2@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme."),
     ("https://wf:[hunter2]@127.0.0.1:8123/wf", "metrics.url doesn't parse as https://user:password@host:port/database."),
     ("https://wf:12345/hunter2@clickhouse.example.com:8443", "metrics.url has an @ after the host, so a / in the user or the "
-                                                             "password isn't percent-encoded."),
-    ("https://wf:hunter2/x@clickhouse.example.com:8443/wf", "metrics.url has a port that isn't a number from 1 to 65535, has "
-                                                            "an @ after the host, so a / in the user or the password isn't "
-                                                            "percent-encoded and has more than one name after the port"),
-    ("https://wf:hunter2#1@clickhouse.example.com:8443/wf", "metrics.url has a ? or a # that isn't percent-encoded"),
+                                                             "password isn't percent-encoded and lacks the database."),
+    ("https://wf:hunter2/x@clickhouse.example.com:8443/wf", "metrics.url has an @ after the host, so a / in the user or the "
+                                                            "password isn't percent-encoded."),  # the host is after the last @
+    ("https://wf:hunter2/x@clickhouse.example.com:84430/wf/x", "metrics.url has a port that isn't a number from 1 to 65535, "
+                                                               "has an @ after the host, so a / in the user or the password "
+                                                               "isn't percent-encoded and has more than one name after the port"),
+    ("https://wf:hunter2/x@clickhouse.example.com/wf", "metrics.url has an @ after the host, so a / in the user or the "
+                                                       "password isn't percent-encoded and lacks the port."),
+    ("https://wf:hunter2#1@clickhouse.example.com:8443/wf", "metrics.url has a ? or a # that isn't percent-encoded."),
+    ("https://wf:hunter 2@clickhouse.example.com/wf", "metrics.url has a space or a control character that isn't "
+                                                      "percent-encoded and lacks the port."),
     ("https://wf:hunter2@clickhouse.example.com:84430/wf", "metrics.url has a port that isn't a number from 1 to 65535."),
+    ("https://wf:hunter2@clickhouse.example.com:84430", "metrics.url has a port that isn't a number from 1 to 65535 and "
+                                                        "lacks the database."),
+    ("https://wf@clickhouse.example.com:84430/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks "
+                                                   "the password."),
+    ("https://:hunter2@clickhouse.example.com:84430/wf", "metrics.url has a port that isn't a number from 1 to 65535 and "
+                                                         "lacks the user."),
+    ("https://wf:hunter2@:84430/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the host."),
+    ("://wf:hunter2@clickhouse.example.com:8443/wf", "(://wf:***@clickhouse.example.com:8443/wf) lacks the scheme"),
+    ("wf:hunter2@http://127.0.0.1:8123", "metrics.url has text before :// that isn't a scheme and lacks the database."),
+    ("https://wf:[hunter2]@127.0.0.1:8123", "metrics.url doesn't parse as https://user:password@host:port/database and "
+                                            "lacks the database."),
     ("https://clickhouse.example.com:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user "
                                             "and the password."),  # without an @, no reading of it has a login
     ("https://wf:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user and the password."),

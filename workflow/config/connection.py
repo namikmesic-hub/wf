@@ -21,7 +21,9 @@ FORM = "https://user:password@host:port/database"
 SCHEMES = ("http", "https")
 SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")  # RFC 3986: a password written before :// doesn't match
 MASK = "***"
-SIGNS = {"the scheme": "://", "the user": "@", "the password": "@"}  # no reading of a text without the sign has the part
+LOGIN = ("the user", "the password")
+ESCAPED = str.maketrans({"/": "%2F", "?": "%3F", "#": "%23"})  # in the login: urlsplit would end the host at them
+BRACKETS = str.maketrans({"[": "%5B", "]": "%5D"})
 BROKEN = "(not shown, because it doesn't parse)"
 UNSURE = "(not shown, because it lacks the user or the password)"
 
@@ -41,15 +43,23 @@ class Connection:
 
     @classmethod
     def parse(cls, text: str) -> "Connection":
+        """The parts of the text in the order of FORM, also when it doesn't parse. The first :// ends the
+        scheme, the last @ ends the user and the password, and the next / ends the host and the port. Text
+        before :// that isn't a scheme can hold the login, so then wf names a missing login only without an @."""
         head, sep, rest = text.partition("://")
-        if sep and not SCHEME.fullmatch(head):
-            return cls(text, broken=("has text before :// that isn't a scheme",))
+        if sep and head and not SCHEME.fullmatch(head):
+            after = cls.parse("http://" + rest).missing
+            return cls(text, broken=("has text before :// that isn't a scheme",),
+                       missing=(() if "@" in text else LOGIN) + tuple(part for part in after if part not in LOGIN))
         scheme, rest = (head.lower(), rest) if sep else ("", text)
+        login, at, place = rest.rpartition("@")
         try:
-            parts = urlsplit("//" + rest)
+            parts = urlsplit("//" + login.translate(ESCAPED) + at + place)
             host = parts.hostname or ""
-        except ValueError:  # brackets that hold no IPv6 address
-            return cls(text, broken=(f"doesn't parse as {FORM}",))
+        except ValueError:  # brackets that hold no IPv6 address: wf reads them as text to find the other parts
+            plain = text.translate(BRACKETS)
+            missing = cls.parse(plain).missing if plain != text else ()
+            return cls(text, broken=(f"doesn't parse as {FORM}",), missing=missing)
         broken = []
         if any(c.isspace() or not c.isprintable() for c in text):
             broken.append("has a space or a control character that isn't percent-encoded")
@@ -61,7 +71,7 @@ class Connection:
             port = 0
         if port == 0:
             broken.append("has a port that isn't a number from 1 to 65535")
-        if "@" in parts.path:
+        if "/" in login:
             broken.append("has an @ after the host, so a / in the user or the password isn't percent-encoded")
         names = [name for name in parts.path.split("/") if name]
         if len(names) > 1:
@@ -77,11 +87,8 @@ class Connection:
 
     @property
     def problems(self) -> list[str]:
-        """What keeps it from being a whole connection string, in words, as "lacks the user and the port".
-        For a string that doesn't parse, why it doesn't: the parts that it seems to lack may be there.
-        But without :// no reading of it has a scheme, and without an @ none has a login, so wf names those too."""
-        missing = self.missing if not self.broken else tuple(part for part, sign in SIGNS.items() if sign not in self.text)
-        found = list(self.broken) + ([f"lacks {_listed(missing)}"] if missing else [])
+        """What keeps it from being a whole connection string, in words, as "lacks the user and the port"."""
+        found = list(self.broken) + ([f"lacks {_listed(self.missing)}"] if self.missing else [])
         return found + ([self.scheme_problem] if self.scheme_problem else [])
 
     @property
