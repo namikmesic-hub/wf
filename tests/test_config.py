@@ -337,9 +337,21 @@ def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, probl
     ("https://wf:hunter2\uff20clickhouse.example.com:8443", "metrics.url has a character that isn't ASCII, such as a "
                                                            "full-width colon, in place of a :, /, ?, # or @ and lacks the "
                                                            "database."),
+    ("http://wf:hunter2@[::1]\uff0fwf", "metrics.url has a character that isn't ASCII, such as a full-width colon, in place "
+                                        "of a :, /, ?, # or @ and lacks the port."),
+    ("http://wf\uff1ahunter2@[::1]/wf", "metrics.url has a character that isn't ASCII, such as a full-width colon, in place "
+                                        "of a :, /, ?, # or @ and lacks the port."),
     ("wf@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and lacks the password."),
     (":hunter2@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and lacks the user."),
     ("1http://wf@clickhouse.example.com:8443/wf", "metrics.url has text before :// that isn't a scheme."),  # 1http://wf may be the login
+    ("wf\uff1ahunter2@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and has a character "
+                                                 "that isn't ASCII, such as a full-width colon, in place of a :, /, ?, # or @."),
+    ("wf:hunter2\uff20http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and has a character "
+                                                 "that isn't ASCII, such as a full-width colon, in place of a :, /, ?, # or @."),
+    ("wf:hunter2@http://127.0.0.1\uff1a8123/wf", "metrics.url has text before :// that isn't a scheme and has a character "
+                                                 "that isn't ASCII, such as a full-width colon, in place of a :, /, ?, # or @."),
+    ("wf@http://x\uff20127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and has a character that "
+                                           "isn't ASCII, such as a full-width colon, in place of a :, /, ?, # or @."),
     ("https://clickhouse.example.com:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user "
                                             "and the password."),  # without an @, no reading of it has a login
     ("https://wf:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user and the password."),
