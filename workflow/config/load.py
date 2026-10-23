@@ -12,9 +12,10 @@ programs that wf runs. A file that sets metrics.url is the user's alone (mode 06
 password goes there.
 """
 
+import grp
 import json
 import os
-import re
+import pwd
 import stat
 import tomllib
 from collections.abc import Mapping
@@ -47,13 +48,14 @@ def load(folder: Path | None = None, environ: Mapping[str, str] | None = None) -
         raise ConfigError(problems)
     table, facts = _read(file)
     problems = _unknown(table, file)
-    values, sources = {}, {}
+    values, sources, in_file = {}, {}, {}
     for key in KEYS.values():
         value, source = key.default, DEFAULT
         found = _lookup(table, key)
         if found is not _MISSING:
             try:
                 value, source = key.kind.from_toml(found), Source("file")
+                in_file[key.name] = value
             except Wrong:
                 problems.append(f"{file}: {key.name} must be {key.kind.allowed}, not {_shown(found, key)}")
         text = environ.get(key.variable, "").strip() if key.variable is not None else ""
@@ -68,7 +70,7 @@ def load(folder: Path | None = None, environ: Mapping[str, str] | None = None) -
     problems += _metrics(values, file) + _guarded(table, facts, file)
     if problems:
         raise ConfigError(problems)
-    return build(values, sources, file)
+    return build(values, sources, file, in_file)
 
 
 def _read(file: Path) -> tuple[dict, os.stat_result | None]:
@@ -85,11 +87,31 @@ def _read(file: Path) -> tuple[dict, os.stat_result | None]:
         return tomllib.loads(data.decode("utf-8")), facts
     except UnicodeDecodeError:
         raise ConfigError([f"{file} isn't UTF-8 text"]) from None
-    except tomllib.TOMLDecodeError as error:  # it names a character only when it can't be in TOML at all
-        said = re.sub(r"^Illegal character .*? \(", "Illegal character (", str(error))
-        raise ConfigError([f"{file} isn't valid TOML: {said}"]) from None
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError([f"{file} isn't valid TOML: {_said(error)}"]) from None
     except ValueError:  # Python reads no whole number of more than 4,300 digits
         raise ConfigError([f"{file} isn't valid TOML for Python: it has a number with too many digits"]) from None
+
+
+QUOTING = {  # tomllib's messages that quote the file, as a key or a character, and the words that wf keeps
+    "Cannot declare": "Cannot declare a table twice",
+    "Cannot mutate immutable namespace": "Cannot mutate immutable namespace",
+    "Cannot redefine namespace": "Cannot redefine namespace",
+    "Duplicate inline table key": "Duplicate inline table key",
+    "Found invalid character": "Found invalid character",
+    "Illegal character": "Illegal character",
+}
+
+
+def _said(error: tomllib.TOMLDecodeError) -> str:
+    """tomllib's message, with its line and column, without the text of the file."""
+    text, at, where = str(error).rpartition(" (at ")
+    if not at:
+        text, where = str(error), ""
+    for start, words in QUOTING.items():
+        if text.startswith(start + " "):
+            text = words
+    return f"{text}{at}{where}"
 
 
 def _lookup(table: dict, key: Key) -> object:
@@ -150,7 +172,8 @@ def _metrics(values: dict, file: Path) -> list[str]:
 def _guarded(table: dict, facts: os.stat_result | None, file: Path) -> list[str]:
     """The file is the user's, and no other user can change it, since it names the programs that wf
     runs. When it sets metrics.url, no other user can open it either. A password can stand where wf
-    reads the host, the port or the database, so wf can't tell if a URL holds one."""
+    reads the host, the port or the database, so wf can't tell if a URL holds one. Group write is
+    fine when the group is the user's alone, as with a group for each user and umask 002."""
     if facts is None:
         return []
     mode, url = stat.S_IMODE(facts.st_mode), _lookup(table, KEYS["metrics.url"])
@@ -160,10 +183,21 @@ def _guarded(table: dict, facts: os.stat_result | None, file: Path) -> list[str]
     if mode & 0o077 and isinstance(url, str) and url.strip():
         return [f"{file} sets metrics.url, where the password of ClickHouse goes, and its mode {mode:04o} lets "
                 f"other users open it. Make it yours alone: chmod 600 {file}"]
-    if mode & 0o022:
+    if mode & 0o002 or (mode & 0o020 and not _private_group(facts)):
         return [f"{file} names the programs that wf runs, and its mode {mode:04o} lets other users change it. "
                 f"Make it yours: chmod go-w {file}"]
     return []
+
+
+def _private_group(facts: os.stat_result) -> bool:
+    """Is the group of the file its owner's alone? No other user has it as primary group or as member."""
+    try:
+        owner = pwd.getpwuid(facts.st_uid).pw_name
+        members = set(grp.getgrgid(facts.st_gid).gr_mem)
+    except KeyError:
+        return False
+    members |= {user.pw_name for user in pwd.getpwall() if user.pw_gid == facts.st_gid}
+    return members == {owner}
 
 
 def _shown(value: object, key: Key) -> str:

@@ -21,6 +21,7 @@ FORM = "https://user:password@host:port/database"
 SCHEMES = ("http", "https")
 SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")  # RFC 3986: a password written before :// doesn't match
 MASK = "***"
+SIGNS = {"the scheme": "://", "the user": "@", "the password": "@"}  # no reading of a text without the sign has the part
 BROKEN = "(not shown, because it doesn't parse)"
 UNSURE = "(not shown, because it lacks the user or the password)"
 
@@ -77,8 +78,10 @@ class Connection:
     @property
     def problems(self) -> list[str]:
         """What keeps it from being a whole connection string, in words, as "lacks the user and the port".
-        For a string that doesn't parse, why it doesn't: the parts that it seems to lack may be there."""
-        found = list(self.broken) or ([f"lacks {_listed(self.missing)}"] if self.missing else [])
+        For a string that doesn't parse, why it doesn't: the parts that it seems to lack may be there.
+        But without :// no reading of it has a scheme, and without an @ none has a login, so wf names those too."""
+        missing = self.missing if not self.broken else tuple(part for part, sign in SIGNS.items() if sign not in self.text)
+        found = list(self.broken) + ([f"lacks {_listed(missing)}"] if missing else [])
         return found + ([self.scheme_problem] if self.scheme_problem else [])
 
     @property

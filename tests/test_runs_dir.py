@@ -227,7 +227,7 @@ def test_runs_dir_in_config_toml_keeps_run_folders_outside_the_repo_unless_the_v
     assert not (repo / ".wf").exists()
 
 
-def test_a_blank_wf_runs_dir_turns_off_the_runs_folder_of_config_toml(repo, tmp_path, monkeypatch, wf_home):
+def test_a_blank_wf_runs_dir_turns_off_the_runs_folder_of_config_toml(repo, tmp_path, monkeypatch, wf_home, capsys):
     flag = tmp_path / "flag"
     assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={flag}"]) == 1
     (run,) = runs.all_runs(repo)
@@ -235,6 +235,10 @@ def test_a_blank_wf_runs_dir_turns_off_the_runs_folder_of_config_toml(repo, tmp_
     hint = run.command("retry")
     assert hint == f"WF_RUNS_DIR= wf retry {run.id}"
     monkeypatch.setenv("WF_RUNS_DIR", "")  # as the printed command sets it
+    assert run.command("retry") == hint  # what it prints then is for a new shell, which has no blank variable
+    capsys.readouterr()
+    assert cli.main(shlex.split(hint)[2:]) == 1
+    assert f"continue with: {hint}\n" in capsys.readouterr().out
     flag.touch()
     assert cli.main(shlex.split(hint)[2:]) == 0
     assert run.status()["status"] == "succeeded"

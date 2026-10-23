@@ -1,4 +1,6 @@
 # An example configuration of an OpenTelemetry Collector, for a metrics stack that you run yourself.
+# It needs the contrib distribution of the Collector, which has the clickhouse exporter:
+# the image otel/opentelemetry-collector-contrib:0.162.0 validates it.
 # It takes OTLP from Claude Code and Codex, and writes it into the ClickHouse database otel.
 # The Collector makes the tables of that database when it starts.
 # Set CLICKHOUSE_ENDPOINT, CLICKHOUSE_USER and CLICKHOUSE_PASSWORD where the Collector runs.

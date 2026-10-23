@@ -143,6 +143,7 @@ Only an empty `WF_RUNS_DIR` turns the runs folder off, also when the file names 
 wf doesn't start when the file has an unknown key or a value of the wrong kind.
 Its message names the key, the file and what the key allows.
 The file must be yours, and no other user may change it, because it names programs that wf runs.
+Group write is fine when no other user is in the group of the file, as with a group for each user.
 wf doesn't read `~/.wf/config.yaml` any more.
 While that file is there, wf stops, and names the key in `config.toml` for each of its settings.
 
@@ -162,6 +163,9 @@ wf never shows it: `wf config show` and each message of wf show `***` in its pla
 wf doesn't show a string that doesn't parse, or that lacks the user or the password, because it can't find the password there.
 When the file sets `url` under `[metrics]`, it must be yours alone, because the password goes there.
 Then wf doesn't start until you run `chmod 600 ~/.wf/config.toml`.
+Mode 0600 keeps out other users, but not the programs that you run.
+So an agent can read the password too, at each access level and on each harness.
+Only a read-only session on Cursor's SDK stays in the workspace and the files and folders that its instruction names.
 
 `docs/metrics/compose.yaml` is an example that runs ClickHouse in Docker on this machine, with a profile for little memory.
 You start it and you stop it, and wf never runs Docker:
@@ -172,6 +176,7 @@ docker compose -f docs/metrics/compose.yaml down      # stop it (down -v also de
 ```
 
 Its compose project is `wf-clickhouse`.
+A `COMPOSE_PROJECT_NAME` in your shell replaces that name, so unset it, or give both commands `-p wf-clickhouse`.
 An older wf started a stack with Grafana and a Collector as the compose project `wf-metrics`.
 `docker compose -p wf-metrics down` stops that stack, and `down -v` also deletes its data.
 
@@ -191,6 +196,7 @@ The HTTP port runs a statement only for a request to 127.0.0.1 or localhost with
 Beside the example are two files for a stack that you run.
 `docs/metrics/grafana/wf-runs.json` is a dashboard of wf runs for Grafana, which reads the database `wf` through a ClickHouse datasource with the uid `clickhouse`.
 `docs/metrics/collector/config.yaml` configures an OpenTelemetry Collector that takes OTLP from Claude Code and Codex, and writes it to the database `otel`.
+It needs the contrib distribution of the Collector, which has the ClickHouse exporter, as the image `otel/opentelemetry-collector-contrib:0.162.0`.
 The Collector reads the address, the user and the password of ClickHouse from its environment.
 
 ## Docs

@@ -101,11 +101,13 @@ class Run:
         """The wf command that does `verb` to this run, as typed in its repo, e.g. `wf retry <id>`.
         For a run in a runs folder it ends in --runs-dir, so it finds the run whatever WF_RUNS_DIR and
         config.toml say where you type it. For one in ./.wf/runs while WF_RUNS_DIR or config.toml sets a runs folder,
-        it starts with `WF_RUNS_DIR=`, which turns the setting off. No --runs-dir value names ./.wf/runs."""
+        it starts with `WF_RUNS_DIR=`, which turns the setting off. No --runs-dir value names ./.wf/runs.
+        A blank WF_RUNS_DIR here doesn't drop it while the file names a runs folder: a new shell has no such variable."""
         text = " ".join(["wf", verb, self.id, *more])
         if self.dir.parent != self.repo.resolve() / ROOT:
             return f"{text} --runs-dir {shlex.quote(str(self.dir.parent.parent))}"
-        return f"{RUNS_DIR}= {text}" if runs_folder(self.repo) != self.dir.parent else text
+        elsewhere = runs_folder(self.repo) != self.dir.parent or config.get().in_file.get("runs_dir") is not None
+        return f"{RUNS_DIR}= {text}" if elsewhere else text
 
     def location(self) -> tuple[list[str], dict[str, str]]:
         """The arguments and the environment that let a new wf process find this run, whatever WF_RUNS_DIR

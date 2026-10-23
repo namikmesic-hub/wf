@@ -227,7 +227,8 @@ DEFAULT = Source("default")
 
 @dataclass(frozen=True)
 class Config:
-    """The keys at the top of config.toml, a section for each of its tables, the file, and the source of each value."""
+    """The keys at the top of config.toml, a section for each of its tables, the file, and the source of each value.
+    in_file holds what the file sets, by key name, also where a variable or a flag wins over it."""
 
     runs_dir: Path | None = key(Location(), variable="WF_RUNS_DIR", flag="--runs-dir", none=".wf/runs in each repo",
                                 blank_is_default=True)  # WF_RUNS_DIR= finds a run in .wf/runs (runs.Run.command)
@@ -241,6 +242,7 @@ class Config:
     metrics: Metrics = field(default_factory=Metrics)
     file: Path = Path("config.toml")  # the config.toml that load() looked for
     sources: Mapping[str, Source] = field(default_factory=dict, repr=False, compare=False)
+    in_file: Mapping[str, object] = field(default_factory=dict, repr=False, compare=False)
 
     def source(self, name: str) -> Source:
         return self.sources.get(name, DEFAULT)
@@ -260,7 +262,7 @@ class Config:
             raise ValueError(f"{', '.join(sorted(unknown))} isn't in config.KEYS")
         values = {name: self.value(name) for name in KEYS} | chosen
         sources = {**self.sources, **{name: Source("flag", KEYS[name].flag) for name in chosen}}
-        return build(values, sources, self.file)
+        return build(values, sources, self.file, self.in_file)
 
 
 @dataclass(frozen=True)
@@ -301,9 +303,10 @@ def _keys() -> dict[str, Key]:
 KEYS = _keys()
 
 
-def build(values: Mapping[str, object], sources: Mapping[str, Source], file: Path) -> Config:
-    """A Config from each key's value, by name."""
+def build(values: Mapping[str, object], sources: Mapping[str, Source], file: Path,
+          in_file: Mapping[str, object] | None = None) -> Config:
+    """A Config from each key's value, by name, and the values that the file sets."""
     parts = {name: values[name] for name in KEYS if not KEYS[name].section}
     for section, make in SECTIONS.items():
         parts[section] = make(**{one.name: values[f"{section}.{one.name}"] for one in fields(make)})
-    return Config(**parts, file=file, sources=dict(sources))
+    return Config(**parts, file=file, sources=dict(sources), in_file=dict(in_file or {}))

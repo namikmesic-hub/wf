@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import pytest
 
@@ -274,6 +275,10 @@ def test_every_problem_is_named_at_once_and_stops_every_command(wf_home, monkeyp
 @pytest.mark.parametrize("data, problem", [
     (b"max_agents =\n", "isn't valid TOML: Invalid value (at line 1, column 13)"),
     (b'[metrics]\nurl = "https://wf:hunter2\x01@h:1/wf"\n', "isn't valid TOML: Illegal character (at line 2, column 26)"),
+    (b'[metrics]\nenabled = true\nurl = {"https://wf:hunter2@h:8123/wf" = 1, "https://wf:hunter2@h:8123/wf" = 2}\n',
+     "isn't valid TOML: Duplicate inline table key (at line 3, column 78)"),
+    (b'["https://wf:hunter2@h:8123/wf"]\n["https://wf:hunter2@h:8123/wf"]\n',
+     "isn't valid TOML: Cannot declare a table twice (at line 2, column 32)"),
     (b"max_agents = 2\xff\n", "isn't UTF-8 text"),
     (b"max_agents = 1" + b"0" * 5000 + b"\n", "isn't valid TOML for Python: it has a number with too many digits"),
 ])
@@ -308,6 +313,13 @@ def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, probl
                                                             "percent-encoded and has more than one name after the port"),
     ("https://wf:hunter2#1@clickhouse.example.com:8443/wf", "metrics.url has a ? or a # that isn't percent-encoded"),
     ("https://wf:hunter2@clickhouse.example.com:84430/wf", "metrics.url has a port that isn't a number from 1 to 65535."),
+    ("https://clickhouse.example.com:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user "
+                                            "and the password."),  # without an @, no reading of it has a login
+    ("https://wf:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user and the password."),
+    ("wf:hunter2@clickhouse.example.com:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the "
+                                               "scheme."),  # without ://, no reading of it has a scheme
+    ("clickhouse.example.com:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the scheme, the "
+                                    "user and the password."),
 ])
 def test_with_metrics_enabled_wf_names_each_part_that_the_url_lacks_and_never_its_password(wf_home, url, problem, capsys):
     file = write(wf_home, f'[metrics]\nenabled = true\nurl = "{url}"\n')
@@ -380,17 +392,45 @@ def test_a_file_without_metrics_url_can_be_read_by_others(wf_home):
     assert (config.load().cursor.runtime, config.load().metrics.url) == ("acp", None)
 
 
+def group_of(file: Path, monkeypatch, *, mine: bool = True, primary: tuple = (), members: tuple = ()):
+    """The users that the group of `file` has, as wf reads them: `mine` makes it its owner's primary group."""
+    load = sys.modules["workflow.config.load"]
+    facts = os.stat(file)
+    owner = load.pwd.getpwuid(facts.st_uid).pw_name
+    people = [SimpleNamespace(pw_name=name, pw_gid=facts.st_gid) for name in ((owner,) if mine else ()) + primary]
+    monkeypatch.setattr(load.pwd, "getpwall", lambda: people)
+    monkeypatch.setattr(load.grp, "getgrgid", lambda gid: SimpleNamespace(gr_mem=list(members)))
+
+
+def changeable(file: Path, mode: int) -> str:
+    return (f"{file} names the programs that wf runs, and its mode {mode:04o} lets other users change it. "
+            f"Make it yours: chmod go-w {file}")
+
+
 @pytest.mark.parametrize("mode", [0o664, 0o646, 0o666])
 def test_a_file_that_other_users_can_change_or_that_another_user_owns_is_refused(wf_home, mode, monkeypatch):
     file = write(wf_home, '[paths]\ncodex = "/opt/codex/bin/codex"\n')
     file.chmod(mode)
-    assert problems() == [f"{file} names the programs that wf runs, and its mode {mode:04o} lets other users change "
-                          f"it. Make it yours: chmod go-w {file}"]
+    group_of(file, monkeypatch, members=("alice",))  # a group of more users, as staff on macOS
+    assert problems() == [changeable(file, mode)]
     file.chmod(0o644)
     assert config.load().paths.codex == Path("/opt/codex/bin/codex")
     monkeypatch.setattr(os, "getuid", lambda: os.stat(file).st_uid + 1)
     assert problems() == [f"{file} belongs to another user, who can change the programs that wf runs. Use a "
                           "config.toml of your own, or set WF_HOME to a folder of yours"]
+
+
+def test_group_write_is_fine_while_the_group_of_the_file_is_yours_alone(wf_home, monkeypatch):
+    file = write(wf_home, '[paths]\ncodex = "/opt/codex/bin/codex"\n')
+    file.chmod(0o664)  # umask 002, as with a group for each user
+    group_of(file, monkeypatch)
+    assert config.load().paths.codex == Path("/opt/codex/bin/codex")
+    for others in ({"primary": ("alice",)}, {"members": ("alice",)}, {"mine": False}):
+        group_of(file, monkeypatch, **others)  # another user's group too, or a group without you
+        assert problems() == [changeable(file, 0o664)]
+    group_of(file, monkeypatch)
+    file.chmod(0o666)
+    assert problems() == [changeable(file, 0o666)]
 
 
 # ---------- config.yaml ----------

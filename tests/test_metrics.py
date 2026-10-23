@@ -69,6 +69,7 @@ def test_the_readme_gives_the_commands_and_the_url_of_the_example(wf_home):
     assert "docker compose -f docs/metrics/compose.yaml up -d" in text
     assert "docker compose -f docs/metrics/compose.yaml down" in text
     assert "`docker compose -p wf-metrics down` stops that stack" in text  # the stack that an older wf started
+    assert "A `COMPOSE_PROJECT_NAME` in your shell replaces that name" in text and "`-p wf-clickhouse`" in text
     service = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]["clickhouse"]
     login = service["environment"]
     url = urlsplit(readme_url())
@@ -93,6 +94,7 @@ def test_the_collector_takes_the_login_of_clickhouse_from_its_environment():
     exporter = yaml.safe_load(COLLECTOR.read_text(encoding="utf-8"))["exporters"]["clickhouse"]
     assert (exporter["endpoint"], exporter["username"], exporter["password"]) == (
         "${env:CLICKHOUSE_ENDPOINT}", "${env:CLICKHOUSE_USER}", "${env:CLICKHOUSE_PASSWORD}")
+    assert "otel/opentelemetry-collector-contrib:0.162.0" in COLLECTOR.read_text(encoding="utf-8")  # its exporter is there
 
 
 def test_wf_runs_no_docker_and_has_no_metrics_command(capsys):
