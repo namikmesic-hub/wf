@@ -29,7 +29,7 @@ MASKED = "https://wf%40team:***@clickhouse.example.com:8443/wf"
 def write(wf_home: Path, text: str) -> Path:
     """config.toml, yours alone, as a file that holds a password must be."""
     file = wf_home / "config.toml"
-    file.write_text(dedent(text).lstrip())
+    file.write_text(dedent(text).lstrip(), encoding="utf-8")
     file.chmod(0o600)
     return file
 
@@ -330,6 +330,16 @@ def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, probl
     ("wf:hunter2@http://127.0.0.1:8123", "metrics.url has text before :// that isn't a scheme and lacks the database."),
     ("https://wf:[hunter2]@127.0.0.1:8123", "metrics.url doesn't parse as https://user:password@host:port/database and "
                                             "lacks the database."),
+    ("https\uff1a//wf:hunter2@clickhouse.example.com:8443/wf", "metrics.url has a character that isn't ASCII, such as a "
+                                                              "full-width colon, in place of a :, /, ?, # or @."),
+    ("clickhouse.example.com\uff1a8443/wf", "metrics.url has a character that isn't ASCII, such as a full-width colon, in "
+                                            "place of a :, /, ?, # or @ and lacks the scheme, the user and the password."),
+    ("https://wf:hunter2\uff20clickhouse.example.com:8443", "metrics.url has a character that isn't ASCII, such as a "
+                                                           "full-width colon, in place of a :, /, ?, # or @ and lacks the "
+                                                           "database."),
+    ("wf@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and lacks the password."),
+    (":hunter2@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and lacks the user."),
+    ("1http://wf@clickhouse.example.com:8443/wf", "metrics.url has text before :// that isn't a scheme."),  # 1http://wf may be the login
     ("https://clickhouse.example.com:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user "
                                             "and the password."),  # without an @, no reading of it has a login
     ("https://wf:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user and the password."),

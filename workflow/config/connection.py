@@ -14,6 +14,7 @@ is. For the same reason, a config.toml that sets the string at all must be the u
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
@@ -24,6 +25,8 @@ MASK = "***"
 LOGIN = ("the user", "the password")
 ESCAPED = str.maketrans({"/": "%2F", "?": "%3F", "#": "%23"})  # in the login: urlsplit would end the host at them
 BRACKETS = str.maketrans({"[": "%5B", "]": "%5D"})
+SEPARATORS = ":/?#@"
+FOLDED = "has a character that isn't ASCII, such as a full-width colon, in place of a :, /, ?, # or @"
 BROKEN = "(not shown, because it doesn't parse)"
 UNSURE = "(not shown, because it lacks the user or the password)"
 
@@ -45,21 +48,26 @@ class Connection:
     def parse(cls, text: str) -> "Connection":
         """The parts of the text in the order of FORM, also when it doesn't parse. The first :// ends the
         scheme, the last @ ends the user and the password, and the next / ends the host and the port. Text
-        before :// that isn't a scheme can hold the login, so then wf names a missing login only without an @."""
+        before :// that isn't a scheme can hold the login before its last @. But with an @ after the ://,
+        the login can start on either side of it, so wf names no missing login."""
         head, sep, rest = text.partition("://")
         if sep and head and not SCHEME.fullmatch(head):
             after = cls.parse("http://" + rest).missing
+            user, _, password = head.rpartition("@")[0].partition(":")
+            lacking = () if "@" in rest else tuple(part for part, value in zip(LOGIN, (user, password)) if not value)
             return cls(text, broken=("has text before :// that isn't a scheme",),
-                       missing=(() if "@" in text else LOGIN) + tuple(part for part in after if part not in LOGIN))
+                       missing=lacking + tuple(part for part in after if part not in LOGIN))
         scheme, rest = (head.lower(), rest) if sep else ("", text)
         login, at, place = rest.rpartition("@")
         try:
             parts = urlsplit("//" + login.translate(ESCAPED) + at + place)
             host = parts.hostname or ""
-        except ValueError:  # brackets that hold no IPv6 address: wf reads them as text to find the other parts
-            plain = text.translate(BRACKETS)
-            missing = cls.parse(plain).missing if plain != text else ()
-            return cls(text, broken=(f"doesn't parse as {FORM}",), missing=missing)
+        except ValueError:  # brackets that hold no IPv6 address, or a character that NFKC folds into a separator
+            folded = unicodedata.normalize("NFKC", text)
+            gained = any(folded.count(separator) > text.count(separator) for separator in SEPARATORS)
+            why = FOLDED if gained else f"doesn't parse as {FORM}"
+            plain = folded.translate(BRACKETS)  # brackets as text, and each folded character as its separator
+            return cls(text, broken=(why,), missing=cls.parse(plain).missing if plain != text else ())
         broken = []
         if any(c.isspace() or not c.isprintable() for c in text):
             broken.append("has a space or a control character that isn't percent-encoded")
