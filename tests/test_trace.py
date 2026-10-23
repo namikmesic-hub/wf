@@ -14,10 +14,11 @@ from textwrap import dedent
 import pytest
 
 from fakes import Fake, submit, talk
-from workflow import cli, harnesses, nodes, runner, templates, trace, trace_view
+from workflow import cli, harnesses, nodes, runner, spec, state, templates, trace, trace_view
 from workflow.harnesses.base import TurnEnd
 from workflow.output_tool import REMINDER
 from workflow.runs import Run
+from workflow.schemas import EACH
 
 
 @pytest.fixture
@@ -300,6 +301,180 @@ def test_a_secret_that_a_sub_workflow_returns_is_hidden_inside_it_too(repo, sour
     assert of("render", field="end.output.token")[0]["result"] == trace.HIDDEN
     note = of("render", field="end.output.note")[0]["result"]
     assert note == (0 if note_shows else trace.HIDDEN)  # an output that feeds no secret shows
+
+
+@pytest.mark.parametrize("source, note_shows", [
+    ("{{ results.creds[0].output.token }}", True),
+    ("{{ results.creds | tojson }}", False),  # each item, with all of its output
+    ("{{ results | tojson }}", False),
+])
+def test_a_secret_that_a_sub_workflow_item_returns_through_results_is_hidden_inside_it_too(repo, source, note_shows):
+    Path("creds.yaml").write_text(dedent("""
+        version: 1
+        name: creds
+        start: {input: {}}
+        nodes:
+          fetch: {needs: [start], command: "printf 'tok-%s-%s' sub $((6*7))"}
+        end: {output: {token: "{{ fetch.stdout }}", note: "{{ fetch.exit_code }}"}}
+    """))
+    write("""
+        version: 1
+        name: outer
+        start: {input: {}}
+        nodes:
+          creds: {needs: [start], for_each: "[1]", workflow: creds.yaml}
+          use:
+            needs: [creds]
+            command: 'test -n "$TOKEN"'
+            env: {TOKEN: "SOURCE"}
+            secret_env: [TOKEN]
+        end: {output: {}}
+    """.replace("SOURCE", source))
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert "tok-sub-42" not in everything_written()
+    (fetched,) = of("job_end", node="fetch")
+    assert (fetched["where"], fetched["output"]["stdout"]) == ("creds[0]/", trace.HIDDEN)
+    note = of("render", field="end.output.note")[0]["result"]
+    assert note == (0 if note_shows else trace.HIDDEN)
+
+
+@pytest.mark.parametrize("source, secret", [
+    ("{{ results.fetch[0].output.stdout }}", "tok-9f2e-out"),  # the output that the item gave
+    ("{{ results.fetch[0].item }}", "tok-9f2e"),  # the item, and the input that it comes from
+    ("{{ results.fetch | tojson }}", "tok-9f2e"),
+])
+def test_a_secret_read_through_results_is_hidden_where_its_node_and_item_give_it(repo, source, secret):
+    write("""
+        version: 1
+        name: through
+        start: {input: {tokens: {type: array, maxItems: 2, items: {type: string}}}}
+        nodes:
+          fetch:
+            needs: [start]
+            for_each: start.tokens
+            command: 'printf "%s-out" "$TOKEN"'
+            env: {TOKEN: "{{ item }}"}
+          use:
+            needs: [fetch]
+            command: 'test -n "$SECRET"'
+            env: {SECRET: "SOURCE"}
+            secret_env: [SECRET]
+        end: {output: {}}
+    """.replace("SOURCE", source))
+    Path("in.json").write_text(json.dumps({"tokens": ["tok-9f2e"]}))
+    assert cli.main(["run", "flow.yaml", "--input", "in.json"]) == 0
+    assert secret not in everything_written()  # the job_end, job and run records were written before the read
+
+
+@pytest.mark.parametrize("reader, source", [
+    ("use", "{{ results.pick[0].item.output.stdout }}"),  # through pick, whose items are the entries of fetch
+    ("pick", "{{ item.output.stdout }}"),
+])
+def test_a_secret_that_reaches_results_through_a_for_each_list_is_hidden_where_the_first_node_gives_it(repo, reader, source):
+    nodes = {
+        "fetch": {"needs": ["start"], "for_each": "start.tokens", "command": 'printf "%s-out" "$TOKEN"', "env": {"TOKEN": "{{ item }}"}},
+        "pick": {"needs": ["fetch"], "for_each": "results.fetch", "command": "true"},
+        "use": {"needs": ["pick"], "command": "true"},
+    }
+    nodes[reader] |= {"command": 'test -n "$SECRET"', "env": {"SECRET": source}, "secret_env": ["SECRET"]}
+    tokens = {"type": "array", "maxItems": 2, "items": {"type": "string"}}
+    write(json.dumps({"version": 1, "name": "chain", "start": {"input": {"tokens": tokens}}, "nodes": nodes, "end": {"output": {}}}))
+    Path("in.json").write_text(json.dumps({"tokens": ["tok-9f2e"]}))
+    assert cli.main(["run", "flow.yaml", "--input", "in.json"]) == 0
+    assert "tok-9f2e-out" not in everything_written()  # also in the job_end records of fetch
+    assert of("job_end", node="fetch")[0]["output"]["stdout"] == trace.HIDDEN
+
+
+def test_a_secret_item_from_a_literal_list_stays_hidden_in_results_after_a_new_process_continues_the_run(repo, capsys):
+    write("""
+        version: 1
+        name: literal
+        start: {input: {}}
+        nodes:
+          work:
+            needs: [start]
+            for_each: '["tok-lit-5e1d"]'
+            command: 'test -n "$TOKEN"'
+            env: {TOKEN: "{{ item }}"}
+            secret_env: [TOKEN]
+          approve: {needs: [work], human: "Go on?", output: {ok: {type: boolean}}}
+          tell: {needs: [approve], command: "printf '%s' {{ results.work[0].item | quote }}"}
+        end: {output: {}}
+    """)
+    assert cli.main(["run", "flow.yaml", "--no-input"]) == 2  # waits for approve
+    capsys.readouterr()
+    cli.main(["status", run_dir().name, "--json"])
+    key = json.loads(capsys.readouterr().out)["questions"][0]["key"]
+    Path("answers.json").write_text(json.dumps({key: {"ok": True}}))
+    assert cli.main(["answer", run_dir().name, "answers.json"]) == 0  # a new process: work doesn't run again
+    written = records()
+    start = next(n for n, r in enumerate(written) if r["kind"] == "run" and r["action"] == "retried")
+    assert "tok-lit-5e1d" not in json.dumps(written[start:])  # the for_each record of work holds the workflow's own text
+    assert of("render", node="tell")[0]["reads"] == [{"path": "results.work[0].item", "value": trace.HIDDEN}]
+
+
+@pytest.mark.parametrize("kept", [True, False])  # False: checkpoints without results, as a wf before results.<node> wrote them
+def test_a_secret_item_that_failed_stays_hidden_in_errors_after_a_new_process_continues_the_run(repo, capsys, monkeypatch, kept):
+    write("""
+        version: 1
+        name: literal
+        start: {input: {}}
+        nodes:
+          work:
+            needs: [start]
+            for_each: '["tok-err-7c2a", "fine-2b9d"]'
+            on_item_error: continue
+            command: 'test "$TOKEN" = fine-2b9d'
+            env: {TOKEN: "{{ item }}"}
+            secret_env: [TOKEN]
+          approve: {needs: [work], human: "Go on?", output: {ok: {type: boolean}}}
+          tell: {needs: [approve], command: "printf '%s %s' {{ errors.work[0].item | quote }} {{ results.work | length }}"}
+        end: {output: {}}
+    """)
+    with monkeypatch.context() as patch:
+        if not kept:
+            patch.setattr(state.Progress, "update", lambda self: {k: v for k, v in self.s.items() if k != "results"})
+        assert cli.main(["run", "flow.yaml", "--no-input"]) == 2  # waits for approve, with one item of work failed
+    capsys.readouterr()
+    cli.main(["status", run_dir().name, "--json"])
+    key = json.loads(capsys.readouterr().out)["questions"][0]["key"]
+    Path("answers.json").write_text(json.dumps({key: {"ok": True}}))
+    assert cli.main(["answer", run_dir().name, "answers.json"]) == 0  # a new process: work doesn't run again
+    written = records()
+    start = next(n for n, r in enumerate(written) if r["kind"] == "run" and r["action"] == "retried")
+    assert "tok-err-7c2a" not in json.dumps(written[start:])
+    assert of("render", node="tell")[0]["reads"][0] == {"path": "errors.work[0].item", "value": trace.HIDDEN}
+    assert of("job_end", node="tell")[0]["output"]["stdout"] == f"{trace.HIDDEN} {2 if kept else 0}"  # 0: results.work is empty
+
+
+def test_the_secret_paths_of_lists_that_read_each_others_results_come_to_an_end():
+    workflow = spec.parse(dedent("""
+        version: 1
+        name: loop
+        start: {input: {}}
+        nodes:
+          a: {needs: [start], for_each: "results.b[0].item.l", command: x}
+          b: {needs: [start], for_each: "results.a[0].item.l", command: x}
+          use: {needs: [a, b], command: x, env: {TOKEN: "{{ results.a[0].item.x }}"}, secret_env: [TOKEN]}
+        end: {output: {}}
+    """).lstrip())
+    paths = trace.find(workflow, spec.load).paths  # each step of the loop makes the path longer: it is cut
+    assert ("results", "b", 0, "item", "l", EACH, "x") in paths and max(map(len, paths)) <= 32
+
+
+def test_a_secret_in_the_output_of_a_for_each_node_is_secret_where_history_and_results_hold_it():
+    workflow = spec.parse(dedent("""
+        version: 1
+        name: items
+        start: {input: {}}
+        nodes:
+          fetch: {needs: [start], for_each: "[1, 2]", command: x}
+          use: {needs: [fetch], command: x, env: {TOKEN: "{{ fetch[-1].stdout }}"}, secret_env: [TOKEN]}
+        end: {output: {}}
+    """).lstrip())
+    paths = trace.find(workflow, spec.load).paths
+    assert {("fetch", EACH, "stdout"), ("history", "fetch", EACH, EACH, "stdout"),
+            ("results", "fetch", EACH, "output", "stdout")} <= paths
 
 
 def test_a_secret_in_an_agents_result_is_hidden_from_its_harness_record_of_the_call(repo, monkeypatch):

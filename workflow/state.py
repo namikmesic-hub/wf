@@ -59,6 +59,7 @@ class Finished(TypedDict):
     usage: dict  # {"cost_usd": float, "tokens": int}
     stopped: NotRequired[str]  # "limit": a limit stopped the job (a retry didn't start, or a sub-workflow paused)
     session: NotRequired[dict]  # the agent session this pass ended in {harness, model, id, cost_usd, streak}, or {sessions}
+    ran: NotRequired[dict]  # {harness, model} of the job's last agent attempt, also when the job failed
 
 
 class RunState(TypedDict, total=False):
@@ -72,6 +73,7 @@ class RunState(TypedDict, total=False):
     outputs: dict[str, Any]  # node -> latest output (start -> the input)
     history: dict[str, list]  # node -> every output, oldest first
     errors: dict[str, list]  # node -> failed items, for on_item_error: continue
+    results: dict[str, list]  # for_each node -> each item of its latest pass: {index, item, output, harness, model}
     workspaces: dict[str, Any]  # node -> {path, branch, base} of its latest pass
     sessions: dict[str, dict]  # node -> the agent session of its latest pass, for session: continue
     usage: dict  # {"cost_usd", "tokens"} so far
@@ -99,7 +101,7 @@ class Progress:
         self.run_usage = run_usage  # a sub-workflow shows the whole run's spending in `run`
         self.s: dict = copy.deepcopy({k: v for k, v in state.items() if k not in ("inbox", "input")})
         for key, empty in (("pending", []), ("active", {}), ("passes", {}), ("taken", {}), ("outputs", {}),
-                           ("history", {}), ("errors", {}), ("workspaces", {}), ("sessions", {})):
+                           ("history", {}), ("errors", {}), ("results", {}), ("workspaces", {}), ("sessions", {})):
             self.s.setdefault(key, empty)
         self.s.setdefault("usage", {"cost_usd": 0.0, "tokens": 0})
         self.s.setdefault("status", "running")
@@ -128,6 +130,7 @@ class Progress:
             "history": {n: s["history"].get(n, []) for n in nodes},
             "workspace": {n: s["workspaces"].get(n) for n in nodes},
             "errors": {n: s["errors"].get(n, []) for n in nodes},
+            "results": {n: s["results"].get(n, []) for n, node in nodes.items() if node.for_each is not None},
             "run": {k: run.get(k) for k in ("id", "dir", "cost_usd", "tokens", "elapsed_s", "base")},
             "session": {"continued": False}, "follow_up": follow_up_variable(s.get("follow_up")),
         }
@@ -147,6 +150,8 @@ class Progress:
             return  # a result for a pass that's no longer in progress
         key = _key(finished["index"])
         active["waiting"] -= 1
+        if finished.get("ran"):
+            active.setdefault("ran", {})[key] = finished["ran"]
         if finished["ok"]:
             active["outputs"][key] = finished["output"]
             active["workspaces"][key] = finished["workspace"]
@@ -224,6 +229,7 @@ class Progress:
         for node in again:
             self.s["outputs"].pop(node, None)
             self.s["errors"].pop(node, None)
+            self.s["results"].pop(node, None)
         _fresh_streaks(self.s["sessions"])  # the two continued passes in a row count from here
         self.emit({"event": "follow_up", "number": given["number"], "to": targets})
         self._make_pending(targets)
@@ -346,7 +352,7 @@ class Progress:
         if active["items"] is None:
             if failed:
                 return self._fail(node, failed["-"]["error"])
-            output, workspace, errors = active["outputs"]["-"], active["workspaces"]["-"], []
+            output, workspace, errors, results = active["outputs"]["-"], active["workspaces"]["-"], [], None
             if active.get("sessions", {}).get("-"):
                 self.s["sessions"][node] = active["sessions"]["-"]
         else:
@@ -358,18 +364,20 @@ class Progress:
             workspace = [active["workspaces"][k] for k in done]
             errors = [{"index": int(k), "item": active["items"][int(k)], "error": f["error"]}
                       for k, f in sorted(failed.items(), key=lambda kv: int(kv[0]))]
+            results = [_entry(active, i) for i in range(len(active["items"]))]
             for e in errors:
                 self.emit({"event": "item_failed", "node": node, "index": e["index"], "error": e["error"]})
 
         route, route_event = None, None
         routes = self.topo.routes.get(node)
         if routes:
-            # In `when`, the node's own name, history and workspace include the pass it just finished
+            # In `when`, the node's own name, history, workspace and results include the pass it just finished
             base = self.vars()
             variables = {**base, node: output,
                          "history": {**base["history"], node: [*self.s["history"].get(node, []), output]},
                          "workspace": {**base["workspace"], node: workspace},
-                         "errors": {**base["errors"], node: errors}}
+                         "errors": {**base["errors"], node: errors},
+                         "results": {**base["results"], **({node: results} if results is not None else {})}}
             taken = {i: self.s["taken"].get(f"{node}:{i}", 0) for i in range(len(routes))}
             checks: list[dict] = []
 
@@ -399,11 +407,20 @@ class Progress:
         self.s["history"].setdefault(node, []).append(output)
         self.s["workspaces"][node] = workspace
         self.s["errors"][node] = errors
+        if results is not None:
+            self.s["results"][node] = results
         self.emit({"event": "node_finished", "node": node, "pass": active["pass"],
                    **active.get("usage", {"cost_usd": 0.0, "tokens": 0})})
         if route_event:
             self.emit(route_event)
         self._make_pending(scheduler.triggered(self.topo, node, route))
+
+
+def _entry(active: dict, index: int) -> dict:
+    """Item `index` of a for_each pass, as `results.<node>` lists it. An item that failed has the output none."""
+    key, ran = str(index), active.get("ran") or {}
+    return {"index": index, "item": active["items"][index], "output": active["outputs"].get(key),
+            "harness": ran.get(key, {}).get("harness"), "model": ran.get(key, {}).get("model")}
 
 
 def follow_up_variable(given: dict | None) -> dict | None:

@@ -42,6 +42,7 @@ _WORKSPACE = schemas.object_schema(
     {"path": {"type": "string"}, "branch": {"type": ["string", "null"]}, "base": {"type": ["string", "null"]}}
 )
 _ERROR_ITEM = schemas.object_schema({"index": {"type": "integer"}, "item": {}, "error": {"type": "string"}})
+_NAME = {"type": ["string", "null"]}  # in results.<node>: none with no agent attempt, and a model of none is the harness's default
 _RUN = schemas.object_schema({
     "id": {"type": "string"}, "dir": {"type": "string"}, "cost_usd": {"type": "number"},
     "tokens": {"type": "integer"}, "elapsed_s": {"type": "number"}, "base": {"type": ["string", "null"]},
@@ -283,7 +284,7 @@ class _Checker:
             start = schemas.object_schema(self.wf.start.input, self.wf.types)
         except Exception:
             start = ANY
-        return {
+        roots = {
             **outputs,
             "start": start,
             "history": fields({n: {"type": "array", "items": s} for n, s in outputs.items()}),
@@ -292,6 +293,21 @@ class _Checker:
             "run": _RUN,
             "session": _SESSION, **({"follow_up": _FOLLOW_UP} if scheduler.follow_up_targets(self.wf, self.topo) else {}),
         }
+        lists = [n for n, node in self.nodes.items() if node.for_each is not None]
+        for _ in range(len(lists) + 1):  # a for_each list can read `results` too: each pass resolves one more step of that
+            found = fields({n: {"type": "array", "maxItems": self.wf.setting(n, "max_items"),
+                                "items": self._entry(n, one_result(n), roots)} for n in lists})
+            if found == roots.get("results"):
+                break
+            roots["results"] = found
+        return roots
+
+    def _entry(self, node_id: str, output: dict, roots: dict) -> dict:
+        """The schema of one item in `results.<node>`. With on_item_error: continue, a failed item's output is none."""
+        if self.wf.setting(node_id, "on_item_error") == "continue" and output.get("type") == "object":
+            output = {**output, "type": ["object", "null"]}
+        return schemas.object_schema({"index": {"type": "integer"}, "item": self._item_schema(node_id, roots),
+                                      "output": output, "harness": _NAME, "model": _NAME})
 
     # ---------- 3. sub-workflows ----------
 
@@ -402,6 +418,10 @@ class _Checker:
             return
         elif name in self.roots:
             schema = self.roots[name]
+            listed = ref.path[0] if name == "results" and ref.path else None
+            if listed in self.nodes and self.nodes[listed].for_each is None:
+                self.error(where, f"`{listed}` isn't a for_each node, so `results.{listed}` doesn't exist: read `{listed}`")
+                return
         elif name in _JINJA_GLOBALS:
             return
         else:
@@ -419,6 +439,7 @@ class _Checker:
         if name == "run" and ref.path[:1] == ("tokens",):
             self.token_refs.append(where)
         self._might_not_have_run(where, ref, node_id, context)
+        self._failed_item(where, ref)
 
     def _might_not_have_run(self, where: str, ref: Ref, node_id: str | None, context: str) -> None:
         name, path = ref.name, ref.path
@@ -428,20 +449,40 @@ class _Checker:
             target, reads_field = path[0], len(path) > 1
             if target == node_id and context == "node":
                 return  # a node's own workspace exists while its templates render
+        elif name == "results" and path and path[0] in self.nodes:  # an empty list until the node runs
+            target, reads_field = path[0], len(path) > 1 and path[1] is not EACH  # a loop over it then reads nothing
         else:
             return
         if not reads_field:
             return  # reading a node that hasn't run just gives none
         ran = self.order.at_end() if context == "end" else self.order.before(node_id) | ({node_id} if context == "when" else set())
-        cleared = target in ran and self.follow_ups.clears(name, target, node_id, context)  # outputs, not workspaces
+        outputs = target if name == "results" else name  # a follow-up clears outputs and results, not workspaces
+        cleared = target in ran and self.follow_ups.clears(outputs, target, node_id, context)
         why = " in a follow-up, which clears the outputs of the nodes that `follow_up.to` can lead to" if cleared else ""
         ran = set() if cleared else ran
-        if target in ran or target in ref.guarded or f"workspace.{target}" in ref.guarded or (where, target) in self._warned:
+        if (target in ran or target in ref.guarded or f"workspace.{target}" in ref.guarded or f"results.{target}" in ref.guarded
+                or (where, target) in self._warned):
             return
         self._warned.add((where, target))
         self.warn(where, f"reads `{_dotted(name, path)}`, but {_not_yet(target)}{why}; check first with "
                          f"{{% if {target} %}}...{{% endif %}}, or in a single value `{_dotted(name, path)} if {target} else none`"
                          + (" (fails the run if it hasn't)" if context == "end" else ""))
+
+    def _failed_item(self, where: str, ref: Ref) -> None:
+        """A field of an entry's output that the template reads at a position of `results.<node>` itself,
+        as results.build[0].output.done, from a node with on_item_error: continue, where no check of that
+        output comes first: an item that failed has the output none, and the template then fails.
+        A read through a name or a filter isn't checked."""
+        path = ref.path or ()
+        if ref.name != "results" or ref.local or len(path) < 4 or path[0] not in self.nodes or path[2] != "output":
+            return
+        entry = templates.guard(ref.name, path[:3])
+        if self.wf.setting(path[0], "on_item_error") != "continue" or entry in ref.guarded or (where, entry) in self._warned:
+            return
+        self._warned.add((where, entry))
+        self.warn(where, f"reads `{_dotted(ref.name, path)}`, but with `on_item_error: continue` an item of `{path[0]}` "
+                         "that failed has the output none: check that the output is set first, with {% if ... %} "
+                         "or `... if ... else none`")
 
     def _for_each(self, node_id: str) -> None:
         expression = self.nodes[node_id].for_each
@@ -465,17 +506,20 @@ class _Checker:
             self.warn(where, f"`{_dotted(*path)}` has no `maxItems`, so a list longer than {limit} fails the node at run time; "
                              "add maxItems to the schema that produces it, and the agent learns the limit")
 
-    def _item_schema(self, node_id: str) -> dict:
+    def _item_schema(self, node_id: str, roots: dict | None = None) -> dict:
+        """The schema of the node's `item`, from what the template names hold (`roots`, else self.roots)."""
         expression = self.nodes[node_id].for_each
         is_constant, value = templates.constant(expression)
         if is_constant:
             simple = isinstance(value, list) and value and all(isinstance(v, (str, int, float, bool)) for v in value)
             return {"enum": value} if simple else ANY
-        path = templates.pure_path(expression, expression=True)
-        schema = self._resolve(path, None) if path else None  # not node_id: for_each can't read its own `item`
-        return schemas.field_at(schema, [EACH]) if schema else ANY
+        listed = templates.elements_of(expression)  # a plain path, also through filters that keep its elements
+        path = (listed[0], listed[1][:-1]) if listed else None
+        schema = self._resolve(path, None, roots) if path else None  # not node_id: for_each can't read its own `item`
+        found = schemas.field_at(schema, [EACH]) if schema else ANY
+        return found if isinstance(found, dict) else ANY  # a schema of true or false, as in `items: true`
 
-    def _resolve(self, path: tuple[str, tuple], node_id: str | None = None) -> dict | None:
+    def _resolve(self, path: tuple[str, tuple], node_id: str | None = None, roots: dict | None = None) -> dict | None:
         """The schema at a (name, path), or None if it doesn't resolve."""
         name, steps = path
         if name == "item" and node_id and self.nodes[node_id].for_each is not None:
@@ -483,7 +527,7 @@ class _Checker:
         elif name == "index":
             root = {"type": "integer"}
         else:
-            root = self.roots.get(name)
+            root = (self.roots if roots is None else roots).get(name)
         if root is None:
             return None
         try:
@@ -496,7 +540,7 @@ class _Checker:
         name, path = ref.name, ref.path
         if name == "start":
             candidate = bool(self.tainted) if not path else path[0] in self.tainted
-        elif name in self.nodes or name in ("history", "errors", "follow_up"):  # a follow-up request is free text
+        elif name in self.nodes or name in ("history", "errors", "results", "follow_up"):  # a follow-up request is free text
             candidate = True
         elif name == "workspace" and path and path[0] in self.nodes:
             steps = [step for step in path[1:] if isinstance(step, str)]  # past a for_each node's item
@@ -552,7 +596,7 @@ class _Checker:
         sources = []
         for ref in refs:
             target = ref.name if ref.name in self.nodes else (
-                ref.path[0] if ref.name == "history" and ref.path and ref.path[0] in self.nodes else None)
+                ref.path[0] if ref.name in ("history", "results") and ref.path and ref.path[0] in self.nodes else None)
             if target and self.nodes[target].kind == "agent":
                 sources.append(target)
         for source in dict.fromkeys(sources):
@@ -1053,7 +1097,7 @@ def _hint(name: str, options) -> str:
 def _dotted(name: str, path: tuple | None) -> str:
     text = name
     for step in path or ():
-        text += "[]" if step is EACH else f"[{step}]" if isinstance(step, int) else f".{step}"
+        text += "[]" if step is EACH else f"[{step}]" if isinstance(step, (int, templates.At)) else f".{step}"
     return text
 
 

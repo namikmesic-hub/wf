@@ -17,6 +17,9 @@ It is in the top-level run folder, and sub-workflows write to it too:
                                                    how its session starts (fresh, fork or load)
     turn           a message goes to the agent     `sends` (instruction, reminder or steer), the full text
     message        the agent writes text           the text
+    thinking       a block of thinking ends        how long it took (none: the turn ended first), and
+                                                   its text. Only Cursor's SDK reports it
+    request        the runtime names a request     its id. Only Cursor's SDK reports it
     tool_call      the agent calls a tool          the tool and its arguments
     tool_result    the tool answers                the answer, and if it is an error
     submit_result  the agent calls submit_result   the arguments, and the problems or "accepted"
@@ -38,7 +41,8 @@ Every record has `time`, `kind` and `id`. A record about a node also has `node`,
     build#1[3]                 item 3 of build's pass 1
     review#2.a1                attempt 1 of that pass
     review#2.a1.t2             its turn 2: the first reminder
-    review#2.a1.t2.c4          the 4th tool call of that turn (.s1 a submit_result call, .m1 a message)
+    review#2.a1.t2.c4          the 4th tool call of that turn (.s1 a submit_result call, .m1 a message,
+                               .k1 a block of thinking, .r1 a request)
     end                        the end outputs
     build#1[3].a1/implement#2  a pass in the sub-workflow that attempt 1 of build[3] runs
 
@@ -49,7 +53,8 @@ occurs. The record then holds {"$blob": "blobs/<sha256>.txt", "size": ..., "star
 Secrets never go into the trace. A command node's `secret_env` names env values
 that are secret. The function find() finds the variable paths those values come
 from. These are what their templates read, also through `item` to what the
-for_each list reads. They go through a sub-workflow's input to the parent's
+for_each list reads, and through `results.<node>` to the node's output and items.
+They go through a sub-workflow's input to the parent's
 `with`, and through a workflow node's output to the sub-workflow's end output.
 An `item` path counts only in the templates of its own node. A value at such a
 path becomes [secret] in each record that has it there: a read, the input, an
@@ -84,6 +89,7 @@ BLOBS = "blobs"
 CAP = 1000  # characters a value may have in a record. A longer one goes to blobs/
 PREVIEW = 80  # characters of a blob shown in its reference
 HIDDEN = "[secret]"
+_LONGEST = 32  # steps of a secret path. A longer one, from lists that read each other's results, is cut: that hides more
 _OWN = frozenset({"kind", "id", "parent", "node", "where", "pass", "index", "attempt", "turn", "field", "started", "ended"})
 
 _everywhere: set[str] = set()  # secrets of this process, such as wf tools' tokens
@@ -210,7 +216,8 @@ class Secrets:
 
 def find(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozenset(), seen: tuple = ()) -> Secrets:
     """The variable paths whose values become an env value that a command node marks secret.
-    These are what the env templates read, through `item` to what the for_each list reads.
+    These are what the env templates read, through `item` to what the for_each list reads, and
+    through `results.<node>` to the node's output and items.
     They go through a sub-workflow's input to what the parent's `with` reads. They also go
     through a workflow node's output to what the sub-workflow's end output reads. The set
     `outputs` names the end outputs that feed a secret in the parent workflow. The function
@@ -221,8 +228,8 @@ def find(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozen
     def add(node_id: str | None, source: str) -> None:
         anywhere, inside = _sources(workflow, node_id, source)
         found.update(anywhere)
-        if inside:
-            items.setdefault(node_id, set()).update(inside)
+        for node, paths in inside.items():
+            items.setdefault(node, set()).update(paths)
 
     for node_id, node in workflow.nodes.items():
         if node.kind == "command":
@@ -251,6 +258,10 @@ def find(workflow, load: Callable[[Path], Any], outputs: frozenset[str] = frozen
         if len(found) + sum(map(len, items.values())) == size:
             break
     found |= {("history", path[0], EACH, *path[1:]) for path in found if path[0] in workflow.nodes}
+    found |= {("results", path[0], EACH, "output", *path[2:]) for path in found
+              if path[0] in workflow.nodes and workflow.nodes[path[0]].for_each is not None}
+    found |= {(where, node, EACH, "item", *path[1:]) for node, paths in items.items() for path in paths
+              if path[0] == "item" for where in ("results", "errors")}  # a new process learns an item's text only from these
     return Secrets(frozenset(found), {node: frozenset(paths) for node, paths in items.items()})
 
 
@@ -275,6 +286,16 @@ def outputs_reached(node_id: str, node, paths, sub) -> frozenset[str]:
             if len(path) == 2:  # every output this node has given
                 return every
             rest = path[3:]  # inside one of them
+        elif path[0] == "results":
+            if len(path) == 1 or path[1] is EACH:
+                return every
+            if path[1] != node_id:
+                continue
+            if len(path) < 4 or path[3] is EACH:  # all of an item's entry
+                return every
+            if path[3] != "output":
+                continue
+            rest = (path[2], *path[4:])  # as in the node's own list: an item, then inside its output
         elif path[0] == node_id:
             rest = path[1:]
         else:
@@ -290,27 +311,52 @@ def outputs_reached(node_id: str, node, paths, sub) -> frozenset[str]:
     return frozenset(reached)
 
 
-def _sources(workflow, node_id: str | None, source: str) -> tuple[set[tuple], set[tuple]]:
-    """The paths a template reads: (anywhere in the workflow, under the node's `item`). An item
-    path also counts at what the node's for_each list reads. That is its element when the list
-    is a plain path, or else all that the for_each expression reads."""
-    anywhere, inside = set(), set()
-    each = workflow.nodes[node_id].for_each if node_id else None
-    for path in _read_paths(source):
+def _sources(workflow, node_id: str | None, source: str) -> tuple[set[tuple], dict[str, set[tuple]]]:
+    """The paths a template of `node_id` reads: (anywhere in the workflow, under the `item` of each
+    node). An item path also counts at what that node's for_each list reads (_listed). A path in
+    `results.<node>` also counts at the node's output, or at its `item` (_entry_sources). Each path
+    found so counts in turn, as when a for_each list is `results.<other>`."""
+    anywhere, inside = set(), {}
+    todo = [(node_id, path) for path in _read_paths(source)]
+    while todo:
+        owner, path = todo.pop()
+        path = path[:_LONGEST]
         if path[0] in ("item", "index"):
-            if not each:  # only a for_each node has them (validate makes sure)
-                continue
-            inside.add(path)
-            if path[0] == "index":
-                continue
-            listed = templates.pure_path(each, expression=True)
-            if listed:
-                anywhere.add(_general((listed[0], *listed[1], EACH, *path[1:])))
-            else:
-                anywhere |= _read_paths(each, expression=True)
-        else:
+            if owner is None or not workflow.nodes[owner].for_each or path in inside.get(owner, ()):
+                continue  # only a for_each node has them (validate makes sure)
+            inside.setdefault(owner, set()).add(path)
+            todo += [(None, listed) for listed in _listed(workflow, owner, path)]
+        elif path not in anywhere:
             anywhere.add(path)
+            if path[0] == "results":
+                todo += _entry_sources(workflow, path)
     return anywhere, inside
+
+
+def _entry_sources(workflow, path: tuple) -> list[tuple[str | None, tuple]]:
+    """Where a path in `results.<node>` takes its value: (None, a path in the node's output), or
+    (the node, a path in its `item`)."""
+    named = path[1] if len(path) > 1 and path[1] is not EACH else None  # None: every node's results
+    field = path[3] if len(path) > 3 else EACH  # EACH: all of an entry
+    found = []
+    for node in [n for n, spec in workflow.nodes.items() if spec.for_each is not None and named in (None, n)]:
+        if field in ("output", EACH):
+            found.append((None, (node, EACH, *path[4:])))  # an entry's position isn't its place in the node's list
+        if field in ("item", EACH):
+            found.append((node, ("item", *path[4:])))
+    return found
+
+
+def _listed(workflow, node_id: str, path: tuple) -> set[tuple]:
+    """What an `item` path of a for_each node reads: the element of its list when the list is a
+    plain path, or else all that the for_each expression reads. An `index` reads nothing."""
+    if path[0] == "index":
+        return set()
+    each = workflow.nodes[node_id].for_each
+    listed = templates.pure_path(each, expression=True)
+    if listed:
+        return {_general((listed[0], *listed[1], EACH, *path[1:]))}
+    return _read_paths(each, expression=True)
 
 
 def _read_paths(source: str, expression: bool = False) -> set[tuple]:
@@ -322,8 +368,9 @@ def _read_paths(source: str, expression: bool = False) -> set[tuple]:
 
 
 def _general(path: tuple) -> tuple:
-    """A negative index, as in x[-1], counts as any element: the list's length isn't known yet."""
-    return tuple(EACH if isinstance(step, int) and not isinstance(step, bool) and step < 0 else step for step in path)
+    """A negative index, as in x[-1], counts as any element: the list's length isn't known yet. So does
+    a position that the template computes, as in x[index]."""
+    return tuple(EACH if isinstance(step, templates.At) or (type(step) is int and step < 0) else step for step in path)
 
 
 def _matches(pattern: tuple, path: tuple) -> bool:
@@ -549,6 +596,12 @@ class Attempt:
         size = len(json.dumps(result, default=str)) if characters is None else characters
         answer = {"result": result} if kept else {"kept": False, "characters": size}
         self._write("tool_result", ours, ours.rsplit(".", 1)[0], is_error=is_error, **answer)
+
+    def thinking(self, text: str, duration_ms: int | None) -> None:
+        self._write("thinking", self._next("k"), self._turn_id(), duration_ms=duration_ms, text=text)
+
+    def request(self, request_id: str) -> None:
+        self._write("request", self._next("r"), self._turn_id(), request_id=request_id)
 
     # ----- output_tool.ResultTool -----
 

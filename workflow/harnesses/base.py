@@ -30,6 +30,8 @@ what stays, and `wf validate` warns about that (harnesses.KEPT_INSTRUCTIONS).
 Each adapter also reports to SessionSpec.trace, a Recorder, what the agent did:
 its text, and each tool call with its full arguments and answer. These go into
 the run's trace (trace.py). What a wf tool answers isn't kept there either.
+Cursor's SDK also reports the model's thinking, with the time it took, and an
+id for each request.
 
 While a session is open, a person can send it a message with `wf steer`
 (steer.py). steer() offers the message to the turn that's running. A harness
@@ -97,6 +99,12 @@ class Recorder:
                     characters: int | None = None) -> None:
         """The answer to a call. kept=False for a wf tool's answer (other people's messages and
         mail): the trace notes only its size, which is `characters` when the harness gives only that."""
+
+    def thinking(self, text: str, duration_ms: int | None) -> None:
+        """A block of the model's thinking, and the milliseconds it took (None: the turn ended first)."""
+
+    def request(self, request_id: str) -> None:
+        """The runtime's id for a request of the turn, by which the runtime's own records know it."""
 
 
 @dataclass

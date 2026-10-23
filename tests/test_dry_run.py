@@ -249,6 +249,71 @@ def test_each_items_log_shows_the_harness_model_and_effort_its_templates_rendere
         assert {key: session[key] for key in seat} == seat
 
 
+def test_results_numbers_each_seat_by_its_position_with_the_harness_and_model_it_ran_on(repo):
+    Path("seats.yaml").write_text(dedent("""
+        version: 1
+        name: seats
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: claude-opus-5-5}, codex: {model: gpt-6}}}
+        start: {input: {}}
+        nodes:
+          check:
+            needs: [start]
+            for_each: '["claude-code", "codex", "claude-code"]'
+            harness: "{{ item }}"
+            retry: 0
+            on_item_error: continue
+            instruction: check it
+            output: {problems: {type: array, items: {type: string}}}
+          tally:
+            needs: [check]
+            instruction: |
+              {% for seat in results.check %}
+              {{ seat.index }} on {{ seat.harness }} {{ seat.model }}: {{ seat.output.problems | join(', ') if seat.output else 'failed' }}
+              {% endfor %}
+        end: {output: {checks: {type: integer, value: "{{ check | length }}"}}}
+    """))
+    steps = {"agents": {"check[0]": [{"problems": ["a"]}], "check[1]": [{"_fail": "crashed"}],
+                        "check[2]": [{"problems": ["c", "d"]}], "tally": [{"summary": "done"}]}}
+    assert cli.main(["run", "seats.yaml", "--dry-run", script(steps)]) == 0
+    assert output() == {"checks": 2}  # check lists only the seats that succeeded
+    asked = (only_run() / "nodes" / "tally" / "1" / "instruction.md").read_text()
+    assert asked.split("\n\n")[0] == ("0 on claude-code claude-opus-5-5: a\n"
+                                      "1 on codex gpt-6: failed\n"  # the harness and model of the attempt that failed
+                                      "2 on claude-code claude-opus-5-5: c, d")
+
+
+def test_results_names_the_last_attempt_of_each_item_after_a_fallback_and_lists_only_the_latest_pass(repo):
+    Path("seats.yaml").write_text(dedent("""
+        version: 1
+        name: seats
+        defaults: {harness: [claude-code, codex], model: {claude-code: claude-opus-5-5, codex: gpt-6}}
+        start: {input: {}}
+        nodes:
+          check:
+            needs: [start]
+            for_each: '["a", "b", "c"]'
+            retry: 0
+            on_item_error: continue
+            instruction: check it
+            routes:
+              - {when: "history.check | length < 2", to: check, max: 1}
+              - {to: end}
+        end:
+          output:
+            harnesses: {type: array, value: "{{ results.check | map(attribute='harness') | list }}"}
+            models: {type: array, value: "{{ results.check | map(attribute='model') | list }}"}
+            outputs: {type: array, value: "{{ results.check | map(attribute='output') | list }}"}
+    """))
+    steps = {"agents": {"check[0]": [{"summary": "a1"}, {"summary": "a2"}],
+                        "check[1]": [{"summary": "b1"}, {"_unavailable": "usage limit"}, {"_fail": "crashed"}],
+                        "check[2]": [{"_unavailable": "usage limit"}, {"summary": "c1"},
+                                     {"_unavailable": "usage limit"}, {"summary": "c2"}]}}
+    assert cli.main(["run", "seats.yaml", "--dry-run", script(steps)]) == 0
+    assert output() == {"harnesses": ["claude-code", "codex", "codex"],  # not the first attempt's claude-code
+                        "models": ["claude-opus-5-5", "gpt-6", "gpt-6"],
+                        "outputs": [{"summary": "a2"}, None, {"summary": "c2"}]}  # the second pass only
+
+
 def test_a_fallback_after_failed_attempts_is_shown(repo, capsys):
     Path("flow.yaml").write_text(dedent("""
         version: 1

@@ -693,6 +693,8 @@
             "turn.started",
             "turn.text",
             "turn.tool",
+            "turn.thinking",
+            "turn.request",
             "turn.usage",
             "turn.ended",
             "session.closed",
@@ -759,6 +761,8 @@
                   "turn.started",
                   "turn.text",
                   "turn.tool",
+                  "turn.thinking",
+                  "turn.request",
                   "turn.usage",
                   "turn.ended"
                 ]
@@ -874,6 +878,65 @@
                   },
                   "truncated": {
                     "type": "object"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "turn.thinking"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "text",
+                  "duration_ms"
+                ],
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "duration_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "turn.request"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "request_id"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "minLength": 1
                   }
                 },
                 "additionalProperties": false

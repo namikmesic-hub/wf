@@ -334,13 +334,17 @@ class Ref:
     """One use of an outside name in a template.
 
     path: the fields read from it, e.g. ("tasks", 0, "title"); EACH stands for
-      "an element of this list" (from a for loop). None means the template
-      reads something derived from the name that we can't follow.
+      "an element of this list" (from a for loop), and At("i") for the element
+      at a position that the template computes, as in tasks[i]. None means the
+      template reads something derived from the name that we can't follow.
     output: the value is written into the text by {{ }}, not just tested or looped over.
     quoted: ...and that {{ }} ends with `| quote`.
     guarded: names that an enclosing check proves aren't none here, as in
       `{% if review %}` or `x.y if x else none`. "name.field" entries cover
-      checks like `{% if workspace.implement %}`.
+      checks like `{% if workspace.implement %}`. Each path that the check reads
+      itself is an entry too, as guard() writes it.
+    local: the read goes through a name that the template defines: a loop
+      variable, or a name that set, with or a macro gives.
     """
 
     name: str
@@ -349,6 +353,7 @@ class Ref:
     output: bool = False
     quoted: bool = False
     guarded: frozenset[str] = frozenset()
+    local: bool = False
 
 
 def references(source: str, *, expression: bool = False) -> list[Ref]:
@@ -440,7 +445,19 @@ def _parse(source: str, *, expression: bool):
 _SAME_ELEMENTS = frozenset({"selectattr", "rejectattr", "select", "reject", "sort", "unique", "list", "reverse"})
 # Filters whose result is always a number, so it can't carry text into a command
 _NUMBERS = frozenset({"length", "count", "int", "float", "abs", "round", "sum", "wordcount", "filesizeformat"})
+# Variables that wf gives as an empty list or map, and never as none: a none check of them proves nothing
+_NEVER_NONE = frozenset({"results", "history", "errors"})
 _UNSUPPORTED = {nodes.Include: "include", nodes.Import: "import", nodes.FromImport: "from ... import", nodes.Extends: "extends"}
+
+
+@dataclass(frozen=True)
+class At:
+    """A path step: the element at a position that the template computes, as in plan.tasks[index]."""
+
+    text: str  # the expression of the position, as the template reads
+
+    def __str__(self) -> str:
+        return self.text
 
 
 @dataclass(frozen=True)
@@ -458,7 +475,7 @@ class _Local:
 
 
 def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
-    """For a.b[0]['c'] -> (Name a, ("b", 0, "c"), dynamic index nodes); None if not that shape."""
+    """For a.b[0]['c'][i] -> (Name a, ("b", 0, "c", At("i")), dynamic index nodes); None if not that shape."""
     steps, dynamic = [], []
     while True:
         if isinstance(node, nodes.Getattr):
@@ -469,8 +486,10 @@ def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
                 pass  # x[1:] is still the list
             elif isinstance(arg, nodes.Const) and isinstance(arg.value, (str, int)) and not isinstance(arg.value, bool):
                 steps.append(arg.value)
+            elif isinstance(arg, nodes.Neg) and isinstance(arg.node, nodes.Const) and type(arg.node.value) is int:
+                steps.append(-arg.node.value)  # x[-1]
             else:
-                steps.append(EACH)
+                steps.append(At(_text(arg)))
                 dynamic.append(arg)
         elif isinstance(node, nodes.Name):
             return node, tuple(reversed(steps)), dynamic
@@ -479,31 +498,86 @@ def _chain(node) -> tuple[nodes.Name, tuple, list] | None:
         node = node.node
 
 
-def _checks(test) -> tuple[frozenset, frozenset]:
-    """Names proven not none (when the test is true, when it is false)."""
+_OPERATORS = {nodes.Add: "+", nodes.Sub: "-", nodes.Mul: "*", nodes.Div: "/", nodes.FloorDiv: "//", nodes.Mod: "%"}
+
+
+def _text(node) -> str:
+    """An expression as one text, for the position in an At step: index, start.pos | int or loop.index0 + 1."""
+    if isinstance(node, nodes.Const):
+        return repr(node.value)
+    if isinstance(node, nodes.Neg):
+        return f"-{_text(node.node)}"
+    if type(node) in _OPERATORS:
+        return f"{_text(node.left)} {_OPERATORS[type(node)]} {_text(node.right)}"
+    if isinstance(node, (nodes.Filter, nodes.Call)):
+        args = ", ".join([_text(arg) for arg in node.args] + [f"{kw.key}={_text(kw.value)}" for kw in node.kwargs])
+        if isinstance(node, nodes.Call):
+            return f"{_text(node.node)}({args})"
+        return f"{_text(node.node)} | {node.name}" + (f"({args})" if args else "")
+    chain = _chain(node)
+    return guard(chain[0].name, chain[1]) if chain else repr(node)
+
+
+def guard(name: str, path: tuple) -> str:
+    """How Ref.guarded names a checked path: results.build[0].output or results.build[index].output."""
+    text = name
+    for step in path:
+        text += f"[{step}]" if isinstance(step, (int, At)) else f".{step}"
+    return text
+
+
+def _checks(test, scope: dict | None = None) -> tuple[frozenset, frozenset]:
+    """Names proven not none (when the test is true, when it is false). A path of an outside name that
+    the test reads itself is one of them, as guard() writes it. A name in `scope` is the template's own."""
     chain = _chain(test)
     if chain:
         name, path, _ = chain
         tokens = {name.name} | ({f"{name.name}.{path[0]}"} if path and isinstance(path[0], str) else set())
+        if name.name not in (scope or {}):
+            tokens.add(guard(name.name, path))
         return frozenset(tokens), frozenset()
     if isinstance(test, nodes.Not):
-        yes, no = _checks(test.node)
+        yes, no = _checks(test.node, scope)
         return no, yes
     if isinstance(test, nodes.And):
-        return _checks(test.left)[0] | _checks(test.right)[0], frozenset()
+        return _checks(test.left, scope)[0] | _checks(test.right, scope)[0], frozenset()
     if isinstance(test, nodes.Or):
-        return frozenset(), _checks(test.left)[1] | _checks(test.right)[1]
+        return frozenset(), _checks(test.left, scope)[1] | _checks(test.right, scope)[1]
     if isinstance(test, nodes.Test) and test.name == "none":
-        return frozenset(), _checks(test.node)[0]
+        return frozenset(), _not_none(test.node, scope)
     if isinstance(test, nodes.Compare) and len(test.ops) == 1:
         op, right = test.ops[0].op, test.ops[0].expr
         if isinstance(right, nodes.Const) and right.value is None and op in ("eq", "ne"):
-            tokens = _checks(test.expr)[0]
+            tokens = _not_none(test.expr, scope)
             return (tokens, frozenset()) if op == "ne" else (frozenset(), tokens)
         left = _chain(test.expr)
         if left and left[1]:  # `x.a == 1` can only be true if x isn't none
-            return _checks(test.expr)[0], frozenset()
+            return _checks(test.expr, scope)[0], frozenset()
     return frozenset(), frozenset()
+
+
+def _not_none(node, scope: dict | None) -> frozenset:
+    """What `node is not none` proves: what _checks() gives for `node`, but nothing for a list or map
+    of _NEVER_NONE, such as results.build, which is an empty list before its node runs."""
+    chain = _chain(node)
+    if chain and chain[0].name in _NEVER_NONE and chain[0].name not in (scope or {}) and len(chain[1]) <= 1:
+        return frozenset()
+    return _checks(node, scope)[0]
+
+
+def elements_of(expression: str) -> tuple[str, tuple] | None:
+    """For an expression that gives the elements of a plain path, also through filters that keep them,
+    as `plan.tasks | selectattr("ready") | list` does: (name, the path of an element). None for any other."""
+    try:
+        node = _parse(expression, expression=True)
+    except TemplateError:
+        return None
+    while isinstance(node, nodes.Filter) and node.name in _SAME_ELEMENTS and node.node is not None:
+        node = node.node
+    chain = _chain(node)
+    if chain is None or chain[2]:
+        return None
+    return chain[0].name, (*chain[1], EACH)
 
 
 def _target_names(target) -> list[str]:
@@ -579,12 +653,12 @@ class _Walker:
 
     def _if(self, node, scope, guards) -> None:
         self.expr(node.test, scope, guards)
-        yes, no = _checks(node.test)
+        yes, no = _checks(node.test, scope)
         self.stmts(node.body, scope, guards | yes)
         ruled_out = no
         for branch in node.elif_:
             self.expr(branch.test, scope, guards | ruled_out)
-            yes, no = _checks(branch.test)
+            yes, no = _checks(branch.test, scope)
             self.stmts(branch.body, scope, guards | ruled_out | yes)
             ruled_out |= no
         self.stmts(node.else_, scope, guards | ruled_out)
@@ -606,16 +680,16 @@ class _Walker:
                     self.expr(child, scope, guards)
         elif isinstance(node, nodes.CondExpr):
             self.expr(node.test, scope, guards)
-            yes, no = _checks(node.test)
+            yes, no = _checks(node.test, scope)
             self.expr(node.expr1, scope, guards | yes, output, quoted)
             if node.expr2 is not None:
                 self.expr(node.expr2, scope, guards | no, output, quoted)
         elif isinstance(node, nodes.And):
             self.expr(node.left, scope, guards, output, quoted)
-            self.expr(node.right, scope, guards | _checks(node.left)[0], output, quoted)
+            self.expr(node.right, scope, guards | _checks(node.left, scope)[0], output, quoted)
         elif isinstance(node, nodes.Or):
             self.expr(node.left, scope, guards, output, quoted)
-            self.expr(node.right, scope, guards | _checks(node.left)[1], output, quoted)
+            self.expr(node.right, scope, guards | _checks(node.left, scope)[1], output, quoted)
         elif isinstance(node, nodes.Filter) and node.name in _NUMBERS:
             for child in node.iter_child_nodes():  # `x | length` writes a number, not x
                 self.expr(child, scope, guards)
@@ -628,10 +702,10 @@ class _Walker:
         if local is None:
             self.refs.append(Ref(name.name, path, name.lineno, output, quoted, guards))
         elif local.name is not None:
-            self.refs.append(Ref(local.name, local.path + path, name.lineno, output, quoted, guards))
+            self.refs.append(Ref(local.name, local.path + path, name.lineno, output, quoted, guards, local=True))
         else:
             for source in local.sources:
-                self.refs.append(Ref(source, None, name.lineno, output, quoted, guards))
+                self.refs.append(Ref(source, None, name.lineno, output, quoted, guards, local=True))
 
     def _local(self, node, scope, each: bool = False) -> _Local:
         """What a local name assigned from `node` refers to."""

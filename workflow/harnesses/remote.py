@@ -26,7 +26,8 @@ How the operations map onto base.py's interfaces:
   which read only the workspace and the files and folders the instruction names, and its peer then offers
   none of the runtime's own.
 - Session.send() is turn.start, which the peer answers at once with the turn's id. Events follow:
-  turn.text, turn.tool and turn.usage, and then turn.ended, which ends send().
+  turn.text, turn.tool, turn.thinking, turn.request and turn.usage, and then turn.ended, which
+  ends send().
 - Session.steer() is turn.steer. `delivered`: the running turn has the message. `declined` is
   None here, so the runner sends the message as the next turn. `unconfirmed` is passed on, and so
   is no answer in STEER_TIMEOUT seconds. `queued`: the peer waits for the runtime's answer, and a
@@ -62,7 +63,8 @@ A turn's kind, for turn.started: the first is the instruction. The runner sends 
 What the agent does goes where each adapter puts it (base.py): an agent_tool progress event when
 a tool call starts, the attempt's transcript (sent, text, tool, tool_result, turn, usage lines),
 and the trace (spec.trace). For a wf tool the peer sends only the size of the answer, and so the
-transcript and the trace keep only that.
+transcript and the trace keep only that. A block of the model's thinking (turn.thinking: its text
+and the milliseconds it took) and the runtime's id for a request (turn.request) go to the trace only.
 """
 
 import asyncio
@@ -469,6 +471,8 @@ class RemoteSession:
                 elif kind == "turn.tool":
                     self._flush()
                     self._tool(data)
+                elif kind in ("turn.thinking", "turn.request"):
+                    self._note(kind, data)
                 elif kind == "turn.usage":
                     self.pending = usage(data.get("usage"))
                 elif kind == "steer.status":
@@ -538,6 +542,15 @@ class RemoteSession:
             spec.trace.tool_result(call, data.get("result"), status == "failed")
         else:
             spec.trace.tool_result(call, None, status == "failed", kept=False, characters=size)
+
+    def _note(self, kind: str, data: dict) -> None:
+        """A block of the model's thinking, or the runtime's id for a request: for the trace only."""
+        self._flush()
+        if kind == "turn.thinking":
+            took = data.get("duration_ms")
+            self.spec.trace.thinking(str(data.get("text") or ""), took if isinstance(took, int) else None)
+        elif data.get("request_id"):
+            self.spec.trace.request(str(data["request_id"]))
 
     def _trace_call(self, call: str, label: str, data: dict) -> None:
         """A tool call for the trace, again each time that the peer tells more of its arguments."""
@@ -633,6 +646,8 @@ class RemoteSession:
                 self._tool(data)
             elif kind == "turn.text":
                 self.text += str(data.get("text") or "")
+            elif kind in ("turn.thinking", "turn.request"):
+                self._note(kind, data)
             elif kind == "steer.status":
                 self._steer_status(data)
             elif kind == "turn.ended" and event.get("turn") == self.turn:

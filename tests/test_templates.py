@@ -117,6 +117,55 @@ def test_filters_that_keep_elements_keep_the_path():
     ]
 
 
+@pytest.mark.parametrize("template", [
+    "{{ results.b[1].output.done }}",
+    "{{ results.b[0].output.done }}",
+    "{% if results.b[1].output %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if not results.b[1].output %}x{% else %}{{ results.b[1].output.done }}{% endif %}",
+    "{{ results.b[1].output.done if results.b[1].output else 'x' }}",
+    "{{ results.b[1].output and results.b[1].output.done }}",
+    "{% if results.b[1].output is not none %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if results.b[0].output %}{{ results.b[1].output.done }}{% endif %}",  # another item
+    "{% if results.b[-1].output %}{{ results.b[-1].output.done }}{% endif %}",
+    "{{ results.b[1].output }}",  # the output itself, and no field of it
+])
+def test_a_direct_read_is_unguarded_exactly_where_a_failed_item_fails_the_render(template):
+    succeeded = {"index": 0, "item": "a", "output": {"done": True}, "harness": None, "model": None}
+    failed = {"index": 1, "item": "b", "output": None, "harness": None, "model": None}
+    assert "Undefined" not in templates.render(template, {"results": {"b": [succeeded, succeeded]}})
+    broken = False
+    for entries in ([succeeded, failed], [failed, succeeded], [failed, failed]):
+        try:
+            broken |= "Undefined" in templates.render(template, {"results": {"b": entries}})
+        except TemplateError:
+            broken = True
+    reads = [r for r in templates.references(template) if r.name == "results" and len(r.path) > 3]
+    assert any(templates.guard("results", r.path[:3]) not in r.guarded for r in reads) is broken
+
+
+def test_a_read_through_a_name_that_the_template_defines_is_marked_local():
+    source = ("{{ results.b[0].output.done }}{% for r in results.b %}{{ r.output.done }}{% endfor %}"
+              "{% set first = results.b[0] %}{{ first.output.done }}{% with o = results.b[1].output %}{{ o.done }}{% endwith %}")
+    assert [r.local for r in templates.references(source) if r.path and r.path[-1] == "done"] == [False, True, True, True]
+
+
+def test_a_position_that_the_template_computes_is_kept_apart_from_a_loop():
+    assert refs("{{ results.b[-1].item }} {{ results.b[index].item }} {{ results.b[start.pos + 1].item }}") == [
+        ("results", ("b", -1, "item")), ("results", ("b", templates.At("index"), "item")), ("index", ()),
+        ("results", ("b", templates.At("start.pos + 1"), "item")), ("start", ("pos",))]
+    (read,) = [r for r in templates.references("{{ results.b[start.pos | int(0)].item }}") if r.name == "results"]
+    assert templates.guard(read.name, read.path) == "results.b[start.pos | int(0)].item"
+
+
+@pytest.mark.parametrize("source, guarded", [
+    ("{% if results.b %}{{ results.b[0].index }}{% endif %}", True),
+    ("{% if results.b is not none %}{{ results.b[0].index }}{% endif %}", False),  # an empty list isn't none
+    ("{% if results.b != none %}{{ results.b[0].index }}{% endif %}", False),
+])
+def test_a_none_check_of_a_list_that_is_never_none_proves_nothing(source, guarded):
+    assert ("results.b" in read_of(source, "index").guarded) is guarded
+
+
 def test_method_calls_are_not_fields():
     assert refs("{{ start.task.upper() }}") == [("start", ("task",))]
 
@@ -141,6 +190,37 @@ def test_guards_come_from_if_and_and_conditional_expressions():
     assert any(r.path == ("x",) and "review" in r.guarded for r in negated)
     is_none = templates.references("{% if review is not none %}{{ review.x }}{% endif %}")
     assert any(r.path == ("x",) and "review" in r.guarded for r in is_none)
+
+
+def read_of(source: str, last: str = "done") -> Ref:
+    (read,) = [r for r in templates.references(source) if r.path and r.path[-1] == last]
+    return read
+
+
+@pytest.mark.parametrize("source", [
+    "{% if results.b[1].output %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if not results.b[1].output %}x{% else %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if results.b[1].output is not none %}{{ results.b[1].output.done }}{% endif %}",
+    "{{ results.b[1].output.done if results.b[1].output else 'x' }}",
+    "{{ results.b[1].output and results.b[1].output.done }}",
+    "{% if results.b[-1].output %}{{ results.b[-1].output.done }}{% endif %}",
+    "{% if results.b[start.i].output %}{{ results.b[start.i].output.done }}{% endif %}",
+])
+def test_a_check_guards_the_path_it_reads(source):
+    read = read_of(source)
+    assert templates.guard("results", read.path[:3]) in read.guarded  # results.b[1].output, results.b[start.i].output
+
+
+@pytest.mark.parametrize("source", [
+    "{{ results.b[1].output.done }}",
+    "{% if results.b[0].output %}{{ results.b[1].output.done }}{% endif %}",  # another item
+    "{% if results.b[1].index %}{{ results.b[1].output.done }}{% endif %}",
+    "{% if results.b[1].output %}x{% endif %}{{ results.b[1].output.done }}",  # after the check
+    "{% if results.b[start.i].output %}{{ results.b[start.j].output.done }}{% endif %}",
+])
+def test_a_check_of_something_else_leaves_the_path_unguarded(source):
+    read = read_of(source)
+    assert templates.guard("results", read.path[:3]) not in read.guarded
 
 
 def test_output_and_quoting_are_tracked_for_commands():

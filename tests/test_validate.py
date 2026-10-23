@@ -4,6 +4,7 @@ Each case is a small workflow file and the problems it should produce, as
 (level, where, part of the message).
 """
 
+import json
 import re
 from pathlib import Path
 from textwrap import dedent, indent
@@ -96,10 +97,12 @@ def test_duplicate_node_ids(tmp_path):
 
 
 def test_node_ids_are_lowercase_identifiers_and_not_reserved(tmp_path):
-    report = check(tmp_path, flow("Bad-id: {needs: [start], command: x}\nhistory: {needs: [start], command: x}"))
+    report = check(tmp_path, flow("Bad-id: {needs: [start], command: x}\nhistory: {needs: [start], command: x}\n"
+                                  "results: {needs: [start], command: x}"))
     assert_problems(report, [
         ("error", "nodes.Bad-id", "lowercase letter"),
         ("error", "nodes.history", "`history` is a reserved name"),
+        ("error", "nodes.results", "`results` is a reserved name"),
     ])
 
 
@@ -260,6 +263,120 @@ def test_for_each_reads_a_list_and_items_are_checked(tmp_path):
     assert_problems(report, [
         ("error", "nodes.a.for_each", "must produce a list, but `start.task` is a string"),
         ("error", "nodes.b.instruction", "`item.titel`: no field `titel` (fields: title)"),
+    ])
+
+
+def test_results_lists_the_items_of_a_for_each_node_and_its_fields_are_checked(tmp_path):
+    report = check(tmp_path, flow("""
+        plan:
+          needs: [start]
+          instruction: plan
+          output: {tasks: {type: array, maxItems: 3, items: {type: object, properties: {title: {type: string}}, required: [title], additionalProperties: false}}}
+        build:
+          needs: [plan]
+          for_each: plan.tasks
+          on_item_error: continue
+          web: true
+          instruction: "{{ item.title }}"
+          output: {done: {type: boolean}}
+        sum:
+          needs: [build]
+          instruction: >-
+            {% for r in results.build %}{{ r.index }} {{ r.item.title }} {{ r.output.done if r.output else 'failed' }}
+            {{ r.harness }} {{ r.model }}{% endfor %}
+            {{ results.build[0].item.titel }} {{ results.build[0].output.dun }} {{ results.build[0].cost }} {{ results.plan }}
+        echo:
+          needs: [build]
+          command: >-
+            echo {{ results.build[0].index }} {{ results.build[0].output.done if results.build[0].output else false }}
+            {{ results.build[0].item.title }}
+        act: {needs: [build], access: full, instruction: "{{ results.build | tojson }}"}
+    """))
+    assert_problems(report, [
+        ("error", "nodes.sum.instruction", "`results.build[0].item.titel`: no field `titel` (fields: title)"),
+        ("error", "nodes.sum.instruction", "`results.build[0].output.dun`: no field `dun` (fields: done)"),
+        ("error", "nodes.sum.instruction", "`results.build[0].cost`: no field `cost` (fields: index, item, output, harness, model)"),
+        ("error", "nodes.sum.instruction", "`plan` isn't a for_each node, so `results.plan` doesn't exist"),
+        ("warning", "nodes.echo.command", "output from `results` into the shell unquoted"),  # the item's title, not its index
+        ("warning", "nodes.act.instruction", "reads output from `build`, which has `web: true`"),
+    ])
+
+
+def test_a_for_each_list_from_results_gives_its_items_the_schema_of_the_entries(tmp_path):
+    report = check(tmp_path, flow("""
+        plan:
+          needs: [start]
+          instruction: plan
+          output: {tasks: {type: array, maxItems: 3, items: {type: object, properties: {title: {type: string}}, required: [title], additionalProperties: false}}}
+        a: {needs: [plan], for_each: plan.tasks, instruction: "{{ item.title }}"}
+        b: {needs: [a], for_each: results.a, instruction: "{{ item.item.title }} {{ item.output.summary }}"}
+        c: {needs: [b], for_each: results.b, instruction: "{{ item.item.item.titel }}"}
+        d: {needs: [c], instruction: "{{ results.c[0].item.item.item.title }} {{ results.c[0].item.item.output.summry }}"}
+        each: {needs: [start], for_each: start.values, command: echo ok}
+    """, inputs="task: {type: string}\nvalues: {type: array, maxItems: 5, items: true}"))
+    assert_problems(report, [  # and no warning that results.a has no maxItems: a node's max_items bounds its results
+        ("error", "nodes.c.instruction", "`item.item.item.titel`: no field `titel` (fields: title)"),
+        ("error", "nodes.d.instruction", "`results.c[0].item.item.output.summry`: no field `summry` (fields: summary)"),
+    ])
+
+
+def test_a_filtered_for_each_list_of_results_gives_its_items_the_schema_of_the_entries(tmp_path):
+    report = check(tmp_path, flow("""
+        build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, output: {done: {type: boolean}}}
+        listed: {needs: [build], for_each: "results.build | list", instruction: "{{ item.output.done }} {{ item.output.dun }}"}
+        kept: {needs: [build], for_each: "results.build | selectattr('output') | list", instruction: "{{ item.output.dnoe }}"}
+    """))
+    assert_problems(report, [  # and no warning about item.output.done: a read through item isn't checked
+        ("error", "nodes.listed.instruction", "`item.output.dun`: no field `dun` (fields: done)"),
+        ("error", "nodes.kept.instruction", "`item.output.dnoe`: no field `dnoe` (fields: done)"),
+    ])
+
+
+def test_a_read_of_results_that_fails_when_an_item_failed_or_the_node_didnt_run_warns(tmp_path):
+    # Each read is the only one in its template, as wf validate warns once for each template and entry or node
+    after = {  # these run after build and all
+        "bare_index": "{{ results.build[0].output.done }}",
+        "by_if": "{% if results.build[1].output %}{{ results.build[1].output.done }}{% endif %}",
+        "by_else": "{% if not results.build[1].output %}failed{% else %}{{ results.build[1].output.done }}{% endif %}",
+        "by_value": "{{ results.build[1].output.done if results.build[1].output else 'failed' }}",
+        "by_and": "{{ results.build[1].output and results.build[1].output.done }}",
+        "by_not_none": "{% if results.build[1].output is not none %}{{ results.build[1].output.done }}{% endif %}",
+        "by_last": "{% if results.build[-1].output %}{{ results.build[-1].output.done }}{% endif %}",
+        "other_item": "{% if results.build[0].output %}{{ results.build[1].output.done }}{% endif %}",
+        "on_fail": "{{ results.all[0].output.done }}",  # on_item_error: fail leaves no output none
+        "whole": "{{ results.build[0].output }}",  # the output itself, and no field of it
+        "in_loop": "{% for r in results.build %}{{ r.output.done }}{% endfor %}",  # through a name: not checked
+        "by_set": "{% set first = results.build[0] %}{{ first.output.done }}",
+        "by_with": "{% with outs = results.build | map(attribute='output') | list %}{{ outs[0].done }}{% endwith %}",
+        "by_select": "{% set ok = results.build | selectattr('output') | list %}{{ ok[1].output.done }}",
+        "by_map": "{{ results.build | map(attribute='output.done') | list }}",  # through a filter: not checked
+    }
+    beside = {  # these run beside build, which might not have run yet
+        "early": "{{ results.build[0].index }}",
+        "early_last": "{{ results.build[-1].index }}",
+        "early_none": "{% if results.build is not none %}{{ results.build[1].index }}{% endif %}",  # never none
+        "if_ran": "{% if build %}{{ results.build[1].index }}{% endif %}",
+        "if_any": "{% if results.build %}{{ results.build[1].index }}{% endif %}",
+        "in_loop_early": "{% for r in results.build %}{{ r.index }}{% endfor %}",
+    }
+    nodes = ["side: {needs: [start], command: x}",
+             "build: {needs: [start], for_each: '[1, 2]', on_item_error: continue, instruction: x, output: {done: {type: boolean}}}",
+             "all: {needs: [start], for_each: '[1, 2]', instruction: x, output: {done: {type: boolean}}}"]
+    nodes += [f"{name}: {{needs: [build, all], instruction: {json.dumps(text)}}}" for name, text in after.items()]
+    nodes += [f"{name}: {{needs: [side], instruction: {json.dumps(text)}}}" for name, text in beside.items()]
+    nodes += ["pair: {needs: [side], for_each: '[0, 1]', instruction: '{{ results.build[index].index }}'}",  # by its position
+              "pick: {needs: [build], for_each: results.build, instruction: '{{ item.output.done }}'}"]  # through item: not checked
+    report = check(tmp_path, flow("\n".join(nodes)))
+    assert_problems(report, [
+        ("warning", "nodes.bare_index.instruction", "reads `results.build[0].output.done`, but with `on_item_error: continue` "
+                                                    "an item of `build` that failed has the output none: check that the output "
+                                                    "is set first"),
+        ("warning", "nodes.other_item.instruction", "reads `results.build[1].output.done`, but with `on_item_error: continue`"),
+        ("warning", "nodes.early.instruction", "reads `results.build[0].index`, but `build` might not have run yet; "
+                                               "check first with {% if build %}"),
+        ("warning", "nodes.early_last.instruction", "reads `results.build[-1].index`, but `build` might not have run yet"),
+        ("warning", "nodes.early_none.instruction", "reads `results.build[1].index`, but `build` might not have run yet"),
+        ("warning", "nodes.pair.instruction", "reads `results.build[index].index`, but `build` might not have run yet"),
     ])
 
 

@@ -1066,6 +1066,25 @@ def test_a_template_that_reads_a_node_a_follow_up_clears_gets_a_warning(repo):
     assert [p.split(":", 2)[1].strip() for p in found if why in p] == ["nodes.review.command", "end.output.passed.value"]
 
 
+def test_a_template_that_reads_results_of_a_node_a_follow_up_clears_gets_a_warning(repo):
+    found = problems("""
+        version: 1
+        name: again
+        start: {input: {}}
+        follow_up: {to: check}
+        nodes:
+          implement: {needs: [start], command: "true"}
+          tests: {needs: [implement], for_each: "[1]", command: "true"}
+          check:
+            needs: [tests]
+            command: "echo {{ results.tests[0].output.exit_code }} {% if follow_up %}{{ follow_up.request | quote }}{% endif %}"
+            routes: [{to: implement, max: 1}, {to: end}]
+        end: {output: {}}
+    """)
+    why = "might not have run yet in a follow-up, which clears the outputs of the nodes that `follow_up.to` can lead to"
+    assert [p.split(":", 2)[1].strip() for p in found if why in p] == ["nodes.check.command"]  # results.tests is [] then
+
+
 # ---------- the workspaces that come back ----------
 
 
@@ -1423,6 +1442,8 @@ def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
     saved = {"run": {"id": "x", "dir": "x", "base": None, "branch": None, "repo": "."}, "status": "succeeded", "failure": None,
              "outputs": {"start": {}, "plan": {"exit_code": 0}, "a": {"exit_code": 0}, "b": [{"exit_code": 0}], "join": {}},
              "errors": {"b": [{"index": 1, "item": 2, "error": "exited with code 1"}]}, "taken": {"join:0": 1},
+             "results": {"b": [{"index": 0, "item": 1, "output": {"exit_code": 0}, "harness": None, "model": None},
+                               {"index": 1, "item": 2, "output": None, "harness": None, "model": None}]},
              "history": {"a": [{}, {}]}, "pending": [], "active": {}, "output": {"done": True},
              "sessions": {"a": {"harness": "codex", "model": None, "id": "s1", "cost_usd": 0.0, "streak": 2},
                           "sub": {"sessions": {"inner": {"harness": "codex", "model": None, "id": "s2", "cost_usd": 0.0, "streak": 2}}}},
@@ -1431,7 +1452,7 @@ def test_taking_in_a_follow_up_clears_what_its_nodes_did_and_keeps_the_rest():
     progress = state.Progress(saved, workflow, scheduler.Topology.of(workflow), events.append)
     progress.follow_up(42.0)
     taken = progress.update()
-    assert (taken["pending"], set(taken["outputs"]), taken["errors"]) == (["a", "b"], {"start", "plan"}, {})
+    assert (taken["pending"], set(taken["outputs"]), taken["errors"], taken["results"]) == (["a", "b"], {"start", "plan"}, {}, {})
     assert (taken["taken"], taken["sessions"]["a"]["streak"], taken["history"]) == ({}, 0, {"a": [{}, {}]})
     assert taken["sessions"]["sub"] == {"sessions": {"inner": {**saved["sessions"]["sub"]["sessions"]["inner"], "streak": 0}}}
     assert (taken["status"], taken["output"]) == ("running", None)

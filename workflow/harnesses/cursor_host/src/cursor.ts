@@ -131,6 +131,8 @@ export class CursorSession {
   private clients = new Map<string, ClientTool>();
   private customTools: Record<string, SDKCustomTool> = {};
   private calls = new Map<string, string>();
+  private thought = "";
+  private requests = new Set<string>();
   private turns: Usage[] = [];
   private total: Usage = noUsage();
   private resolved: Resolved | null = null;
@@ -238,6 +240,8 @@ export class CursorSession {
 
   private async runTurn(turn: string, kind: string, text: string): Promise<void> {
     this.wire.event(this.id, turn, "turn.started", { kind, text });
+    this.thought = "";
+    this.requests.clear();
     let reported: Usage | null = null;
     let status = "done";
     let error: ErrorInfo | null = null;
@@ -248,6 +252,8 @@ export class CursorSession {
       });
       this.force = false;
       this.run = run;
+      // A local run writes its `request` message to the agent's store, and not to the stream
+      this.request(turn, run.requestId);
       if (this.cancelled) await run.cancel();
       for await (const message of run.stream()) {
         if (message.type === "usage") {
@@ -258,6 +264,7 @@ export class CursorSession {
         }
       }
       const result = await run.wait();
+      this.request(turn, result.requestId);
       reported ??= result.usage ? fromTokens(result.usage) : null;
       if (result.status === "cancelled") status = "cancelled";
       else if (result.status === "error") error = classifyRunError(result.error);
@@ -266,6 +273,7 @@ export class CursorSession {
     } finally {
       this.run = null;
     }
+    if (this.thought) this.thinking(turn, "", null); // the turn ended before the block of thinking did
     if (this.outside !== null) error = { class: "failed", code: "cursor.outside_access", message: this.outside, retryable: false };
     else if (status === "cancelled" || (error === null && this.cancelled)) {
       status = "cancelled";
@@ -287,7 +295,26 @@ export class CursorSession {
       }
     } else if (message.type === "tool_call") {
       this.tool(turn, message);
+    } else if (message.type === "thinking") {
+      this.thinking(turn, message.text, message.thinking_duration_ms);
+    } else if (message.type === "request") {
+      this.request(turn, message.request_id);
     }
+  }
+
+  // The SDK sends a block of thinking as pieces of text, then a message with the time the block took.
+  private thinking(turn: string, text: string, durationMs: number | null | undefined): void {
+    this.thought += text ?? "";
+    if (durationMs === undefined) return;
+    const took = typeof durationMs === "number" && Number.isFinite(durationMs) ? Math.max(0, Math.round(durationMs)) : null;
+    this.wire.event(this.id, turn, "turn.thinking", { text: this.thought, duration_ms: took });
+    this.thought = "";
+  }
+
+  private request(turn: string, id: string | undefined): void {
+    if (typeof id !== "string" || !id || this.requests.has(id)) return;
+    this.requests.add(id);
+    this.wire.event(this.id, turn, "turn.request", { request_id: id });
   }
 
   // A session's own tool is one on OWN_SERVER, or one whose server isn't known (yet) with the

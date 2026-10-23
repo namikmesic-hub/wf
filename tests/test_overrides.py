@@ -111,6 +111,18 @@ def test_a_failed_item_runs_again_with_the_model_it_is_given_and_the_others_stay
     assert kept == {"review[1]": {"harness": "claude-code", "model": "sonnet", "effort": "max"}}
 
 
+def test_results_names_the_harness_and_model_that_an_override_gives_an_item(repo, no_real_harness):
+    write("fan.yaml", FAN.replace('said: {type: array, value: "{{ review | map(attribute=\'summary\') | list }}"}',
+                                  'harnesses: {type: array, value: "{{ results.review | map(attribute=\'harness\') | list }}"}, '
+                                  'models: {type: array, value: "{{ results.review | map(attribute=\'model\') | list }}"}'))
+    steps = {"agents": {"review[0]": [{"summary": "a"}], "review[1]": [{"_unavailable": "resource_exhausted"}, {"summary": "b"}],
+                        "review[2]": [{"summary": "c"}]}}
+    assert cli.main(["run", "fan.yaml", "--dry-run", script(steps)]) == 1
+    assert cli.main(["retry", only_run().name, "--harness", "review[1]=claude-code", "--model", "review[1]=sonnet"]) == 0
+    assert json.loads((only_run() / "output.json").read_text()) == {
+        "harnesses": ["cursor", "claude-code", "claude-code"], "models": ["grok", "sonnet", "opus"]}
+
+
 def test_an_item_keeps_the_harness_that_its_template_gives_it(repo, no_real_harness, capsys):
     write("fan.yaml", FAN)
     steps = {"agents": {"review[0]": [{"summary": "a"}], "review[1]": [{"_unavailable": "resource_exhausted"}, {"summary": "b"}],
