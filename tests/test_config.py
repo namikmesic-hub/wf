@@ -341,6 +341,9 @@ def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, probl
                                         "of a :, /, ?, # or @ and lacks the port."),
     ("http://wf\uff1ahunter2@[::1]/wf", "metrics.url has a character that isn't ASCII, such as a full-width colon, in place "
                                         "of a :, /, ?, # or @ and lacks the port."),
+    ("https://wf:hunter2@clickhouse.example.com\uff1a8443/w\uff20f", "metrics.url has a character that isn't ASCII, such "
+                                                                    "as a full-width colon, in place of a :, /, ?, # or @."),
+    ("https://wf:[hunter2]@127.0.0.1:8123/w\uff20f", "metrics.url doesn't parse as https://user:password@host:port/database."),
     ("wf@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and lacks the password."),
     (":hunter2@http://127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and lacks the user."),
     ("1http://wf@clickhouse.example.com:8443/wf", "metrics.url has text before :// that isn't a scheme."),  # 1http://wf may be the login
@@ -352,6 +355,9 @@ def test_a_file_that_isn_t_toml_is_refused_without_its_text(wf_home, data, probl
                                                  "that isn't ASCII, such as a full-width colon, in place of a :, /, ?, # or @."),
     ("wf@http://x\uff20127.0.0.1:8123/wf", "metrics.url has text before :// that isn't a scheme and has a character that "
                                            "isn't ASCII, such as a full-width colon, in place of a :, /, ?, # or @."),
+    ("wf@http://127.0.0.1:8123/w\uff20f", "metrics.url has text before :// that isn't a scheme and lacks the password."),
+    ("1http://127.0.0.1:8123/w\uff20f", "metrics.url has text before :// that isn't a scheme and lacks the user and the "
+                                        "password."),
     ("https://clickhouse.example.com:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user "
                                             "and the password."),  # without an @, no reading of it has a login
     ("https://wf:0/wf", "metrics.url has a port that isn't a number from 1 to 65535 and lacks the user and the password."),

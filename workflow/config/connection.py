@@ -49,13 +49,13 @@ class Connection:
         """The parts of the text in the order of FORM, also when it doesn't parse. The first :// ends the
         scheme, the last @ ends the user and the password, and the next / ends the host and the port. Text
         before :// that isn't a scheme can hold the login before its last @. But with an @ after the ://,
-        the login can start on either side of it, so wf names no missing login. Where NFKC folds a
-        character into a :, /, ?, # or @, as a full-width colon, wf reads the ASCII character."""
+        the login can start on either side of it, so wf names no missing login. Before the database, wf
+        reads the ASCII character for each character that NFKC folds into a :, /, ?, # or @."""
         head, sep, rest = text.partition("://")
         if sep and head and not SCHEME.fullmatch(head):
             after = cls.parse("http://" + rest)
-            folds = _gains(head) or FOLDED in after.broken
-            head, rest = _fold(head), _fold(rest)
+            folds = _gains(head, _fold(head)) or FOLDED in after.broken
+            head, rest = _fold(head), _plain(rest)
             user, _, password = head.rpartition("@")[0].partition(":")
             lacking = () if "@" in rest else tuple(part for part, value in zip(LOGIN, (user, password)) if not value)
             return cls(text, broken=("has text before :// that isn't a scheme",) + ((FOLDED,) if folds else ()),
@@ -66,8 +66,8 @@ class Connection:
             parts = urlsplit("//" + login.translate(ESCAPED) + at + place)
             host = parts.hostname or ""
         except ValueError:  # brackets that hold no IPv6 address, or a character that NFKC folds into a separator
-            folded = _fold(text)
-            why = FOLDED if _gains(text) else f"doesn't parse as {FORM}"
+            folded = text.removesuffix(rest) + _plain(rest)
+            why = FOLDED if _gains(text, folded) else f"doesn't parse as {FORM}"
             plain = folded if folded != text else text.translate(BRACKETS)  # an IPv6 host needs its brackets
             return cls(text, broken=(why,), missing=cls.parse(plain).missing if plain != text else ())
         broken = []
@@ -135,6 +135,14 @@ def _fold(text: str) -> str:
     return unicodedata.normalize("NFKC", text)
 
 
-def _gains(text: str) -> bool:
+def _plain(rest: str) -> str:
+    """The text after ://, folded up to the database: up to the first /, ? or # after the last @. urlsplit
+    checks only that part, so it reads a full-width @ in the database as it is."""
+    place = rest.rpartition("@")[2]
+    cut = len(rest) - len(place) + re.match(r"[^/?#]*", place).end()
+    return _fold(rest[:cut]) + rest[cut:]
+
+
+def _gains(text: str, folded: str) -> bool:
     """Does the fold add a :, /, ?, # or @ to the text?"""
-    return any(_fold(text).count(separator) > text.count(separator) for separator in SEPARATORS)
+    return any(folded.count(separator) > text.count(separator) for separator in SEPARATORS)
