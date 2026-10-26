@@ -9,6 +9,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -1197,6 +1198,14 @@ def rows_of(address: str, table: str, final: bool = True) -> list[dict]:
     return ordered(table, [json.loads(line) for line in found.splitlines()])
 
 
+
+def panel_nodes(address: str, title: str) -> list[list[str]]:
+    """The workflow and node of each row of a panel of the example dashboard, over all time and each workflow."""
+    dashboard = json.loads((Path(__file__).parent.parent / "docs/metrics/grafana/wf-runs.json").read_text(encoding="utf-8"))
+    (panel,) = [panel for panel in dashboard["panels"] if panel["title"] == title]
+    sql = re.sub(r"\$__timeFilter\(\w+\)|\$__conditionalAll\(.*?, \$workflow\)", "1", panel["targets"][0]["rawSql"])
+    return sorted([row["workflow"], row["node"]] for row in map(json.loads, query(address, f"{sql} FORMAT JSONEachRow").splitlines()))
+
 @pytest.fixture
 def empty(clickhouse, wf_home):
     """The ClickHouse without the database wf, as on a new volume, and metrics.url set to it."""
@@ -1225,6 +1234,9 @@ def test_a_backfill_into_clickhouse_gives_the_expected_rows_and_a_second_export_
     assert query(empty, f"SELECT DISTINCT {named} AS name FROM wf.attempts ORDER BY name").split() == [
         "build", "build/compile", "implement", "review", "tests"]
     assert query(empty, f"SELECT {named} FROM (SELECT 'build#2[3].a1/implement' AS node)") == "build[3]/implement\n"
+    assert panel_nodes(empty, "Node duration p50, p95, max") == sorted(list(json.loads(line).values()) for line in query(
+        empty, f"SELECT DISTINCT workflow, {named} AS node FROM wf.attempts FINAL WHERE duration_s IS NOT NULL "
+               "FORMAT JSONEachRow").splitlines())
 
     assert cli.main(backfill) == 0
     assert sorted(capsys.readouterr().out.splitlines()) == [f"{EVENTED}: nothing new", f"{TRACED}: nothing new"]

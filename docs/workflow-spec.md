@@ -1638,6 +1638,7 @@ The tests below are in `tests/test_config.py`, unless a row names another file.
 | `docs/metrics/compose.yaml` | `docker compose config` reads it: ClickHouse alone, on `127.0.0.1:8123`, in the project `wf-clickhouse`. It has its user, password and database, a named volume, the files for little memory and for the headers, and no SQL. Pytest skips the test without Docker with Compose. | `docs/metrics/compose.yaml:26`, `docs/metrics/compose.yaml:30` | `test_the_example_compose_file_parses_and_runs_clickhouse_alone_on_127_0_0_1` in `tests/test_metrics.py` |
 | The README | It gives the commands that start and stop the example, and the command that stops the stack of an older wf. It also gives the URL of the example, which loads with `metrics.enabled`. It says that a `COMPOSE_PROJECT_NAME` in the shell replaces the project name. | `README.md:198` | `test_the_readme_gives_the_commands_and_the_url_of_the_example` in `tests/test_metrics.py` |
 | The dashboard and the Collector | The dashboard reads the database of the example through one datasource. The Collector takes the login of ClickHouse from its environment, and its filter knows the `service.name` of the Codex app server. The Collector's file names the contrib image that validates it. | `docs/metrics/grafana/wf-runs.json:23`, `docs/metrics/collector/config.yaml:51` | `test_the_dashboard_reads_the_database_of_the_example_through_one_datasource`, `test_the_collector_takes_the_login_of_clickhouse_from_its_environment`, `test_the_codex_that_wf_starts_names_its_service_as_the_collector_s_filter_expects` in `tests/test_metrics.py` |
+| The panel "Node duration p50, p95, max" of the dashboard | It groups the attempts by their workflow and by the name that events use. So the attempts of a node of a sub-workflow count under one name, in each pass and attempt of its workflow node. | `docs/metrics/grafana/wf-runs.json:615` | `test_the_node_duration_panel_counts_a_node_of_a_sub_workflow_under_the_name_that_events_use` in `tests/test_metrics.py`, `test_a_backfill_into_clickhouse_gives_the_expected_rows_and_a_second_export_changes_nothing` in `tests/test_export.py` |
 | wf | Its one `wf metrics` command is `wf metrics export`, and no module of `workflow/` runs `docker`. | `workflow/cli.py:794` | `test_wf_runs_no_docker_and_its_one_metrics_command_is_export` in `tests/test_metrics.py` |
 
 ### Export to ClickHouse
@@ -1674,6 +1675,7 @@ A job that isn't an item has the item -1.
 A node inside a sub-workflow has, in front of its id, the trace id of the attempt that runs the sub-workflow, such as `build#1[3].a1/implement`.
 So each pass and each attempt of a workflow node keeps rows of its own.
 The SQL `replaceRegexpAll(node, '#[0-9]+|[.]a[0-9]+', '')` gives the name that events use, `build[3]/implement`.
+The panel "Node duration p50, p95, max" of the example dashboard groups the attempts by that name.
 The class of an error comes from its text: `rate_limit`, `dropped_connection`, `timeout`, `auth`, `no_result` or `other`.
 
 Before it writes, `wf metrics export` makes the database and each table that is missing.

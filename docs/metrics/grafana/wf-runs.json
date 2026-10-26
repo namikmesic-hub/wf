@@ -612,10 +612,10 @@
           "format": 1,
           "queryType": "table",
           "pluginVersion": "4.23.0",
-          "rawSql": "SELECT workflow, node, count() AS attempts,\n       quantile(0.5)(duration_s) AS p50, quantile(0.95)(duration_s) AS p95, max(duration_s) AS max\nFROM wf.attempts FINAL\nWHERE $__timeFilter(started) AND duration_s IS NOT NULL\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY workflow, node\nORDER BY p95 DESC"
+          "rawSql": "SELECT workflow, replaceRegexpAll(node, '#[0-9]+|[.]a[0-9]+', '') AS node, count() AS attempts,\n       quantile(0.5)(duration_s) AS p50, quantile(0.95)(duration_s) AS p95, max(duration_s) AS max\nFROM wf.attempts FINAL\nWHERE $__timeFilter(started) AND duration_s IS NOT NULL\n  AND $__conditionalAll(workflow IN (${workflow:singlequote}), $workflow)\nGROUP BY workflow, node\nORDER BY p95 DESC"
         }
       ],
-      "description": "The time of each attempt of a node, over the attempts that started in the time range."
+      "description": "The time of each attempt of a node, over the attempts that started in the time range. A node of a sub-workflow counts under the name that events use, such as build[3]/implement."
     },
     {
       "id": 7,
