@@ -34,14 +34,17 @@ To see runs as they happen (observe.py, ui.py):
     wf sessions [run-id]             each agent session that runs now
     wf watch <run-id>                the run's steps and tool calls, as they come
     wf ui                            a web page on this machine: runs, graph, progress, metrics, transcripts
-    wf metrics up                    start Grafana on ClickHouse in Docker (metrics/compose.yaml), and print
-                                     Grafana's address (metrics.py)
 
-Every command that makes or finds runs takes --runs-dir DIR (default: WF_RUNS_DIR) to keep run
-folders outside the repo, in a folder per repo under DIR, instead of in ./.wf/runs (runs.py).
+wf's own settings, in ~/.wf/config.toml (config/):
+    wf config show                   the value of each key, and where it comes from
 
-main() parses the arguments and returns the exit code. The pyproject entry
-point (`wf = "workflow.cli:main"`) passes that code to the shell.
+Every command that makes or finds runs takes --runs-dir DIR, to keep run folders outside the repo.
+They then go in a folder per repo under DIR, instead of in ./.wf/runs (runs.py). WF_RUNS_DIR, else
+runs_dir in config.toml, gives the default DIR.
+
+main() parses the arguments, loads the configuration, and returns the exit code. A configuration
+with problems stops every command before it starts. The pyproject entry point
+(`wf = "workflow.cli:main"`) passes that code to the shell.
 
 Exit codes: 0 means success, and 1 means failure, bad arguments included. A
 pause for a person gives 2, from wf run, wf retry and wf continue, only with
@@ -55,13 +58,12 @@ import argparse
 import asyncio
 import getpass
 import json
-import os
 import re
 import sys
 import webbrowser
 from pathlib import Path
 
-from . import diagram, firstmate, metrics, observe, operate, progress, report, runner, runs, spec, steer, trace_view, ui, validate, workspaces
+from . import config, diagram, firstmate, observe, operate, progress, report, runner, runs, spec, steer, trace_view, ui, validate, workspaces
 from .tools import keychain, signin
 from .tools.catalog import TOOLS
 
@@ -110,8 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     graph.set_defaults(handler=_graph)
 
     no_input = {"action": "store_true", "help": "never ask questions: pause instead (exit code 2)"}
-    runs_dir = {"type": _folder, "metavar": "DIR", "help": "run folders are in DIR, a folder per repo, "
-                                                           "instead of ./.wf/runs (default: WF_RUNS_DIR)"}
+    runs_dir = {"type": config.flag("runs_dir"), "metavar": "DIR",
+                "help": "run folders are in DIR, a folder per repo, instead of ./.wf/runs "
+                        "(default: WF_RUNS_DIR, else runs_dir in ~/.wf/config.toml)"}
     run = commands.add_parser("run", help="validate, then run a workflow")
     limit_help = {"help": "a limit for this run instead of the file's: cost_usd=20, tokens=5000000, "
                           "duration=2h, or NAME=none for no limit (repeat for several)"}
@@ -180,16 +183,19 @@ def main(argv: list[str] | None = None) -> int:
     watching.set_defaults(handler=_watch)
 
     page = commands.add_parser("ui", help="a web page on this machine that shows runs: graph, progress, metrics, transcripts")
-    page.add_argument("--port", type=_port, default=ui.PORT, help=f"the port on 127.0.0.1 (default {ui.PORT}, or 0 for any free one)")
+    page.add_argument("--port", type=config.flag("ui.port"),
+                      help="the port on 127.0.0.1, or 0 for any free one (default: ui.port in ~/.wf/config.toml, "
+                           f"else {config.KEYS['ui.port'].default})")
     page.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
     page.add_argument("--open", action="store_true", help="open the page in the browser")
     page.add_argument("--runs-dir", **runs_dir)
     page.set_defaults(handler=_ui)
 
-    stack = commands.add_parser("metrics", help="the metrics stack on this machine: Grafana on ClickHouse, in Docker")
-    stack_commands = stack.add_subparsers(dest="metrics_command", required=True, parser_class=_Parser)
-    stack_commands.add_parser("up", help="start it with docker compose up -d, and print Grafana's address").set_defaults(
-        handler=lambda a: metrics.up())
+    configuration = commands.add_parser("config", help="wf's own settings, in ~/.wf/config.toml (WF_HOME moves ~/.wf)")
+    showing = configuration.add_subparsers(dest="config_command", required=True, parser_class=_Parser).add_parser(
+        "show", help="the value of each key, and where it comes from: a flag, the environment, the file or the default")
+    showing.add_argument("--runs-dir", **runs_dir)
+    showing.set_defaults(handler=_config_show)
 
     steering = commands.add_parser(
         "steer", help="send a message into the live agent session of a running node",
@@ -254,8 +260,9 @@ def main(argv: list[str] | None = None) -> int:
         actions = tool_commands.add_parser(tool.name, help=f"{tool.title}, through {tool.url}").add_subparsers(
             dest="action", required=True, parser_class=_Parser)
         setup = actions.add_parser("setup", help=f"sign in to {tool.title}; the secret goes to the macOS Keychain")
-        setup.add_argument("--port", type=int, default=signin.PORT,
-                           help=f"where to wait for the browser's redirect (default {signin.PORT})")
+        setup.add_argument("--port", type=config.flag("tools.signin_port"),
+                           help="where to wait for the browser's redirect (default: tools.signin_port in "
+                                f"~/.wf/config.toml, else {config.KEYS['tools.signin_port'].default})")
         if tool.token:
             setup.add_argument("--token", action="store_true", help=f"paste a {tool.token} instead")
         if tool.write_scopes:
@@ -287,24 +294,17 @@ def main(argv: list[str] | None = None) -> int:
     if extra:
         args.inputs += extra
     try:
-        with workspaces.stopping_git_on_exit():
+        loaded = config.load()
+    except config.ConfigError as error:
+        for problem in error.problems:
+            print(f"wf {args.command}: {problem}", file=sys.stderr)
+        return 1
+    try:
+        with config.pinned(loaded), workspaces.stopping_git_on_exit():
             return args.handler(args)
     except KeyboardInterrupt:  # anywhere the runner doesn't handle it itself
         print("\nStopped.", file=sys.stderr)
         return runner.STOPPED
-
-
-def _port(text: str) -> int:
-    """A port number for wf ui: 0 (any free port) to 65535."""
-    if not text.isdigit() or int(text) > 65535:
-        raise argparse.ArgumentTypeError(f"`{text}` isn't a port: use a number from 0 to 65535")
-    return int(text)
-
-
-def _folder(text: str) -> Path | None:
-    """A folder option's value: a blank one is no folder, as if the option weren't there
-    (Path("") would be the current folder)."""
-    return Path(text) if text.strip() else None
 
 
 def _init(args) -> int:
@@ -429,15 +429,22 @@ def _watch(args) -> int:
 
 
 def _ui(args) -> int:
-    if args.all_repos and not (args.runs_dir or os.environ.get(runs.RUNS_DIR, "").strip()):
-        print("wf ui: --all-repos needs a runs folder: --runs-dir DIR, or WF_RUNS_DIR", file=sys.stderr)
+    chosen = config.get({"runs_dir": args.runs_dir, "ui.port": args.port})
+    if args.all_repos and chosen.runs_dir is None:
+        print(f"wf ui: --all-repos needs a runs folder: --runs-dir DIR, {config.KEYS['runs_dir'].variable}, "
+              f"or runs_dir in {chosen.file}", file=sys.stderr)
         return 1
     try:
-        return ui.serve(ui.Source(Path.cwd(), args.runs_dir, args.all_repos), args.port,
+        return ui.serve(ui.Source(Path.cwd(), args.runs_dir, args.all_repos), chosen.ui.port,
                         opened=webbrowser.open if args.open else None)
     except OSError as error:
-        print(f"wf ui: can't listen on {ui.HOST}:{args.port}: {error.strerror or error}", file=sys.stderr)
+        print(f"wf ui: can't listen on {ui.HOST}:{chosen.ui.port}: {error.strerror or error}", file=sys.stderr)
         return 1
+
+
+def _config_show(args) -> int:
+    print("\n".join(config.show.lines(config.get({"runs_dir": args.runs_dir}))))
+    return 0
 
 
 def _steer(args) -> int:
@@ -661,8 +668,9 @@ def _tools_setup(args) -> int:
     if not sys.stdin.isatty():
         print(f"wf tools {tool.name} setup: run it at a terminal, since it asks you to sign in", file=sys.stderr)
         return 1
+    port = config.get({"tools.signin_port": args.port}).tools.signin_port
     try:
-        stored = asyncio.run(signin.setup(tool, port=args.port, token=args.token, write=args.write, say=print, ask=input,
+        stored = asyncio.run(signin.setup(tool, port=port, token=args.token, write=args.write, say=print, ask=input,
                                           ask_secret=getpass.getpass, open_url=webbrowser.open))
         keychain.save(tool.name, stored)
     except (signin.SetupFailed, signin.Unreachable, keychain.Unavailable) as error:
@@ -690,7 +698,6 @@ def _cursor_signin(args) -> int:
     """Check the key first, and keep it only when Cursor takes it, so a wrong key never replaces a good one."""
     from keyring.errors import KeyringError
 
-    from . import settings
     from .harnesses import Unavailable, cursor
 
     if not sys.stdin.isatty():
@@ -713,13 +720,10 @@ def _cursor_signin(args) -> int:
         print(f"wf runtimes cursor signin: can't save the key in the Keychain: {error or type(error).__name__}", file=sys.stderr)
         return 1
     print(f"Saved the Cursor API key in the macOS Keychain: {cursor.works(found)}.")
-    try:
-        file = settings.get("cursor_api_key_file")
-    except settings.SettingsError:
-        file = None
-    if file is not None:
-        print(f"Note: cursor_api_key_file in {settings.path()} names {file}, and Cursor sessions take the key from there "
-              "first. Remove that setting to use the key you saved.")
+    chosen = config.get()
+    if chosen.cursor.api_key_file is not None:
+        print(f"Note: cursor.api_key_file in {chosen.file} names {chosen.cursor.api_key_file}, and Cursor sessions take "
+              "the API key from there first. Remove api_key_file from [cursor] to use the API key that you saved.")
     return 0
 
 

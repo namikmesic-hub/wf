@@ -53,7 +53,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command, StateSnapshot
 
-from . import ask, capacity, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, settings, spec, steer, validate, workspaces
+from . import ask, capacity, config, dryrun, graph, limits, operate, overrides, runs, scheduler, schemas, spec, steer, validate, workspaces
 from .context import RunContext
 from .harnesses.base import short
 
@@ -80,7 +80,7 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         return 1
     try:
         max_agents = capacity.configured()  # a bad cap stops a run before it exists, a detached one too
-    except (capacity.CapError, settings.SettingsError) as error:
+    except config.ConfigError as error:
         print(f"wf run: {error}", file=sys.stderr)
         return 1
     report = validate.check(path)
@@ -120,7 +120,7 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
         script.keep(run.dir / "dry-run")
     if detach:  # a background `wf retry` starts it, with the lock this process takes now
         with run.driving() as lock:
-            pid = operate.detach(run, ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)], lock)
+            pid = operate.detach(run, ["retry", run.id, "--no-input"], lock)
         _say({"run": run.id, "dir": str(run.dir), "pid": pid}, f"Run {run.id} started in the background. "
              f"Follow it with: {run.command('wait')}", as_json)
         return 0
@@ -160,14 +160,14 @@ def retry(run_id: str, no_input: bool, answers_file: Path | None = None, detach:
         new_limits = limits.parse(limit_pairs or [])
         new_models = overrides.parse(override_pairs or {})
         max_agents = capacity.configured()
-    except (OSError, spec.SpecError, ValueError, limits.LimitError, overrides.OverrideError, capacity.CapError,
-            settings.SettingsError) as error:  # ValueError: not JSON, or not UTF-8
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, overrides.OverrideError,
+            config.ConfigError) as error:  # ValueError: not JSON, or not UTF-8
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:
         with run.driving() as lock:
             return _checked_retry(run, workflows, name, answers, no_input, detach, as_json, lock, new_limits,
-                                  new_models, max_agents, runs_dir)
+                                  new_models, max_agents)
     except runs.RunBusy as error:
         print(f"{name}: {error}", file=sys.stderr)
         return 1
@@ -175,7 +175,7 @@ def retry(run_id: str, no_input: bool, answers_file: Path | None = None, detach:
 
 def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, answers: dict | None, no_input: bool,
                    detach: bool, as_json: bool, lock: runs.Lock, new_limits: dict, new_models: dict,
-                   max_agents: int | None, runs_dir: Path | None) -> int:
+                   max_agents: int | None) -> int:
     workflow = workflows[0]
     ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
     asking = interactive() and not no_input and not detach
@@ -220,7 +220,7 @@ def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, ans
         print(f"Override for the rest of this run: {overrides.describe(key, override)}", file=out)
     ctx.overrides = run.overrides()
     if detach:
-        args = ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)]
+        args = ["retry", run.id, "--no-input"]
         if answers is not None:  # keep the answers with the run, for the background process
             kept = run.dir / "answers" / f"{run.status().get('seq', 0)}.json"  # one per state: we hold the lock
             kept.parent.mkdir(exist_ok=True)
@@ -338,12 +338,6 @@ def _note_uncommitted(workflows: list[spec.Workflow], read_by_wf: list[Path]) ->
         shown = ", ".join(changed[:5]) + (f" and {len(changed) - 5} more" if len(changed) > 5 else "")
         print(f"Note: {len(changed)} uncommitted change(s) ({shown}) won't be in the `workspace: new` worktrees, "
               "which start from the last commit. Commit them first if its steps need them.", file=sys.stderr)
-
-
-def _runs_dir_args(runs_dir: Path | None) -> list[str]:
-    """A background driver inherits WF_RUNS_DIR, but not --runs-dir: pass that on, resolved,
-    so the driver finds the run where this process put it."""
-    return ["--runs-dir", str(runs_dir.expanduser().resolve())] if runs_dir else []
 
 
 def _ended(run: runs.Run, state: StateSnapshot) -> bool:
@@ -696,13 +690,12 @@ def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, a
         workflows = [spec.load(f) for f in validate.check(run.workflow_file).files]
         new_limits = limits.parse(limit_pairs or [])
         max_agents = capacity.configured()
-    except (OSError, spec.SpecError, ValueError, limits.LimitError, capacity.CapError, settings.SettingsError) as error:
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, config.ConfigError) as error:
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:
         with run.driving() as lock:
-            return _checked_follow_up(run, workflows, request, no_input, detach, as_json, lock, new_limits, max_agents,
-                                      runs_dir)
+            return _checked_follow_up(run, workflows, request, no_input, detach, as_json, lock, new_limits, max_agents)
     except runs.RunBusy as error:
         print(f"{name}: {error}, and only a run that succeeded takes a follow-up. Follow it with: {run.command('wait')}",
               file=sys.stderr)
@@ -710,8 +703,7 @@ def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, a
 
 
 def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: str, no_input: bool, detach: bool,
-                       as_json: bool, lock: runs.Lock, new_limits: dict, max_agents: int | None,
-                       runs_dir: Path | None) -> int:
+                       as_json: bool, lock: runs.Lock, new_limits: dict, max_agents: int | None) -> int:
     name, workflow = "wf continue", workflows[0]
     ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
     dry = bool(run.info().get("dry_run"))
@@ -754,7 +746,7 @@ def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: s
     ctx.overrides = run.overrides()
     print(f"Limits for this follow-up: {limits.describe(ctx.limits)}", file=sys.stderr if as_json else sys.stdout)
     if detach:
-        pid = operate.detach(run, ["retry", run.id, "--no-input", *_runs_dir_args(runs_dir)], lock)
+        pid = operate.detach(run, ["retry", run.id, "--no-input"], lock)
         _say({"run": run.id, "dir": str(run.dir), "pid": pid, "follow_up": number},
              f"Run {run.id} takes follow-up {number} in the background. Follow it with: {run.command('wait')}", as_json)
         return 0

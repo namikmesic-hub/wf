@@ -26,7 +26,7 @@ source does the waiting. Writing, changing or improving a workflow file is the
 
 Work in the project folder the workflow belongs to: wf keeps runs in that
 folder's `.wf/runs/`, and every later `wf` command for the run must run there.
-With `WF_RUNS_DIR` set (or `--runs-dir <dir>` on every command), the run folders
+With `WF_RUNS_DIR` or `runs_dir` in `~/.wf/config.toml` set (or `--runs-dir <dir>` on every command), the run folders
 go outside the project instead, to `<dir>/<repo key>/`. Then the project's
 working tree and `.git/info/exclude` stay as they were: only `workspace: new`
 adds its branches and worktree records under `.git`. Use that for a clone you
@@ -55,7 +55,7 @@ To give the captain a live view, offer `wf watch <run-id>` for a terminal pane, 
 `wf ui` prints the page's address with a key in it: give the captain that whole address.
 A `running` run whose `agents_waiting` is not empty waits for a free agent slot.
 The cap on agent sessions across all runs that use the same `~/.wf` comes from
-`max_agents` in `~/.wf/config.yaml` or from `WF_MAX_AGENTS`.
+`max_agents` in `~/.wf/config.toml` or from `WF_MAX_AGENTS`.
 That is not a stall.
 The attempt starts, with its timeout and retries intact, once a slot comes free
 and it is the first to take it.

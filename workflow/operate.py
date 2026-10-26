@@ -173,15 +173,17 @@ _PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 def detach(run: Run, args: list[str], lock: Lock) -> int:
     """Start `wf <args>` for this run in the background, in its own session, logging to the
     run folder, and hand it the run's lock (`lock`, held by the caller): the run stays
-    locked in between, so nobody else can start driving it. Returns its pid. The run is
-    marked running first, so a `wf wait` right after this doesn't report the state it had before."""
+    locked in between, so nobody else can start driving it. It also gets the run's location
+    (Run.location), so it finds the run where it is. Returns its pid. The run is marked
+    running first, so a `wf wait` right after this doesn't report the state it had before."""
     before = run.status()
     run.set_status("running")
+    where, env = run.location()
     try:
         with (run.dir / "driver.log").open("a", encoding="utf-8") as log:
             process = subprocess.Popen(
-                [sys.executable, "-P", "-c", _DRIVER, _PACKAGE_ROOT, *args], cwd=run.repo,
-                env={**os.environ, LOCK_FD: str(lock.fd)}, pass_fds=(lock.fd,),
+                [sys.executable, "-P", "-c", _DRIVER, _PACKAGE_ROOT, *args, *where], cwd=run.repo,
+                env={**os.environ, **env, LOCK_FD: str(lock.fd)}, pass_fds=(lock.fd,),
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             )
     except BaseException:  # nothing started: put back the state the run was in

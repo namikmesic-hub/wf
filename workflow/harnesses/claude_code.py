@@ -41,7 +41,7 @@ Every session also gets:
 - your Claude subscription login. The Agent SDK passes its environment to
   Claude Code, and ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN there would take
   precedence over the login, so they're blanked for the Claude Code process
-  only. Set WF_CLAUDE_AUTH=api-key to use those variables instead.
+  only. claude.auth = "api-key" (WF_CLAUDE_AUTH) uses those variables instead.
 
 Cost: in a multi-turn session, each turn's ResultMessage.usage covers only
 that turn, but total_cost_usd is the session's running total, so a turn costs
@@ -101,7 +101,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from .. import output_tool
+from .. import config, output_tool
 from ..output_tool import ResultTool
 from . import git_tool
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, steer_dropped, steered, transcript
@@ -161,7 +161,7 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
         allowed, mode, disallowed = list(tools), "dontAsk", []
     else:  # full
         tools, allowed, mode, disallowed = None, [], "bypassPermissions", ([] if spec.web else list(WEB))
-    use_api_key = os.environ.get("WF_CLAUDE_AUTH") == "api-key"
+    use_api_key = config.get().claude.auth == "api-key"
     own_tools = [_submit_tool(spec.tool)] + ([_git_tool(spec.cwd)] if spec.access == "read-only" else [])
     servers = {SERVER: create_sdk_mcp_server(SERVER, tools=own_tools)}
     for server in spec.tools:

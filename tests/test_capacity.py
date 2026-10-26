@@ -21,7 +21,7 @@ from textwrap import dedent
 
 import pytest
 
-from workflow import capacity, cli, harnesses, operate, runner, settings, ui
+from workflow import capacity, cli, harnesses, operate, runner, ui
 from workflow.harnesses.base import TurnEnd, Usage
 from workflow.runs import Run
 from fakes import Fake, ends, submit
@@ -160,20 +160,22 @@ def mark(marks: Path, process: subprocess.Popen, which: str) -> Path:
 
 def test_the_cap_comes_from_wf_max_agents_or_the_config_in_wf_home(monkeypatch, wf_home):
     assert capacity.configured() is None
-    (wf_home / "config.yaml").write_text("max_agents: 3\n")
+    (wf_home / "config.toml").write_text("max_agents = 3\n")
     assert capacity.configured() == 3
     monkeypatch.setenv("WF_MAX_AGENTS", "5")  # the environment wins
     assert capacity.configured() == 5
-    monkeypatch.setenv("WF_MAX_AGENTS", "")
+    monkeypatch.setenv("WF_MAX_AGENTS", "")  # a blank variable counts as no variable
     assert capacity.configured() == 3
 
 
-def test_another_setting_in_the_config_leaves_the_cap_alone(monkeypatch, wf_home):
-    monkeypatch.setattr(settings, "KNOWN", ("max_agents", "tools"))
-    (wf_home / "config.yaml").write_text("tools: [git]\n")
+def test_another_key_in_the_config_leaves_the_cap_alone(wf_home):
+    (wf_home / "config.toml").write_text('[cursor]\nruntime = "acp"\n')
     assert capacity.configured() is None
-    (wf_home / "config.yaml").write_text("tools: [git]\nmax_agents: 2\n")
+    (wf_home / "config.toml").write_text('max_agents = 2\n[cursor]\nruntime = "acp"\n')
     assert capacity.configured() == 2
+
+
+UNKNOWN = "unknown key max_agent. The top of the file takes runs_dir and max_agents"
 
 
 @pytest.mark.parametrize("env, config, problem", [
@@ -181,20 +183,20 @@ def test_another_setting_in_the_config_leaves_the_cap_alone(monkeypatch, wf_home
     ("four", None, "not `four`"),
     ("²", None, "WF_MAX_AGENTS must be a whole number of 1 or more, not `²`"),
     ("9" * 5000, None, "WF_MAX_AGENTS must be a whole number of 1 or more"),
-    (None, "max_agents:\n", "must be a whole number of 1 or more, not `null`"),
-    (None, "max_agents: null\n", "must be a whole number of 1 or more, not `null`"),
-    (None, 'max_agents: "4"\n', 'must be a whole number of 1 or more, not `"4"`'),
-    ("2", "max_agent: 4\n", "unknown setting max_agent (known: max_agents, cursor_runtime, cursor_api_key_file)"),  # checked though the variable wins
-    ("2", "max_agents: 0\n", "max_agents in"),
-    (None, "max_agents: 2.5\n", "must be a whole number of 1 or more, not `2.5`"),
-    (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents, cursor_runtime, cursor_api_key_file)"),
-    (None, "- 4\n", "must hold settings by name"),
+    (None, "max_agents =\n", "isn't valid TOML: Invalid value (at line 1, column 13)"),
+    (None, "[max_agents]\n", "max_agents must be a whole number of 1 or more, not a table"),
+    (None, 'max_agents = "4"\n', 'max_agents must be a whole number of 1 or more, not `"4"`'),
+    ("2", "max_agent = 4\n", UNKNOWN),  # checked though the variable wins
+    ("2", "max_agents = 0\n", "config.toml: max_agents must be a whole number of 1 or more, not `0`"),
+    (None, "max_agents = 2.5\n", "must be a whole number of 1 or more, not `2.5`"),
+    (None, "max_agents = true\n", "must be a whole number of 1 or more, not `true`"),
+    (None, "max_agent = 4\n", UNKNOWN),
 ])
 def test_a_bad_cap_stops_wf_run_before_the_run_exists(repo, monkeypatch, capsys, wf_home, env, config, problem):
     if env is not None:
         monkeypatch.setenv("WF_MAX_AGENTS", env)
     if config is not None:
-        (wf_home / "config.yaml").write_text(config)
+        (wf_home / "config.toml").write_text(config)
     assert cli.main(["run", agent_flow()]) == 1
     assert problem in capsys.readouterr().err
     assert not Path(".wf").exists()
@@ -202,7 +204,7 @@ def test_a_bad_cap_stops_wf_run_before_the_run_exists(repo, monkeypatch, capsys,
 
 @pytest.mark.parametrize("env, config, problem", [
     ("0", None, "wf retry: WF_MAX_AGENTS must be a whole number of 1 or more, not `0`"),
-    (None, "max_agent: 4\n", "unknown setting max_agent (known: max_agents, cursor_runtime, cursor_api_key_file)"),
+    (None, "max_agent = 4\n", UNKNOWN),
 ])
 def test_a_bad_cap_stops_wf_retry(repo, monkeypatch, capsys, wf_home, env, config, problem):
     assert cli.main(["run", failing_flow()]) == 1
@@ -210,7 +212,7 @@ def test_a_bad_cap_stops_wf_retry(repo, monkeypatch, capsys, wf_home, env, confi
     if env is not None:
         monkeypatch.setenv("WF_MAX_AGENTS", env)
     if config is not None:
-        (wf_home / "config.yaml").write_text(config)
+        (wf_home / "config.toml").write_text(config)
     capsys.readouterr()
     Path("ready").touch()
     assert cli.main(["retry", folder.name]) == 1

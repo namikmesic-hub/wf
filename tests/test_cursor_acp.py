@@ -10,6 +10,7 @@ The opt-in test at the bottom runs the real `cursor-agent` (uses your Cursor quo
 import asyncio
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -105,6 +106,19 @@ def attempt_log(attempt: int = 1, pass_no: int = 1) -> list[dict]:
 
 
 GOOD = {"tool": {"arguments": {"summary": "hi"}}}
+
+
+def test_paths_cursor_agent_names_the_cursor_agent_that_wf_runs(repo, monkeypatch, wf_home):
+    scenario, log = repo / "scenario.json", repo / "requests.jsonl"
+    scenario.write_text(json.dumps({"turns": [[GOOD]], "logged_out": False, "silent": [], "version": TESTED}))
+    program = repo / "other-install" / "cursor-agent"
+    program.parent.mkdir()
+    program.write_text(f'#!/bin/sh\nexec {shlex.join([sys.executable, str(FAKE), str(scenario), str(log)])} "$@"\n')
+    program.chmod(0o755)
+    (wf_home / "config.toml").write_text(f'[paths]\ncursor_agent = "{program}"\n')
+    monkeypatch.setitem(harnesses.FACTORIES, "cursor", lambda: CursorAcp(request_timeout=5))
+    assert run() == 0
+    assert output() == {"out": "hi"} and len(entries(log, "start")) == 1
 
 
 def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monkeypatch, wf_home):

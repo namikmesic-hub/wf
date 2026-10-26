@@ -799,7 +799,7 @@ def test_a_token_limit_warns_when_every_cursor_node_runs_through_acp(tmp_path, m
     monkeypatch.setenv("WF_CURSOR_RUNTIME", "acp")
     report = check(tmp_path, flow("a: {needs: [start], instruction: x, harness: cursor, model: composer-2.5}",
                                   top="limits: {tokens: 100000}\n"))
-    assert_problems(report, [("warning", "limits.tokens", "every node with `cursor_runtime: acp`")])
+    assert_problems(report, [("warning", "limits.tokens", "every node when cursor.runtime is acp")])
 
 
 def test_project_instructions_takes_a_boolean_on_a_node_or_in_defaults(tmp_path):

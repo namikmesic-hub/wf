@@ -59,7 +59,6 @@ import httpx2
 from . import keychain
 from .catalog import Tool
 
-PORT = 47152  # where setup waits for the browser's redirect
 TIMEOUT = 30  # seconds for each request to an authorization server
 WAIT = 300  # seconds to finish signing in, in the browser
 EARLY = 60  # refresh a token this many seconds before it expires
@@ -412,6 +411,7 @@ async def _callback(port: int, state: str):
         server = await asyncio.start_server(handle, "localhost", port)
     except OSError as error:
         raise SetupFailed(f"can't listen on localhost:{port} for the sign-in ({error.strerror or error}): choose another "
-                          "port with --port (a Slack app or Google client then needs that redirect URL too)") from error
+                          "port with --port, or with signin_port under [tools] in ~/.wf/config.toml (a Slack app or "
+                          "Google client then needs that redirect URL too)") from error
     async with server:
         yield answer

@@ -131,6 +131,22 @@ def test_a_detached_run_and_answer_find_a_runs_folder_given_by_option(repo, tmp_
     assert not (repo / ".wf").exists()
 
 
+@pytest.mark.parametrize("before, after", [("runs", "elsewhere"), (None, "runs")])
+def test_a_detached_run_finds_its_folder_after_runs_dir_changes_in_config_toml(repo, tmp_path, monkeypatch, capsys,
+                                                                                 wf_home, before, after):
+    def runs_dir(name: str | None) -> None:
+        (wf_home / "config.toml").write_text(f'runs_dir = "{tmp_path / name}"\n' if name else "")
+
+    runs_dir(before)
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--detach", "--json"]) == 0
+    run_id = json_out(capsys)["run"]
+    runs_dir(after)  # while the background driver starts
+    if before is None:
+        monkeypatch.setenv("WF_RUNS_DIR", "")  # the run is in .wf/runs
+    assert cli.main(["wait", run_id, "--timeout", "30", *(["--runs-dir", str(tmp_path / before)] if before else [])]) == 0
+    assert json_out(capsys)["status"] == "succeeded"
+
+
 def test_two_repos_with_the_same_name_keep_their_runs_apart(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.setattr(runner, "interactive", lambda: False)
@@ -195,6 +211,37 @@ def test_the_option_wins_over_wf_runs_dir(repo, tmp_path, monkeypatch):
     assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={tmp_path}", "--runs-dir", str(tmp_path / "given")]) == 0
     assert len(list(runs.runs_folder(repo, tmp_path / "given").iterdir())) == 1
     assert not (tmp_path / "from-env").exists()
+
+
+def test_runs_dir_in_config_toml_keeps_run_folders_outside_the_repo_unless_the_variable_or_the_option_names_another(
+        repo, tmp_path, monkeypatch, wf_home):
+    (wf_home / "config.toml").write_text('runs_dir = "~/wf-test-runs"\n')
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    flow = write(tmp_path / "flaky.yaml", FLAKY)
+    assert cli.main(["run", flow, f"flag={tmp_path}"]) == 0
+    assert len(list((tmp_path / "home" / "wf-test-runs" / runs.repo_key(repo.resolve())).iterdir())) == 1
+    monkeypatch.setenv("WF_RUNS_DIR", str(tmp_path / "from-env"))
+    assert cli.main(["run", flow, f"flag={tmp_path}"]) == 0
+    assert cli.main(["run", flow, f"flag={tmp_path}", "--runs-dir", str(tmp_path / "given")]) == 0
+    assert [len(list((tmp_path / name).iterdir())) for name in ("from-env", "given")] == [1, 1]
+    assert not (repo / ".wf").exists()
+
+
+def test_a_blank_wf_runs_dir_turns_off_the_runs_folder_of_config_toml(repo, tmp_path, monkeypatch, wf_home, capsys):
+    flag = tmp_path / "flag"
+    assert cli.main(["run", write(tmp_path / "flaky.yaml", FLAKY), f"flag={flag}"]) == 1
+    (run,) = runs.all_runs(repo)
+    (wf_home / "config.toml").write_text(f'runs_dir = "{tmp_path / "runs"}"\n')
+    hint = run.command("retry")
+    assert hint == f"WF_RUNS_DIR= wf retry {run.id}"
+    monkeypatch.setenv("WF_RUNS_DIR", "")  # as the printed command sets it
+    assert run.command("retry") == hint  # what it prints then is for a new shell, which has no blank variable
+    capsys.readouterr()
+    assert cli.main(shlex.split(hint)[2:]) == 1
+    assert f"continue with: {hint}\n" in capsys.readouterr().out
+    flag.touch()
+    assert cli.main(shlex.split(hint)[2:]) == 0
+    assert run.status()["status"] == "succeeded"
 
 
 def test_a_run_folder_in_a_runs_folder_must_record_its_repo(repo, tmp_path):

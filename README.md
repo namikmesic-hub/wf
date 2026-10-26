@@ -98,33 +98,106 @@ The address that `wf ui` prints holds a key, so other programs and users on the 
 
 ![wf ui: a run of implement.yaml at its tests for the second time](assets/wf-ui.png)
 
-## Metrics in Grafana
+## Configuration
 
-`wf metrics up` starts the metrics stack of `metrics/compose.yaml` in Docker, and prints the address of Grafana.
-The stack has three services:
-- an OpenTelemetry Collector, which takes OTLP from Claude Code and Codex on ports 4317 and 4318
-- ClickHouse, which keeps that data in the database `otel`, and the tables of wf runs in the database `wf`
-- Grafana, whose home page is the dashboard "wf runs", on port 3000
+wf's own settings are in `~/.wf/config.toml`, and `WF_HOME` moves `~/.wf`.
+wf only reads the file, and each key in it is optional:
 
-wf doesn't write the tables of `wf` yet, so the dashboard stays empty for now.
-`wf metrics up` needs Docker with Compose, and an install of wf from its checkout, because the stack is part of wf's source.
-A start with new volumes also needs the internet, for the images and for Grafana's ClickHouse plugin.
-`wf metrics up` waits until ClickHouse and Grafana are healthy and the Collector takes OTLP.
-The stack doesn't start again by itself when Docker starts again, so then run `wf metrics up` again.
-`docker compose -f metrics/compose.yaml -p wf-metrics down` stops the stack, and `down -v` also deletes its data.
-Give each such command `-p wf-metrics`, because a `COMPOSE_PROJECT_NAME` in your shell replaces the project name of the file.
+```toml
+runs_dir = "~/wf-runs"        # keep run folders outside the repos, a folder per repo
+max_agents = 4                # at most 4 live agent sessions, across all runs
 
-Each port listens on 127.0.0.1 only.
-Grafana has no login, and ClickHouse has the fixed user `wf` with the password `wf`.
-So each user and program on this machine can read and change the data of the stack.
-ClickHouse runs a statement over HTTP only for a request to 127.0.0.1 or localhost with the headers `X-ClickHouse-User` and `X-ClickHouse-Key`.
-Grafana sends a request for another host name, such as localhost, to the same port on 127.0.0.1.
-So a web page can't send a statement to either of them, also through a DNS name that points to 127.0.0.1.
-A page on such a DNS name can still send records to the Collector.
-To move a port, set `WF_METRICS_GRAFANA_PORT`, `WF_METRICS_CLICKHOUSE_PORT`, `WF_METRICS_OTLP_GRPC_PORT` or `WF_METRICS_OTLP_HTTP_PORT`.
-With 0, Docker picks a free port, and `docker compose -f metrics/compose.yaml -p wf-metrics port <service> <port>` names it.
-Grafana can't know a port that Docker picks, so it then sends a request for localhost to port 0.
-The address that `wf metrics up` prints names 127.0.0.1, so it still opens Grafana.
+[claude]
+auth = "subscription"         # or "api-key", to use ANTHROPIC_API_KEY
+
+[cursor]
+runtime = "sdk"               # or "acp", to run each Cursor node through cursor-agent
+api_key_file = "~/.config/cursor-key"   # the Cursor API key, in place of the macOS Keychain
+
+[ui]
+port = 8765                   # where wf ui listens, on 127.0.0.1
+
+[tools]
+signin_port = 47152           # where wf tools <name> setup waits for the browser
+
+[git]
+signing_timeout = 30          # the seconds that signing a commit of the runner may take
+
+[paths]                       # for a machine with more than one install: else wf finds each on PATH
+codex = "/opt/homebrew/bin/codex"
+cursor_agent = "~/.local/bin/cursor-agent"
+node = "/opt/homebrew/opt/node@22/bin/node"
+
+[metrics]                     # see Metrics below
+enabled = true
+url = "https://wf:password@clickhouse.example.com:8443/wf"
+```
+
+A key takes its value from its command-line flag, else from its environment variable, else from the file, else from wf's default.
+The flags are `--runs-dir`, and the `--port` of `wf ui` and of `wf tools <name> setup`.
+The environment variables are `WF_RUNS_DIR`, `WF_MAX_AGENTS`, `WF_CLAUDE_AUTH` and `WF_CURSOR_RUNTIME`.
+A variable with an empty value counts as no variable.
+Only an empty `WF_RUNS_DIR` turns the runs folder off, also when the file names one.
+`wf config show` prints the value of each key and where it comes from.
+
+wf doesn't start when the file has an unknown key or a value of the wrong kind.
+Its message names the key, the file and what the key allows.
+The file must be yours, and no other user may change it, because it names programs that wf runs.
+Group write is fine when no other user is in the group of the file, as with a group for each user.
+wf doesn't read `~/.wf/config.yaml` any more.
+While that file is there, wf stops, and names the key in `config.toml` for each of its settings.
+
+## Metrics
+
+wf runs no infrastructure.
+You run ClickHouse yourself, on this machine or on another one, and `[metrics]` in `config.toml` names it.
+`url` is one connection string for the HTTP interface of ClickHouse: `https://user:password@host:port/database`, or `http://` for a ClickHouse on this machine.
+Percent-encode the user and the password, for example `%40` for `@` and `%2F` for `/`.
+With `enabled = true`, the string must have each of its parts, and wf names each part that it lacks and doesn't start.
+With `enabled = false`, or without `[metrics]`, wf exports nothing.
+wf doesn't write the tables of runs yet.
+Until the export of runs makes them, each panel of the example dashboard below shows an error for a missing table.
+
+The password is the one secret of `config.toml`.
+wf never shows it: `wf config show` and each message of wf show `***` in its place.
+wf doesn't show a string that doesn't parse, or that lacks the user or the password, because it can't find the password there.
+When the file sets `url` under `[metrics]`, it must be yours alone, because the password goes there.
+Then wf doesn't start until you run `chmod 600 ~/.wf/config.toml`.
+Mode 0600 keeps out other users, but not the programs that you run.
+So an agent can read the password too, at each access level and on each harness.
+Only a read-only session on Cursor's SDK stays in the workspace and the files and folders that its instruction names.
+
+`docs/metrics/compose.yaml` is an example that runs ClickHouse in Docker on this machine, with a profile for little memory.
+You start it and you stop it, and wf never runs Docker:
+
+```sh
+docker compose -f docs/metrics/compose.yaml up -d     # ClickHouse on 127.0.0.1:8123
+docker compose -f docs/metrics/compose.yaml down      # stop it (down -v also deletes its data)
+```
+
+Its compose project is `wf-clickhouse`.
+A `COMPOSE_PROJECT_NAME` in your shell replaces that name, so unset it, or give both commands `-p wf-clickhouse`.
+An older wf started a stack with Grafana and a Collector as the compose project `wf-metrics`.
+`docker compose -p wf-metrics down` stops that stack, and `down -v` also deletes its data.
+
+The example sets the user `wf`, the password `wf` and the database `wf`, so these are the lines of `config.toml` for it:
+
+```toml
+[metrics]
+enabled = true
+url = "http://wf:wf@127.0.0.1:8123/wf"
+```
+
+ClickHouse then listens on 127.0.0.1 only.
+Each user and program on this machine that knows the password can read and change the data.
+For private data, change the password in both files.
+The HTTP port runs a statement only for a request to 127.0.0.1 or localhost with the header `X-ClickHouse-User`, so a web page can't send one.
+
+Beside the example are two files for a stack that you run.
+`docs/metrics/grafana/wf-runs.json` is a dashboard of wf runs for Grafana, which reads the database `wf` through a ClickHouse datasource with the uid `clickhouse`.
+`docs/metrics/collector/config.yaml` configures an OpenTelemetry Collector that takes OTLP from Claude Code and Codex, and writes it to the database `otel`.
+It needs the contrib distribution of the Collector, which has the ClickHouse exporter, as the image `otel/opentelemetry-collector-contrib:0.162.0`.
+The Collector reads the address, the user and the password of ClickHouse from its environment.
 
 ## Docs
 
@@ -151,9 +224,8 @@ uv run pytest                  # fake agents, no cost
 uv run pytest -m harness       # real agents: uses your Claude Code, Codex and Cursor quota
 ```
 
-Where Docker answers and pytest can reach grafana.com, `uv run pytest` also starts the metrics stack in compose projects of its own.
-The tests remove them at the end.
-A `-m` of your own replaces the default `-m 'not harness'`, so leave those tests out with `-m 'not harness and not docker'`.
+No test starts a container.
+One test reads `docs/metrics/compose.yaml` with `docker compose config`, and pytest skips it on a machine without Docker with Compose.
 
 The tests of Cursor's runtime run the real Cursor host on a fake Cursor SDK, so they need Node.js 22.18 or later.
 The host has its own TypeScript checks: `npm ci && npm run check && npm test` in `workflow/harnesses/cursor_host`.

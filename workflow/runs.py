@@ -26,8 +26,8 @@ Every `wf run` gets a folder, and `wf retry` finds it again by id:
 run already in progress. `.wf/` goes into the repo's .git/info/exclude, so run
 folders never show up in `git status`.
 
-A runs folder (--runs-dir, or WF_RUNS_DIR) keeps run folders outside the repo
-instead: <runs-dir>/<repo key>/<run-id>/, where the key (folder name and a
+A runs folder (runs_dir: --runs-dir, WF_RUNS_DIR or config.toml) keeps run folders
+outside the repo instead: <runs-dir>/<repo key>/<run-id>/. The key (folder name and a
 hash of its path) keeps two repos' runs apart. Then the repo's working tree and
 .git/info/exclude stay as they were: only `workspace: new` adds branches and
 worktree records under .git. run.json's `repo` workspace is the repo's path,
@@ -73,7 +73,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import workspaces
+from . import config, workspaces
 
 ROOT = Path(".wf") / "runs"
 
@@ -99,13 +99,22 @@ class Run:
 
     def command(self, verb: str, *more: str) -> str:
         """The wf command that does `verb` to this run, as typed in its repo, e.g. `wf retry <id>`.
-        For a run in a runs folder it ends in --runs-dir, so it finds the run whatever WF_RUNS_DIR
-        holds where it's typed. For one in ./.wf/runs while WF_RUNS_DIR is set, it starts with
-        `WF_RUNS_DIR=`, which turns the setting off: no --runs-dir value names ./.wf/runs."""
+        For a run in a runs folder it ends in --runs-dir, so it finds the run whatever WF_RUNS_DIR and
+        config.toml say where you type it. For one in ./.wf/runs while WF_RUNS_DIR or config.toml sets a runs folder,
+        it starts with `WF_RUNS_DIR=`, which turns the setting off. No --runs-dir value names ./.wf/runs.
+        A blank WF_RUNS_DIR here doesn't drop it while the file names a runs folder: a new shell has no such variable."""
         text = " ".join(["wf", verb, self.id, *more])
         if self.dir.parent != self.repo.resolve() / ROOT:
             return f"{text} --runs-dir {shlex.quote(str(self.dir.parent.parent))}"
-        return f"{RUNS_DIR}= {text}" if runs_folder(self.repo) != self.dir.parent else text
+        elsewhere = runs_folder(self.repo) != self.dir.parent or config.get().in_file.get("runs_dir") is not None
+        return f"{RUNS_DIR}= {text}" if elsewhere else text
+
+    def location(self) -> tuple[list[str], dict[str, str]]:
+        """The arguments and the environment that let a new wf process find this run, whatever WF_RUNS_DIR
+        and config.toml say when it starts. They are --runs-dir for a run in a runs folder, else a blank WF_RUNS_DIR."""
+        if self.dir.parent != self.repo.resolve() / ROOT:
+            return ["--runs-dir", str(self.dir.parent.parent)], {}
+        return [], {RUNS_DIR: ""}
 
     @property
     def checkpoints(self) -> Path:
@@ -345,15 +354,15 @@ class RunBusy(Exception):
     """Another process is driving this run."""
 
 
-RUNS_DIR = "WF_RUNS_DIR"
+RUNS_DIR = config.KEYS["runs_dir"].variable
 
 
 def runs_folder(repo: Path, runs_dir: Path | None = None) -> Path:
-    """Where this repo's run folders are: <repo>/.wf/runs, or with a runs folder (`runs_dir`,
-    else WF_RUNS_DIR) <runs folder>/<repo key>, outside the repo. A blank WF_RUNS_DIR is unset."""
+    """Where this repo's run folders are: <repo>/.wf/runs, or with a runs folder (`runs_dir`, else
+    WF_RUNS_DIR, else runs_dir in config.toml) <runs folder>/<repo key>, outside the repo."""
     repo = repo.resolve()
-    chosen = runs_dir or os.environ.get(RUNS_DIR, "")
-    return Path(chosen).expanduser().resolve() / repo_key(repo) if str(chosen).strip() else repo / ROOT
+    chosen = config.get({"runs_dir": runs_dir}).runs_dir
+    return chosen.expanduser().resolve() / repo_key(repo) if chosen is not None else repo / ROOT
 
 
 def repo_key(repo: Path) -> str:

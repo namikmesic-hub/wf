@@ -8,26 +8,24 @@ the SDK: entries(log, "create") are the options of each Agent.create, and so on.
 """
 
 import json
-import os
 import shutil
 from pathlib import Path
 
 import keyring
 import keyring.backend
 import pytest
-import yaml
 
-from workflow import harnesses
+from workflow import config, harnesses
 from workflow.harnesses import Unavailable, cursor
 
 FAKE = Path(__file__).parent / "fake_cursor_sdk"
 KEY = "key_test"
-REAL_WF_HOME = Path(os.environ.get("WF_HOME") or Path.home() / ".wf")  # read before conftest moves WF_HOME for each test
+REAL_WF_HOME = config.home()  # read before conftest moves WF_HOME for each test
 
 
 def _node_ok() -> bool:
     try:
-        cursor.find_node()
+        cursor.find_node("node")  # on PATH: no test reads your config.toml
     except Unavailable:
         return False
     return True
@@ -65,15 +63,16 @@ def entries(log: Path, kind: str) -> list:
 
 
 def real_key() -> str | None:
-    """The Cursor API key this machine has for wf, for the opt-in tests: from the file that your
-    config.yaml names, or from your real Keychain (conftest gives each test an empty one)."""
+    """The Cursor API key this machine has for wf, for the opt-in tests. It comes from the file that
+    cursor.api_key_file in your config.toml names, or from your real Keychain. conftest gives each
+    test an empty keyring."""
     try:
-        config = yaml.safe_load((REAL_WF_HOME / "config.yaml").read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
-        config = {}
-    if isinstance(config, dict) and config.get("cursor_api_key_file"):
+        file = config.load(REAL_WF_HOME).cursor.api_key_file
+    except config.ConfigError:
+        file = None
+    if file is not None:
         try:
-            return Path(str(config["cursor_api_key_file"])).expanduser().read_text(encoding="utf-8").strip() or None
+            return file.read_text(encoding="utf-8").strip() or None
         except OSError:
             return None
     real = [k for k in keyring.backend.get_all_keyring() if type(k).__name__ != "FakeKeyring"]

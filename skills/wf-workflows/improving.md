@@ -19,7 +19,7 @@ inside sub-workflows are counted together, e.g. `build[]/implement`.
 - `notes[]`: the facts most worth acting on. Each one needs a cause.
 
 Then read the evidence behind each note, in the run folder
-`.wf/runs/<run-id>/` (or `<runs-dir>/<repo key>/<run-id>/` with `WF_RUNS_DIR`):
+`.wf/runs/<run-id>/` (or `<runs-dir>/<repo key>/<run-id>/` with a runs folder, `wf config show` names it):
 
 - `nodes/<node>/<pass>/[<item>/]instruction.md`: exactly what the step was told.
 - `attempt-<n>.log`: an agent's transcript (JSON lines: `sent`, `text`, `tool`,

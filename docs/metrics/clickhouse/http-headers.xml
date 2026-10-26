@@ -1,7 +1,7 @@
 <!-- The HTTP port runs a statement only for a request to 127.0.0.1 or localhost that has the header X-ClickHouse-User.
      A page of another site can't send that header without the consent of the port, which it doesn't give.
      A page on a DNS name that points to 127.0.0.1 can send it, but the Host header then names that DNS name.
-     /ping stays open, because the entrypoint of the image waits on it while it runs wf.sql. -->
+     /ping stays open, because the entrypoint of the image waits on it while it makes the database. -->
 <clickhouse>
     <http_handlers>
         <rule>

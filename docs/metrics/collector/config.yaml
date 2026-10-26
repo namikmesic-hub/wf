@@ -1,6 +1,12 @@
-# The OpenTelemetry Collector of the wf metrics stack.
+# An example configuration of an OpenTelemetry Collector, for a metrics stack that you run yourself.
+# It needs the contrib distribution of the Collector, which has the clickhouse exporter:
+# the image otel/opentelemetry-collector-contrib:0.162.0 validates it.
 # It takes OTLP from Claude Code and Codex, and writes it into the ClickHouse database otel.
 # The Collector makes the tables of that database when it starts.
+# Set CLICKHOUSE_ENDPOINT, CLICKHOUSE_USER and CLICKHOUSE_PASSWORD where the Collector runs.
+# For a Collector service that you add to ../compose.yaml, the endpoint is tcp://clickhouse:9000.
+# That file publishes only the HTTP port 8123, so a Collector in another project or outside Docker
+# needs a published native port 9000 too.
 
 receivers:
   otlp:
@@ -42,10 +48,10 @@ processors:
 
 exporters:
   clickhouse:
-    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    endpoint: ${env:CLICKHOUSE_ENDPOINT}
     database: otel
-    username: wf
-    password: wf
+    username: ${env:CLICKHOUSE_USER}
+    password: ${env:CLICKHOUSE_PASSWORD}
     create_schema: true
     async_insert: true
     ttl: 2160h

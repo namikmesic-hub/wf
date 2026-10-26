@@ -92,6 +92,23 @@ def test_poll_follows_a_run_kept_in_a_runs_folder_outside_the_repo(repo, monkeyp
     assert runs.Run.at(folder).repo == repo.resolve()
 
 
+def test_a_configuration_with_problems_refuses_the_poll_and_keeps_the_state_for_the_next_one(repo, monkeypatch, capsys,
+                                                                                            wf_home):
+    Path("done.yaml").write_text("version: 1\nname: done\nstart: {input: {}}\nnodes:\n"
+                                 "  a: {needs: [start], command: \"true\"}\nend: {output: {}}\n")
+    assert cli.main(["run", "done.yaml"]) == 0
+    capsys.readouterr()
+    (folder,) = (repo / ".wf" / "runs").iterdir()
+    (wf_home / "config.yaml").write_text("max_agents: 2\n")
+    poll = invoke("source.poll", source_id="done-run", config_ref=f"wf-run:{folder.resolve()}")
+    reply = call(monkeypatch, capsys, "invoke", poll)
+    assert (reply["ok"], reply["error"]["code"], reply["error"]["retryable"]) == (False, "unavailable", True)
+    assert "config.yaml is still there" in reply["error"]["diagnostic"]
+    (wf_home / "config.yaml").unlink()
+    reply = call(monkeypatch, capsys, "invoke", poll)
+    assert json.loads(reply["result"]["output"])["status"] == "succeeded"  # not lost to the refused poll
+
+
 def test_poll_refuses_a_runs_folder_run_that_does_not_record_its_repo(repo, monkeypatch, capsys, tmp_path_factory):
     folder = waiting_run(capsys, tmp_path_factory.mktemp("runs"))
     (folder / "run.json").write_text("{}")
@@ -131,6 +148,7 @@ def test_bad_requests_fail_with_a_protocol_error(repo, monkeypatch, capsys):
 
 
 def test_the_package_is_a_bindable_shim_around_this_wf(tmp_path, capsys):
+    os.umask(0o002)  # many accounts have it, so write_package must set each mode itself
     package = tmp_path / "packages" / "wf"
     assert cli.main(["integrate", "firstmate", str(package)]) == 0
     out = capsys.readouterr().out

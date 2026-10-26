@@ -52,7 +52,6 @@ from . import diagram, observe, operate, progress, report, runs, spec
 from .runs import Run
 
 HOST = "127.0.0.1"
-PORT = 8765
 EVENTS_BACK = 300
 FILE_BYTES = 1_000_000  # a longer file is sent from this many bytes before its end
 PAGE = Path(__file__).parent / "ui"
@@ -471,9 +470,9 @@ class _Handler(BaseHTTPRequestHandler):
         pass  # the terminal shows the address, not each request
 
 
-def serve(source: Source, port: int = PORT, say: Callable[[str], None] = lambda text: print(text, flush=True),
+def serve(source: Source, port: int, say: Callable[[str], None] = lambda text: print(text, flush=True),
           opened: Callable[[str], object] | None = None) -> int:
-    """Serve the page until Ctrl-C. A port that is taken gives way to a free one."""
+    """Serve the page on `port` (ui.port in config/) until Ctrl-C. A port that is taken gives way to a free one."""
     try:
         server = Server(source, port)
     except OSError as error:

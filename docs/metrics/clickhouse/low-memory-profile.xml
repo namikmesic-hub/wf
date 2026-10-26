@@ -1,4 +1,4 @@
-<!-- The settings profile of the user wf: one thread and small blocks for each query, so that a query uses little memory. -->
+<!-- The settings profile of the user of ../compose.yaml: one thread and small blocks for each query, so that a query uses little memory. -->
 <clickhouse>
     <profiles>
         <default>

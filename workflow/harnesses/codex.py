@@ -1,10 +1,11 @@
 """Codex: agent threads through `codex app-server`, JSON-RPC over stdio.
 
 One app server process serves every Codex session in a stream of the graph:
-`codex app-server --disable hooks --disable apps`, then `initialize` (with
-experimentalApi, which dynamic tools need) and the `initialized`
-notification. Messages are JSON objects, one per line, in both directions;
-requests carry an id, notifications don't, and either side can send requests.
+`codex app-server --disable hooks --disable apps`, with the codex of paths.codex,
+else the one on PATH. Then `initialize` (with experimentalApi, which dynamic tools
+need) and the `initialized` notification. Messages are JSON objects, one per line,
+in both directions. Requests carry an id, notifications don't, and either side can
+send requests.
 
 A session is a thread (thread/start), and a turn is turn/start followed by
 notifications (item/started, item/completed, thread/tokenUsage/updated, ...)
@@ -86,11 +87,11 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from .. import output_tool
+from .. import config, output_tool
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
 TESTED = "0.163.0"
-COMMAND = ["codex", "app-server", "--disable", "hooks", "--disable", "apps"]
+APP_SERVER = ["app-server", "--disable", "hooks", "--disable", "apps"]
 SANDBOX = {"read-only": "read-only", "edit": "workspace-write", "full": "danger-full-access"}
 UNAVAILABLE = {"usageLimitExceeded", "unauthorized"}
 STEER_TIMEOUT = 10  # seconds for turn/steer: inside the time `wf steer` waits for an answer (steer.py)
@@ -108,7 +109,8 @@ class Codex:
     name = "codex"
 
     def __init__(self, command: list[str] | None = None, request_timeout: float = 60):
-        self.command = command or COMMAND
+        self.own = command is None  # wf's own command, whose Codex version wf checks
+        self.command = command or [program(), *APP_SERVER]
         self.request_timeout = request_timeout  # a wedged app server counts as unavailable after this
         self.rpc: _Connection | None = None
         self.models: list[dict] = []
@@ -126,8 +128,8 @@ class Codex:
             if isinstance(error, (OSError, _RpcError, TimeoutError)):
                 raise Unavailable(f"the Codex app server didn't start: {error}") from error
             raise
-        if self.command is COMMAND:
-            installed = await asyncio.to_thread(_version)
+        if self.own:
+            installed = await asyncio.to_thread(_version, self.command[0])
             if installed and installed != TESTED:
                 self.warning = f"codex {installed} is installed; wf is tested with {TESTED}, and the app server is experimental"
 
@@ -548,9 +550,14 @@ def _code(error: dict):
     return info if isinstance(info, str) else next(iter(info), None) if isinstance(info, dict) else None
 
 
-def _version() -> str | None:
+def program() -> str:
+    """The Codex program: paths.codex, else codex on PATH."""
+    return str(config.get().paths.codex or "codex")
+
+
+def _version(codex: str) -> str | None:
     try:
-        out = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=10).stdout
+        out = subprocess.run([codex, "--version"], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
     return out.strip().split()[-1] if out.strip() else None

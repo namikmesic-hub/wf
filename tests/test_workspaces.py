@@ -479,9 +479,15 @@ def test_a_commit_whose_signing_test_cant_write_either_doesnt_blame_signing(repo
     assert "insufficient permission" in str(error.value)
 
 
+def signing_timeout(seconds: float) -> None:
+    """git.signing_timeout in the config.toml of this test's WF_HOME, which wf processes it starts read too."""
+    workspaces.home().mkdir(parents=True, exist_ok=True)
+    (workspaces.home() / "config.toml").write_text(f"[git]\nsigning_timeout = {seconds}\n")
+
+
 def test_a_key_waiting_for_a_touch_fails_the_run_at_its_start_within_the_timeout(repo, monkeypatch, tmp_path, capsys):
     sign_with_program(tmp_path, "exec sleep 60")  # like ssh-keygen waiting for a security key to be touched
-    monkeypatch.setattr(workspaces, "SIGNING_TIMEOUT", 2)
+    signing_timeout(2)
     use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
     start = time.monotonic()
     assert run(IMPL) == 1
@@ -492,7 +498,7 @@ def test_a_key_waiting_for_a_touch_fails_the_run_at_its_start_within_the_timeout
 
 def test_a_signing_timeout_lets_git_remove_its_temporary_file(repo, monkeypatch, tmp_path):
     sign_with_program(tmp_path, "exec sleep 60")
-    monkeypatch.setattr(workspaces, "SIGNING_TIMEOUT", 1)
+    signing_timeout(1)
     (tmp_path / "tmp").mkdir()
     monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))  # where git keeps the data being signed
     Path("new.txt").write_text("made\n")
@@ -504,7 +510,7 @@ def test_a_signing_timeout_lets_git_remove_its_temporary_file(repo, monkeypatch,
 
 def test_a_signing_program_that_ignores_sigterm_is_killed(repo, monkeypatch, tmp_path):
     sign_with_program(tmp_path, "trap '' TERM\nwhile :; do sleep 1; done")
-    monkeypatch.setattr(workspaces, "SIGNING_TIMEOUT", 1)
+    signing_timeout(1)
     monkeypatch.setattr(workspaces, "GRACE", 1)
     Path("new.txt").write_text("made\n")
     start = time.monotonic()
@@ -536,8 +542,8 @@ def test_cancelling_a_job_stops_its_git_command_and_the_signing_program(repo, tm
 
     start = time.monotonic()
     asyncio.run(cancel())  # it waits for the thread that ran git, as wf does when it stops
-    assert time.monotonic() - start < 10  # well before SIGNING_TIMEOUT
-    assert len(signers(tmp_path)) == 1  # and nothing ran after it, not even a test of the key
+    assert time.monotonic() - start < 10  # well before git.signing_timeout.
+    assert len(signers(tmp_path)) == 1  # Nothing ran after it, not even a test of the key.
     assert gone(started(tmp_path)[0])
     assert not workspaces._running
 
@@ -670,8 +676,8 @@ def test_a_group_with_only_exited_processes_left_has_nothing_to_stop():
 
 def test_a_hangup_that_wf_ignores_stays_ignored(repo, tmp_path):
     sign_with_program(tmp_path, "exec sleep 60")
-    wf = start_wf("import signal; signal.signal(signal.SIGHUP, signal.SIG_IGN)  # nohup\n"
-                  "from workflow import workspaces; workspaces.SIGNING_TIMEOUT = 2\n" + WF)
+    signing_timeout(2)
+    wf = start_wf("import signal; signal.signal(signal.SIGHUP, signal.SIG_IGN)  # nohup\n" + WF)
     started(tmp_path)
     wf.send_signal(signal.SIGHUP)
     assert wf.wait(timeout=20) == 1  # it ran on, until the signing check timed out
@@ -682,7 +688,6 @@ import fcntl, os, sys, termios, time
 terminal = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY)
 fcntl.ioctl(terminal, termios.TIOCSCTTY, 0)  # this process gets a terminal, as wf does when a person starts it
 from workflow import workspaces
-workspaces.SIGNING_TIMEOUT = 10
 start = time.monotonic()
 try:
     workspaces.check_signing(sys.argv[2])
@@ -694,6 +699,7 @@ print(time.monotonic() - start)
 
 def test_the_signing_program_has_no_terminal_to_ask_on(repo, tmp_path):
     sign_with_program(tmp_path, "exec sleep 60 </dev/tty")  # waits for an answer, if it has a terminal to ask on
+    signing_timeout(10)
     leader, follower = os.openpty()
     try:
         done = subprocess.run([sys.executable, "-c", SIGN_AT_A_TERMINAL, os.ttyname(follower), str(repo)],
@@ -703,7 +709,7 @@ def test_the_signing_program_has_no_terminal_to_ask_on(repo, tmp_path):
         os.close(follower)
     message, elapsed = done.stdout.splitlines()
     assert message.startswith("git can't sign commits in")
-    assert float(elapsed) < 10  # it failed at once, not after SIGNING_TIMEOUT
+    assert float(elapsed) < 10  # it failed at once, not after git.signing_timeout
 
 
 # ---------- branch ----------

@@ -1,0 +1,52 @@
+# An example: ClickHouse for wf's metrics on this machine, which you start and stop yourself.
+# wf never runs Docker.
+# The url under [metrics] in ~/.wf/config.toml names the ClickHouse for the records of runs.
+#
+#   docker compose -f docs/metrics/compose.yaml up -d      starts it
+#   docker compose -f docs/metrics/compose.yaml down       stops it, and `down -v` also deletes its data
+#
+# These are the lines of ~/.wf/config.toml for it.
+# The file then holds a password, so it must be yours alone (chmod 600):
+#
+#   [metrics]
+#   enabled = true
+#   url = "http://wf:wf@127.0.0.1:8123/wf"
+#
+# ClickHouse listens on 127.0.0.1 only, on its HTTP port 8123, with the user, the password and the database below.
+# Each user and program on this machine that knows the password can read and change the data.
+# The HTTP port runs a statement only for a request to 127.0.0.1 or localhost with the header X-ClickHouse-User.
+# So a web page can't send one (clickhouse/http-headers.xml).
+# This file makes no tables: the export of runs makes them in the database of the url.
+#
+# Its compose project is wf-clickhouse.
+# A COMPOSE_PROJECT_NAME in the shell replaces that name, so unset it, or give each command -p wf-clickhouse.
+# An older wf started a stack with Grafana and a Collector as the project wf-metrics.
+# `docker compose -p wf-metrics down` stops that stack, and `down -v` also deletes its data.
+
+name: wf-clickhouse
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8.33.6
+    environment:
+      CLICKHOUSE_USER: wf
+      CLICKHOUSE_PASSWORD: wf
+      CLICKHOUSE_DB: wf
+    volumes:
+      - ./clickhouse/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+      - ./clickhouse/low-memory-profile.xml:/etc/clickhouse-server/users.d/low-memory-profile.xml:ro
+      - ./clickhouse/http-headers.xml:/etc/clickhouse-server/config.d/http-headers.xml:ro
+      - clickhouse:/var/lib/clickhouse
+    ports:
+      - "127.0.0.1:8123:8123"
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      # The address of the container, not localhost: while ClickHouse makes the database, it listens on localhost only.
+      test: ["CMD-SHELL", "clickhouse-client --host \"$$HOSTNAME\" --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  clickhouse: {}

@@ -1,8 +1,8 @@
 """Cursor through ACP: agent sessions through `cursor-agent acp`, the Agent Client Protocol over stdio.
 
 wf ran every Cursor session this way before the Cursor host (cursor.py), and keeps it for one
-release: `cursor_runtime: acp` in ~/.wf/config.yaml (or WF_CURSOR_RUNTIME=acp) runs every Cursor
-session here, and the Cursor host's harness runs `edit` sessions here too (see cursor.py).
+release. cursor.runtime = "acp" in ~/.wf/config.toml (or WF_CURSOR_RUNTIME=acp) runs every Cursor
+session here. The Cursor host's harness runs `edit` sessions here too (see cursor.py).
 
 ACP is JSON-RPC 2.0, one message per line in both directions, and either side
 can send requests. A session is: initialize, authenticate with `cursor_login`
@@ -13,7 +13,8 @@ anything it may not do by itself. The reply to session/prompt, {stopReason},
 ends the turn. A reminder is another session/prompt.
 
 Each session is its own `cursor-agent --model <model> acp` process, which
-takes a few seconds to start. The agent keeps one model per process (choosing
+takes a few seconds to start: paths.cursor_agent names the program, else it is
+cursor-agent on PATH. The agent keeps one model per process (choosing
 one in a session switches every session in the process), and `--model` is what
 takes a Cursor model id with its effort in it, such as gpt-5.6-sol-max-fast.
 The effort only applies when initialize says the client takes parameterized
@@ -132,13 +133,12 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from .. import output_tool, workspaces
+from .. import config, output_tool, workspaces
 from ..runs import write_json
 from . import git_tool, mcp_http
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
 TESTED = "2026.10.18-ea085cb"
-COMMAND = ["cursor-agent"]
 FLAGS = ["--sandbox", "disabled", "--disable-project-configs"]
 SERVER = "wf"  # the MCP server name the agent sees
 CONFIG = {
@@ -175,7 +175,7 @@ class CursorAcp:
     name = "cursor"
 
     def __init__(self, command: list[str] | None = None, request_timeout: float = 60):
-        self.command = command or COMMAND
+        self.command = command or [str(config.get().paths.cursor_agent or "cursor-agent")]
         self.request_timeout = request_timeout  # for starting a session; a turn has the node's timeout
         self.home = Path()  # this run's Cursor folders
         self.saved = Path()  # the sessions that a later pass may continue

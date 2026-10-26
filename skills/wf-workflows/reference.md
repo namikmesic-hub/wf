@@ -203,14 +203,14 @@ fails when the code stops doing what the row says.
 | A later pass of the node | The name that the first pass gave stays | `workflow/nodes.py:216` | `tests/test_workspaces.py::test_a_loop_keeps_the_branch_its_first_pass_named` |
 | `wf retry` continues the run, and its worktree is gone | It takes up the branch that `branches.json` records for the node | `workflow/nodes.py:235` | `tests/test_workspaces.py::test_a_retried_run_keeps_the_branch_it_made` |
 | A `for_each` item, or an item of a `for_each` node that runs a sub-workflow, on a later pass | The name renders again; a name that differs from the one its index had fails the item | `workflow/nodes.py:217` | `tests/test_workspaces.py::test_an_item_keeps_its_branch_only_while_its_index_holds_the_same_item`, `tests/test_subworkflows.py::test_a_sub_workflow_item_fails_when_its_index_names_another_branch_on_a_later_pass` |
-| The rendered name is empty, or only spaces | The node fails | `workflow/workspaces.py:120` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
-| The name is `wf`, or under `wf/`, in any case | The node fails | `workflow/workspaces.py:122` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
-| git doesn't allow the name as a branch name | The node fails | `workflow/workspaces.py:124` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| The rendered name is empty, or only spaces | The node fails | `workflow/workspaces.py:117` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| The name is `wf`, or under `wf/`, in any case | The node fails | `workflow/workspaces.py:119` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| git doesn't allow the name as a branch name | The node fails | `workflow/workspaces.py:121` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
 | The fixed text of `branch` is empty or only spaces | `wf validate` error | `workflow/validate.py:806` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
 | The fixed text is `wf`, or starts with `wf/`, in any case | `wf validate` error | `workflow/validate.py:809` | `tests/test_validate.py::test_branch_cannot_be_wf_or_under_it_in_any_case` |
 | The branch exists, and this run didn't make it for this node | The node fails | `workflow/nodes.py:249` | `tests/test_workspaces.py::test_a_branch_that_already_exists_is_refused` |
-| A branch exists that git can't have beside the name: `fix/a` beside `fix/a/b` | The node fails | `workflow/workspaces.py:134` | `tests/test_workspaces.py::test_a_branch_git_cannot_have_beside_an_existing_one_is_refused` |
-| `core.ignorecase` is on, and a branch exists with the name in another case | The node fails | `workflow/workspaces.py:133` | `tests/test_workspaces.py::test_where_git_ignores_case_a_name_in_other_case_is_the_same_branch` |
+| A branch exists that git can't have beside the name: `fix/a` beside `fix/a/b` | The node fails | `workflow/workspaces.py:131` | `tests/test_workspaces.py::test_a_branch_git_cannot_have_beside_an_existing_one_is_refused` |
+| `core.ignorecase` is on, and a branch exists with the name in another case | The node fails | `workflow/workspaces.py:130` | `tests/test_workspaces.py::test_where_git_ignores_case_a_name_in_other_case_is_the_same_branch` |
 | Another node or item of the run has that name, or one that git can't have beside it | The node fails | `workflow/nodes.py:244` | `tests/test_workspaces.py::test_each_item_names_its_own_branch_and_two_items_cannot_share_one` |
 | Two `branch` fields, in a file or the sub-workflows it runs, could name the same branch or one under the other | `wf validate` error | `workflow/validate.py:816` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused`, `tests/test_validate.py::test_two_nodes_that_could_name_the_same_branch_are_refused` |
 | Two `branch` fields differ only in case | `wf validate` error on every machine, also where git doesn't ignore case | `workflow/validate.py:1059` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused` |
@@ -218,9 +218,9 @@ fails when the code stops doing what the row says.
 | A `for_each` node's `branch` doesn't use `item` or `index` | `wf validate` error | `workflow/validate.py:802` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
 | A `for_each` workflow node doesn't give `item` or `index` to a `branch` in its sub-workflow | `wf validate` error | `workflow/validate.py:847` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
 | The run made the branch but stopped before it recorded it | The next pass records it and goes on | `workflow/nodes.py:240` | `tests/test_workspaces.py::test_a_run_that_stopped_before_recording_its_branch_takes_it_up_again` |
-| `wf discard --branches`, and a worktree of the run has the named branch checked out | Deletes the branch, also when `branches.json` has no record of it | `workflow/runs.py:427` | `tests/test_workspaces.py::test_discard_deletes_the_branch_a_run_made_without_recording_it` |
-| `wf discard --branches`, and the named branch isn't on the commit that the run left it on | The branch stays, and discard says why | `workflow/runs.py:428` | `tests/test_workspaces.py::test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work` |
-| A dry run succeeds | Its named branches are deleted | `workflow/runner.py:564` | `tests/test_workspaces.py::test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them` |
+| `wf discard --branches`, and a worktree of the run has the named branch checked out | Deletes the branch, also when `branches.json` has no record of it | `workflow/runs.py:436` | `tests/test_workspaces.py::test_discard_deletes_the_branch_a_run_made_without_recording_it` |
+| `wf discard --branches`, and the named branch isn't on the commit that the run left it on | The branch stays, and discard says why | `workflow/runs.py:437` | `tests/test_workspaces.py::test_discard_deletes_a_named_branch_only_while_it_is_the_runs_work` |
+| A dry run succeeds | Its named branches are deleted | `workflow/runner.py:558` | `tests/test_workspaces.py::test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them` |
 | A `command` writes `workspace.<node>.branch` unquoted, and that node's `branch` reads node output | `wf validate` warning | `workflow/validate.py:547` | `tests/test_validate.py::test_a_branch_named_from_agent_output_is_untrusted_in_a_command` |
 
 A `new` worktree has only what's committed: an uncommitted script or fixture a
@@ -251,7 +251,7 @@ the same `~/.wf` (spec: "Agent slots"):
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| `max_agents: N` in `~/.wf/config.yaml`, or `WF_MAX_AGENTS=N`, which wins | At most N agent attempts hold a slot at once. | `workflow/capacity.py:60` | `test_two_runs_in_separate_processes_share_the_cap` |
+| `max_agents = N` in `~/.wf/config.toml`, or `WF_MAX_AGENTS=N`, which wins | At most N agent attempts hold a slot at once. | `workflow/capacity.py:51` | `test_two_runs_in_separate_processes_share_the_cap` |
 | An attempt finds every slot taken | It waits. It keeps its retries, and its `timeout` starts once it has a slot. | `workflow/nodes.py:318` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
 | A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:651` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
 
@@ -367,9 +367,10 @@ NAME=VALUE]`, `retry [--limit NAME=VALUE] [--model NODE=MODEL]`, `continue <run-
 (what one run read, decided and did: improving.md), `discard [<run-id>... | --workflow NAME
 [--dry-runs]]`, `steer <run-id> <node> [--item N] <message | --file FILE>`. Exit codes: 0 succeeded, 1 failed or limit, 2 waiting for a
 person, 3 (`wf wait`) nothing new, 130 Ctrl-C. The commands that make or find
-runs take `--runs-dir DIR` (or `WF_RUNS_DIR`): run folders then go to
+runs take `--runs-dir DIR` (or `WF_RUNS_DIR`, or `runs_dir` in `~/.wf/config.toml`): run folders then go to
 `DIR/<repo key>/` instead of `.wf/runs/`. Then the repo's working tree and
 `.git/info/exclude` stay as they were: only `workspace: new` adds branches and
 worktree records under `.git` (a runs folder inside the repo goes into the
-exclude, as `.wf/` does). A blank value counts as no setting, and the
+exclude, as `.wf/` does). A blank `WF_RUNS_DIR` counts as no runs folder, and the
 commands wf prints for the run include `--runs-dir`.
+`wf config show` prints each of wf's own settings, in `~/.wf/config.toml`, and where its value comes from.

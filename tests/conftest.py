@@ -1,57 +1,40 @@
 """Shared test setup:
 - wf's own folder (~/.wf) goes to a fresh temp folder in every test, outside the
-  test's repo, as the real ~/.wf is;
-- a cap on agent sessions set where the tests run (WF_MAX_AGENTS) doesn't apply to them;
-- runs go in the repo's .wf/runs unless a test sets a runs folder itself;
-- the runner's git and the tests' own git commands read none of your global or system
-  config, so a global config that signs commits with a key that waits for a touch doesn't
-  stop the tests' commits (the agents' git tool drops these variables, so it still reads
-  your ~/.gitconfig);
-- the keyring is an empty one in memory, so no test reads or writes your real Keychain.
+  test's repo, as the real ~/.wf is. So no test reads your config.toml.
+- The environment variables of config.toml's keys (WF_MAX_AGENTS, WF_RUNS_DIR, ...) that
+  you set where the tests run don't apply to them.
+- Runs go in the repo's .wf/runs unless a test sets a runs folder itself.
+- Each test starts with umask 022, whatever the umask of your shell. wf refuses a config.toml
+  that other users can change, so under umask 002 it would refuse each one that a test writes.
+- The runner's git and the tests' own git commands read none of your global or system
+  config. So a global config that signs commits with a key that waits for a touch doesn't
+  stop the tests' commits. The agents' git tool drops these variables, so it still reads
+  your ~/.gitconfig.
+- The keyring is an empty one in memory, so no test reads or writes your real Keychain."""
 
-pytest skips each test marked docker where `docker info` or `docker compose version` fails, or where
-it can't reach grafana.com. The metrics stack downloads a Grafana plugin from there at each start."""
-
-import shutil
-import subprocess
-import urllib.request
+import os
 
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
 
-
-@pytest.hookimpl(trylast=True)  # after -m deselects tests, so a run without the docker tests never calls docker
-def pytest_collection_modifyitems(items):
-    marked = [item for item in items if item.get_closest_marker("docker")]
-    lacking = _what_docker_tests_lack() if marked else None
-    if lacking:
-        for item in marked:
-            item.add_marker(pytest.mark.skip(reason=f"needs {lacking}"))
+from workflow import config
 
 
-def _what_docker_tests_lack() -> str | None:
-    if shutil.which("docker") is None:
-        return "Docker with Compose"
-    try:
-        if not all(subprocess.run(["docker", *args], capture_output=True, timeout=30).returncode == 0
-                   for args in (["info"], ["compose", "version"])):
-            return "Docker with Compose, and a Docker daemon that answers"
-    except (OSError, subprocess.TimeoutExpired):
-        return "Docker with Compose, and a Docker daemon that answers"
-    try:
-        urllib.request.urlopen("https://grafana.com/api/plugins/grafana-clickhouse-datasource", timeout=10).close()
-    except OSError:
-        return "the internet: the metrics stack downloads Grafana's ClickHouse plugin from grafana.com at each start"
-    return None
+@pytest.fixture(autouse=True)
+def usual_umask():
+    before = os.umask(0o022)
+    yield
+    os.umask(before)
 
 
 @pytest.fixture(autouse=True)
 def wf_home(tmp_path_factory, monkeypatch):
     home = tmp_path_factory.mktemp("wf-home")
     monkeypatch.setenv("WF_HOME", str(home))
-    monkeypatch.delenv("WF_MAX_AGENTS", raising=False)
-    monkeypatch.delenv("WF_RUNS_DIR", raising=False)
+    for key in config.KEYS.values():
+        if key.variable:
+            monkeypatch.delenv(key.variable, raising=False)
     return home
 
 

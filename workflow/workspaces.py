@@ -28,9 +28,9 @@ key signs with nobody there (check_signing), so a key that can't fails the run
 before any agent works for it.
 
 git never waits for input: nobody is at a terminal to answer. Each git command
-runs in a session of its own, without one, so a key that asks for a passphrase
-or a PIN fails at once, and signing that takes longer than SIGNING_TIMEOUT (a
-key waiting for a touch) is stopped. A commit that fails says signing failed
+runs in its own session, without a terminal, so a key that asks for a passphrase
+or a PIN fails at once. wf stops git when signing takes longer than git.signing_timeout
+(config/), as with a key that waits for a touch. A commit that fails says signing failed
 only when a test shows signing is the cause. git is also stopped when its
 caller is cancelled (stopped_by), on Ctrl-C, and on SIGTERM or a lost terminal
 (stopping_git_on_exit). Stopping git stops whatever it started: it's asked
@@ -58,8 +58,10 @@ import threading
 import time
 from pathlib import Path
 
-SIGNING_TIMEOUT = 30  # seconds: signing takes a moment, unless the key waits for a touch
-GRACE = 5  # seconds a stopped git gets to remove its temporary and lock files before it's killed
+from . import config
+from .config import home
+
+GRACE = 5  # seconds a stopped git gets to remove its temporary and lock files before wf kills it
 
 
 class WorkspaceError(Exception):
@@ -72,11 +74,6 @@ class _TimedOut(WorkspaceError):
 
 class _Stopped(WorkspaceError):
     """git was stopped, or never started, because its caller was cancelled or wf is exiting."""
-
-
-def home() -> Path:
-    """~/.wf, or WF_HOME: wf's own folder, per user."""
-    return Path(os.environ.get("WF_HOME") or Path.home() / ".wf")
 
 
 def root() -> Path:
@@ -191,7 +188,7 @@ def commit_all(path: str | Path, message: str) -> str | None:
         _git(path, *commit)
         return head(path)
     try:
-        _git(path, *commit, timeout=SIGNING_TIMEOUT)
+        _git(path, *commit, timeout=config.get().git.signing_timeout)
     except _Stopped:
         raise
     except WorkspaceError as error:
@@ -204,7 +201,7 @@ def commit_all(path: str | Path, message: str) -> str | None:
 
 def check_signing(repo: str | Path) -> None:
     """When your git config signs commits (commit.gpgsign), sign a test commit the way the runner
-    will: with nobody at a terminal, within SIGNING_TIMEOUT. Raises WorkspaceError, naming the fix,
+    will: with nobody at a terminal, within git.signing_timeout. Raises WorkspaceError, naming the fix,
     if it can't. Outside a git repository nothing is committed, so nothing is checked."""
     if not _git(repo, "rev-parse", "--git-dir", check=False) or not _signs(repo):
         return
@@ -258,12 +255,12 @@ def _signing_problem(path: str | Path) -> str | None:
         env, identity = {"GIT_OBJECT_DIRECTORY": objects}, _identity(path)
         tree = _git(path, "mktree", env=env)  # the empty tree
 
-        def test_commit(*sign: str, timeout: int = 600) -> str:
+        def test_commit(*sign: str, timeout: float = 600) -> str:
             return _git(path, *identity, "commit-tree", *sign, "-m", "wf: signing check", tree, env=env, timeout=timeout)
 
         test_commit()  # unsigned: everything but signing works
         try:
-            test_commit("-S", timeout=SIGNING_TIMEOUT)
+            test_commit("-S", timeout=config.get().git.signing_timeout)
         except _Stopped:
             raise
         except WorkspaceError as error:
@@ -447,7 +444,7 @@ def _exit(signum: int) -> None:
     os.kill(os.getpid(), signum)
 
 
-def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, timeout: int = 600,
+def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, timeout: float = 600,
          env: dict[str, str] | None = None) -> str:
     stop = _stop.get()
     process = _start(cwd, args, env, stop)
@@ -489,7 +486,7 @@ def _start(cwd: str | Path, args: tuple[str, ...], env: dict[str, str] | None,
             _exit(_deferred)
 
 
-def _output(process: subprocess.Popen, args: tuple[str, ...], timeout: int,
+def _output(process: subprocess.Popen, args: tuple[str, ...], timeout: float,
             stop: threading.Event | None) -> tuple[str, str]:
     """git's stdout and stderr once it exits. It's stopped if it runs longer than `timeout` seconds,
     when `stop` is set, and when this thread is interrupted (Ctrl-C)."""

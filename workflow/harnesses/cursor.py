@@ -19,7 +19,7 @@ version comes with its own folder, and installs again.
 
 The API key: the SDK needs a Cursor API key, and cursor-agent's login doesn't work for it. wf
 reads it from the macOS Keychain (`wf runtimes cursor signin` keeps it there), or from the file
-that `cursor_api_key_file` in ~/.wf/config.yaml names: never from the environment. It goes to the
+that cursor.api_key_file in ~/.wf/config.toml names: never from the environment. It goes to the
 host over stdin, in the protocol's hello, never on a command line. The host, and so the agent's
 commands, get the environment without CURSOR_API_KEY and CURSOR_AUTH_TOKEN. With no key, read-only
 and full sessions run through cursor-agent's ACP, as they did before the SDK, and the run's first
@@ -49,8 +49,9 @@ That folder is the SDK's store of the agent: its agents, runs, run events and ch
 no API key and no account details. As with ACP, after a continued attempt fails, the next one
 starts fresh.
 
-For one release, `cursor_runtime: acp` in ~/.wf/config.yaml (or WF_CURSOR_RUNTIME=acp, which
-wins) runs every Cursor session through ACP, as before, until the SDK has proven itself in real runs.
+For one release, cursor.runtime = "acp" in ~/.wf/config.toml runs every Cursor session through ACP, as
+before, until the SDK has proven itself in real runs. WF_CURSOR_RUNTIME=acp does the same, and wins over the file.
+paths.node names the Node program for a machine with more than one: else it is `node` on PATH.
 """
 
 import asyncio
@@ -71,7 +72,7 @@ from pathlib import Path
 import keyring
 from keyring.errors import KeyringError
 
-from .. import settings, workspaces
+from .. import config, workspaces
 from . import remote
 from .base import Harness, SessionSpec, Unavailable, short, transcript
 
@@ -81,13 +82,11 @@ NODE_MIN = "22.18 or later (23.6 or later on 23)"  # the Node versions that run 
 CLIENT = {"name": "wf", "version": "0.1.0"}
 KEYCHAIN = ("wf runtimes", "cursor")  # the Keychain item's service and account
 SECRETS = ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN")
-RUNTIME_ENV = "WF_CURSOR_RUNTIME"
-RUNTIMES = ("sdk", "acp")
 ON_ACP = ("edit",)
 EDIT_ON_ACP = ("Cursor's SDK can't refuse a write outside the workspace, and no test has shown that its sandbox "
                "keeps writes in it, so `edit` runs through cursor-agent's ACP")
 FIX = ("Create a Cursor API key in the Cursor dashboard, then run `wf runtimes cursor signin` to keep it in the "
-       "macOS Keychain, or name a file that holds it with `cursor_api_key_file` in ~/.wf/config.yaml")
+       "macOS Keychain, or name a file that holds it with `api_key_file` under [cursor] in ~/.wf/config.toml")
 NO_KEY = ("no Cursor API key is set, so cursor runs read-only and full sessions through cursor-agent's ACP, "
           "which counts no tokens")
 INSTALL_TIMEOUT = 600
@@ -99,7 +98,7 @@ LABELS = {  # Cursor's tool names, as progress shows them, the same as on ACP wh
 
 
 def create() -> Harness:
-    """The adapter that `cursor_runtime` names: the Cursor host, or cursor-agent's ACP."""
+    """The adapter that cursor.runtime names: the Cursor host, or cursor-agent's ACP."""
     if runtime() == "acp":
         from .cursor_acp import CursorAcp
 
@@ -108,36 +107,25 @@ def create() -> Harness:
 
 
 def runtime() -> str:
-    """"sdk" or "acp": WF_CURSOR_RUNTIME, else `cursor_runtime` in config.yaml, else sdk. Raises Unavailable."""
-    try:
-        configured = settings.get("cursor_runtime")
-    except settings.SettingsError as error:
-        raise Unavailable(str(error)) from error
-    value = os.environ.get(RUNTIME_ENV) or configured or "sdk"
-    if value not in RUNTIMES:
-        raise Unavailable(f"the Cursor runtime must be sdk or acp, not `{value}` "
-                          f"({RUNTIME_ENV} or cursor_runtime in {settings.path()})")
-    return str(value)
+    """"sdk" or "acp": cursor.runtime (WF_CURSOR_RUNTIME, else config.toml, else sdk)."""
+    return config.get().cursor.runtime
 
 
 def api_key() -> str | None:
-    """The Cursor API key: from the file `cursor_api_key_file` names, else from the Keychain.
+    """The Cursor API key: from the file that cursor.api_key_file names, else from the Keychain.
     None when there's none. Raises Unavailable when the place it should be can't be read."""
     return key_source()[0]
 
 
 def key_source() -> tuple[str | None, str]:
     """The Cursor API key, and where it comes from. Raises Unavailable."""
-    try:
-        file = settings.get("cursor_api_key_file")
-    except settings.SettingsError as error:
-        raise Unavailable(str(error)) from error
-    if file is not None:
-        path = Path(str(file)).expanduser()
+    chosen = config.get()
+    path = chosen.cursor.api_key_file
+    if path is not None:
         try:
-            return path.read_text(encoding="utf-8").strip() or None, f"in {path} (cursor_api_key_file in {settings.path()})"
+            return path.read_text(encoding="utf-8").strip() or None, f"in {path} (cursor.api_key_file in {chosen.file})"
         except OSError as error:
-            raise Unavailable(f"can't read the Cursor API key from {path} (cursor_api_key_file in {settings.path()}): "
+            raise Unavailable(f"can't read the Cursor API key from {path} (cursor.api_key_file in {chosen.file}): "
                               f"{error.strerror or error}") from error
     try:
         return keyring.get_password(*KEYCHAIN) or None, "in the macOS Keychain (wf runtimes, cursor)"
@@ -155,10 +143,17 @@ def env() -> dict:
     return {**{k: v for k, v in os.environ.items() if k not in SECRETS}, "NO_OPEN_BROWSER": "1"}
 
 
-def find_node(node: str = "node") -> str:
-    """The Node program to run the host with, if it runs TypeScript as it is: Node itself says so,
-    which its version alone doesn't (23.0 to 23.5 don't, and an option can switch it off). Raises Unavailable."""
+def find_node(node: str | None = None) -> str:
+    """The Node program to run the host with (`node`, else paths.node, else node on PATH), if it runs
+    TypeScript as it is. Node itself says so, which its version alone doesn't: 23.0 to 23.5 don't, and an
+    option can switch it off. Raises Unavailable."""
+    chosen = config.get() if node is None else None
+    named = chosen.paths.node if chosen else None
+    node = node or str(named or "node")
     found = shutil.which(node)
+    if found is None and named:
+        raise Unavailable(f"Cursor's runtime needs Node.js {NODE_MIN}, and {node} (paths.node in {chosen.file}) "
+                          "isn't a program that you may run")
     if found is None:
         raise Unavailable(f"Cursor's runtime needs Node.js {NODE_MIN}, and there's no `{node}` on PATH")
     try:
@@ -249,7 +244,7 @@ class Cursor(remote.RemoteHarness):
     fix = FIX
     file_tools = True
 
-    def __init__(self, host: Path | None = None, node: str = "node", request_timeout: float = 60,
+    def __init__(self, host: Path | None = None, node: str | None = None, request_timeout: float = 60,
                  acp: Callable[[], Harness] | None = None):
         super().__init__(request_timeout)
         self.host, self.node = Path(host or HOST), node
@@ -446,10 +441,6 @@ async def doctor(models: list[str]) -> tuple[list[str], bool]:
     except Unavailable as error:
         ok = False
         lines.append(f"Cursor: {error}")
-    try:
-        chosen = runtime()
-    except Unavailable as error:
-        return [*lines, str(error)], False
-    lines.append("cursor runs every session on cursor-agent's ACP (cursor_runtime: acp)" if chosen == "acp" else
+    lines.append("cursor runs every session on cursor-agent's ACP (cursor.runtime is acp)" if runtime() == "acp" else
                  "cursor runs read-only and full sessions on the SDK, and edit sessions on cursor-agent's ACP")
     return lines, ok

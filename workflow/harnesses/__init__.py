@@ -9,7 +9,7 @@ Read base.py first (the Harness and Session interfaces), then the adapters:
                      TypeScript), a peer of remote.py
     cursor_acp.py    Cursor, through `cursor-agent acp` (the Agent Client Protocol
                      over stdio), with mcp_http.py serving it submit_result: for
-                     `edit` sessions, and for every session with `cursor_runtime: acp`
+                     `edit` sessions, and for every session with `cursor.runtime = "acp"`
 
 KEPT_INSTRUCTIONS names what a harness still gives its agent when a node sets
 `project_instructions: false`, which `wf validate` warns about.
@@ -71,8 +71,8 @@ def reaches_keychain(harness: str, access: str) -> bool:
 
 
 def cursor_on_acp(access: str) -> bool:
-    """Does a Cursor session at this access level run through cursor-agent's ACP? A cursor_runtime
-    setting or an API key that can't be read counts as the default, since a run would stop at it anyway."""
+    """Does a Cursor session at this access level run through cursor-agent's ACP? An API key that
+    wf can't read counts as the default, since a run would stop at it anyway."""
     from .cursor import ON_ACP, api_key, runtime
 
     if access in ON_ACP:
