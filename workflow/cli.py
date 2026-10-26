@@ -35,6 +35,10 @@ To see runs as they happen (observe.py, ui.py):
     wf watch <run-id>                the run's steps and tool calls, as they come
     wf ui                            a web page on this machine: runs, graph, progress, metrics, transcripts
 
+To keep the records of runs in ClickHouse, for Grafana (export.py):
+    wf metrics export [<run-id>...]  write what runs did since their last export into the ClickHouse of
+                                     metrics.url (--all-repos: each repo's runs in the runs folder)
+
 wf's own settings, in ~/.wf/config.toml (config/):
     wf config show                   the value of each key, and where it comes from
 
@@ -63,7 +67,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from . import config, diagram, firstmate, observe, operate, progress, report, runner, runs, spec, steer, trace_view, ui, validate, workspaces
+from . import config, diagram, export, firstmate, observe, operate, progress, report, runner, runs, spec, steer, trace_view, ui, validate, workspaces
 from .tools import keychain, signin
 from .tools.catalog import TOOLS
 
@@ -190,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     page.add_argument("--open", action="store_true", help="open the page in the browser")
     page.add_argument("--runs-dir", **runs_dir)
     page.set_defaults(handler=_ui)
+    _metrics_command(commands, runs_dir)
 
     configuration = commands.add_parser("config", help="wf's own settings, in ~/.wf/config.toml (WF_HOME moves ~/.wf)")
     showing = configuration.add_subparsers(dest="config_command", required=True, parser_class=_Parser).add_parser(
@@ -777,6 +782,89 @@ def _continue(args) -> int:
         print(f"wf continue: {error}", file=sys.stderr)
         return 1
     return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir)
+
+
+# ---------- wf metrics ----------
+
+
+ROWS = {"runs": "run", "attempts": "attempt", "turns": "turn", "tool_calls": "tool call", "routes": "route"}
+
+
+def _metrics_command(commands, runs_dir: dict) -> None:
+    metrics = commands.add_parser("metrics", help="the records of runs in ClickHouse, for Grafana")
+    actions = metrics.add_subparsers(dest="metrics_command", required=True, parser_class=_Parser)
+    exporting = actions.add_parser(
+        "export", help="write what runs did since their last export into ClickHouse's tables of wf runs",
+        description="Write what runs did since their last export into ClickHouse's tables of wf runs: the runs named, "
+                    "or each run of this repo. The ClickHouse is the one of url under [metrics] in ~/.wf/config.toml, "
+                    "with enabled = true. Each run folder keeps where its export stopped, in export.json, so exporting "
+                    "twice changes nothing.")
+    exporting.add_argument("run_ids", nargs="*", metavar="run-id")
+    exporting.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
+    exporting.add_argument("--runs-dir", **runs_dir)
+    exporting.set_defaults(handler=_metrics_export)
+
+
+def _metrics_export(args) -> int:
+    """Exit code 1 when a run can't be exported. A run folder that can't be read doesn't stop the others,
+    but ClickHouse that is down or whose tables differ stops the export."""
+    if args.all_repos and args.run_ids:
+        print("wf metrics export: name runs, or give --all-repos, but not both", file=sys.stderr)
+        return 1
+    chosen_config = config.get({"runs_dir": args.runs_dir})
+    if args.all_repos and chosen_config.runs_dir is None:
+        print(f"wf metrics export: --all-repos needs a runs folder: --runs-dir DIR, {config.KEYS['runs_dir'].variable}, "
+              f"or runs_dir in {chosen_config.file}", file=sys.stderr)
+        return 1
+    if not chosen_config.metrics.enabled:  # with enabled true, config.load() checked each part of the url
+        print(f"wf metrics export: metrics.enabled is false, so wf exports nothing. Under [metrics] in {chosen_config.file}, "
+              f"set enabled = true, and url to {config.KEYS['metrics.url'].kind.allowed}", file=sys.stderr)
+        return 1
+    folder = runs.runs_folder(Path.cwd(), args.runs_dir)
+    if args.all_repos:
+        folder = folder.parent
+    chosen = _runs_to_export(args, folder)
+    if chosen is None:
+        return 1
+    if not chosen:
+        print(f"wf metrics export: no runs in {folder}")
+        return 0
+    store = export.Store(chosen_config.metrics.url)
+    try:
+        store.prepare()
+    except export.ExportError as error:
+        print(f"wf metrics export: {error}", file=sys.stderr)
+        return 1
+    failed = False
+    for run in chosen:
+        try:
+            written = export.export(run, store)
+        except export.UnreadableFolder as error:
+            print(f"wf metrics export: run {run.id}: {error}", file=sys.stderr)
+            failed = True
+            continue
+        except export.ExportError as error:  # ClickHouse: the runs after this one would fail the same way
+            print(f"wf metrics export: run {run.id}: {error}", file=sys.stderr)
+            return 1
+        print(f"{run.id}: " + (", ".join(_count(count, ROWS[table]) for table, count in written.items()) or "nothing new"))
+    return 1 if failed else 0
+
+
+def _runs_to_export(args, folder: Path) -> list[runs.Run] | None:
+    """The runs named, once each and in their order, or else each run in `folder` (export.runs_in). None, after
+    it said why, when wf can't list `folder` or a run named isn't in it."""
+    try:
+        listed = export.runs_in(folder, every_repo=args.all_repos)
+    except OSError as error:
+        print(f"wf metrics export: can't list the runs in {error.filename or folder}: {error.strerror or error}",
+              file=sys.stderr)
+        return None
+    named = {run.id: run for run in listed}
+    for run_id in args.run_ids:
+        if run_id not in named:
+            print(f"wf metrics export: no run `{run_id}` in {folder}", file=sys.stderr)
+            return None
+    return [named[run_id] for run_id in dict.fromkeys(args.run_ids)] if args.run_ids else listed
 
 
 if __name__ == "__main__":  # `python -m workflow.cli`, as detached runs start it

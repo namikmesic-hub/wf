@@ -90,6 +90,15 @@ def test_the_dashboard_reads_the_database_of_the_example_through_one_datasource(
     assert all(set(re.findall(r"\bFROM (\w+)\.", query["rawSql"])) == {database} for query in queries)
 
 
+
+def test_the_node_duration_panel_counts_a_node_of_a_sub_workflow_under_the_name_that_events_use():
+    dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+    (panel,) = [panel for panel in dashboard["panels"] if panel["title"] == "Node duration p50, p95, max"]
+    sql = panel["targets"][0]["rawSql"]
+    # a node of a sub-workflow starts with the trace id of the attempt that runs it: build#1[3].a1/implement
+    assert "SELECT workflow, replaceRegexpAll(node, '#[0-9]+|[.]a[0-9]+', '') AS node," in sql
+    assert "GROUP BY workflow, node" in sql
+
 def test_the_collector_takes_the_login_of_clickhouse_from_its_environment():
     exporter = yaml.safe_load(COLLECTOR.read_text(encoding="utf-8"))["exporters"]["clickhouse"]
     assert (exporter["endpoint"], exporter["username"], exporter["password"]) == (
@@ -97,12 +106,12 @@ def test_the_collector_takes_the_login_of_clickhouse_from_its_environment():
     assert "otel/opentelemetry-collector-contrib:0.162.0" in COLLECTOR.read_text(encoding="utf-8")  # its exporter is there
 
 
-def test_wf_runs_no_docker_and_has_no_metrics_command(capsys):
+def test_wf_runs_no_docker_and_its_one_metrics_command_is_export(capsys):
     for source in (ROOT / "workflow").rglob("*.py"):
         assert not re.search(r"""["']docker["']""", source.read_text(encoding="utf-8")), source
     with pytest.raises(SystemExit):
         cli.main(["metrics", "up"])
-    assert "invalid choice: 'metrics'" in capsys.readouterr().err
+    assert "invalid choice: 'up'" in capsys.readouterr().err
 
 
 # ---------- what the Collector keeps ----------
