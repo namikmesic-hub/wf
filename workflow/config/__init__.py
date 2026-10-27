@@ -3,6 +3,11 @@
     runs_dir = "~/wf-runs"        # run folders outside the repos, a folder per repo (runs.py)
     max_agents = 4                # the cap on live agent sessions across all runs (capacity.py)
 
+    [capacity]                   # optional caps on live agent sessions per harness
+    claude-code = 16
+    codex = 32
+    cursor = 24
+
     [claude]
     auth = "subscription"         # or "api-key": ANTHROPIC_API_KEY instead (harnesses/claude_code.py)
 

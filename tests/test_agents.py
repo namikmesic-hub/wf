@@ -211,6 +211,23 @@ def test_a_harness_that_is_not_built_yet_counts_as_unavailable(repo, monkeypatch
     assert output()["steps"] == ["ok"]
 
 
+@pytest.mark.parametrize("harness", ["missing", "claude_code", "__class__"])
+@pytest.mark.parametrize("global_cap", [None, "1"])
+def test_an_unknown_template_harness_keeps_the_unavailable_error(repo, wf_home, monkeypatch, capsys, harness, global_cap):
+    (wf_home / "config.toml").write_text("[capacity]\nclaude-code = 1\ncodex = 1\ncursor = 1\n")
+    if global_cap is not None:
+        monkeypatch.setenv("WF_MAX_AGENTS", global_cap)
+    node = PLAN + '  harness: "{{ start.task }}"\n'
+    assert cli.main(["run", flow(node), f"task={harness}"]) == 1
+    message = f"{harness} is unavailable: the `{harness}` harness isn't supported yet"
+    out = capsys.readouterr()
+    assert message in out.err
+    assert "AttributeError" not in out.out + out.err
+    entries = [json.loads(line) for line in (run_dir() / "events.jsonl").read_text().splitlines()]
+    assert [entry["error"] for entry in entries if entry["event"] == "harness_unavailable"] == [message]
+    assert not any(entry["event"] in ("session_started", "slot_waiting") for entry in entries)
+
+
 def test_best_of_n_runs_the_same_task_on_each_harness(repo, monkeypatch):
     claude, codex = Fake("claude-code", submit({"summary": "c"})), Fake("codex", submit({"summary": "x"}))
     install(monkeypatch, claude, codex)

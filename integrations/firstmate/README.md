@@ -65,11 +65,12 @@ command that the new wf doesn't have.
 Only one process drives a run at a time (a lock in the run folder), so the
 first mate can't retry a run that is still going.
 
-To keep all runs within what the machine and the accounts hold, set
-`max_agents = <n>` in `~/.wf/config.toml` (or `WF_MAX_AGENTS`).
-Agent attempts in every run that uses that `~/.wf` then share that many sessions.
-An attempt waits for a free one, and `wf status` lists the waits (see "Agent
-slots" in the spec).
+To cap live sessions across runs that share a `~/.wf`, set `max_agents` in `~/.wf/config.toml` or `WF_MAX_AGENTS`.
+To cap one harness, set `claude-code`, `codex` or `cursor` under `[capacity]`.
+The variables `WF_MAX_AGENTS_CLAUDE_CODE`, `WF_MAX_AGENTS_CODEX` and `WF_MAX_AGENTS_CURSOR` override those keys.
+Each cap takes a positive integer, and an absent key means no cap.
+An attempt needs a slot from each cap that is set before its session opens.
+`wf status` lists waits with their harness and cap (see "Agent slots" in the spec).
 
 firstmate's own AGENTS.md tells each agent that loads it that it is the first mate.
 So a workflow that works on the firstmate repository sets `project_instructions: false` in its `defaults`.
