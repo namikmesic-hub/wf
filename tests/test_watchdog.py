@@ -158,6 +158,67 @@ def test_updates_do_not_extend_an_open_tools_window(measured):
     assert watch.alerted
 
 
+@pytest.mark.parametrize("source", ["text", "thinking", "tokens", "tool_start", "tool_end"])
+def test_other_progress_keeps_an_overdue_tool_alert_and_its_age(measured, source):
+    clock, watch, events = measured
+    watch.event({"event": "session_started"})
+    watch.tool_call("one", "shell", {})
+    clock.advance(3600)
+    watch.check()
+    assert watch.alerted
+    if source == "text":
+        watch.text("The agent sent text.")
+    elif source == "thinking":
+        watch.thinking("The agent sent thinking.", 100)
+    elif source == "tool_start":
+        watch.tool_call("two", "shell", {})
+    elif source == "tool_end":
+        watch.tool_result("two", "An unrelated tool ended.")
+    else:
+        watch.event({"event": "progress", "source": source})
+    watch.check()
+    assert watch.alerted and watch.tools["one"] == 0
+    assert not any(event["event"] == "stall_resolved" for event in events)
+    watch.tool_result("one", "The overdue tool ended.")
+    assert not watch.alerted
+    assert [event["action"] for event in events if event["event"] == "stall_resolved"] == ["progress"]
+    finished(clock, watch)
+
+
+def test_each_overdue_tool_must_end_before_attention_clears(measured):
+    clock, watch, events = measured
+    watch.event({"event": "session_started"})
+    watch.tool_call("one", "shell", {})
+    clock.advance(10)
+    watch.tool_call("two", "shell", {})
+    clock.advance(3600)
+    watch.check()
+    watch.tool_result("one", "done")
+    assert watch.alerted and watch.tools["two"] == 10
+    watch.tool_result("two", "done")
+    assert not watch.alerted
+    clock.advance(20)
+    watch.check()
+    assert watch.alerted
+    assert sum(event["event"] == "stall_detected" for event in events) == 2
+
+
+def test_wait_explicitly_gives_open_tools_a_new_window(measured):
+    clock, watch, events = measured
+    watch.event({"event": "session_started"})
+    watch.tool_call("one", "shell", {})
+    clock.advance(3600)
+    watch.check()
+    assert watch.resolve("wait")
+    assert watch.tools["one"] == 3600 and not watch.alerted
+    clock.advance(3599)
+    watch.check()
+    assert not watch.alerted
+    clock.advance(1)
+    watch.check()
+    assert watch.alerted
+
+
 def fast(monkeypatch):
     monkeypatch.setattr(watchdog, "POLL_SECONDS", 0.005)
     monkeypatch.setattr(watchdog, "seconds", lambda value: 0.02)
@@ -446,3 +507,45 @@ def test_one_attempt_cannot_clear_a_siblings_stall(repo, monkeypatch):
     monkeypatch.setattr(runner.graph, "build", lambda saver: Compiled())
     with run.driving():
         asyncio.run(runner._stream(ctx, None))
+
+
+@pytest.mark.parametrize("action", ["retry", "fallback"])
+def test_an_active_firstmate_poll_keeps_a_stall_between_reads(repo, monkeypatch, action):
+    from types import SimpleNamespace
+    from workflow import operate, runner
+
+    flow(node(action, harness="[claude-code, codex]"))
+    run = runs.create(Path.cwd(), "agents", [Path("flow.yaml")], Path("flow.yaml"), {})
+    run.set_status("running")
+    place = {"node": "work", "pass": 1, "attempt": 1, "harness": "claude-code"}
+
+    class Compiled:
+        async def aget_state(self, config):
+            return SimpleNamespace(values={})
+
+        async def astream(self, *args, **kwargs):
+            yield {"event": "stall_detected", **place, "action": action}
+            yield {"event": "stall_resolved", **place, "action": "attempt_end"}
+            yield {"event": "attempt_failed", **place, "error": "stalled"}
+            yield {"event": "attempt_started", **place, "attempt": 2}
+            yield {"event": "progress", **place, "attempt": 2, "source": "text"}
+
+    async def close():
+        pass
+
+    ctx = SimpleNamespace(run=run, _agents_waiting={}, new_event_loop=lambda: None, resume=lambda values: None,
+                          trace=SimpleNamespace(know=lambda callback: None), steering=steer.Steering(), close_harnesses=close)
+    monkeypatch.setattr(runner.graph, "build", lambda saver: Compiled())
+
+    def between_reads(seconds):
+        asyncio.run(runner._stream(ctx, None))
+
+    monkeypatch.setattr(operate.time, "sleep", between_reads)
+    with run.driving():
+        result = firstmate._poll({"source_id": "active", "config_ref": f"wf-run:{run.dir}"})
+    state = json.loads(result["output"])
+    assert state["status"] == "stall_detected" and state["current_status"] == "running"
+    assert state["stall"]["action"] == action and state["stall"]["attempt"] == 1
+    assert state["stalls"] == [] and "stall_actions" not in state
+    assert run.status()["status"] == "running"
+    assert operate.wait(run, 0, consumer="firstmate-active") is None

@@ -17,7 +17,9 @@ lock any more (the process crashed or was killed). `wf retry` picks it up.
 
 `wait --consumer NAME` remembers which state it last reported to NAME (by the
 status sequence number, in the run folder), so a watcher that polls in a loop
-hears about each state once. Without a consumer it reports the current state
+hears about each state once.
+It also reads each stall notice from the event journal, even after the attempt ends.
+Without a consumer it reports the current state
 as soon as it needs attention.
 
 Questions are flattened to one list, each with a key: the interrupt id, or for a
@@ -87,27 +89,63 @@ def wait(run: Run, timeout: float, consumer: str | None = None) -> dict | None:
     if consumer is not None and not CONSUMER.fullmatch(consumer):
         raise ValueError("a consumer name is letters, digits, . _ and - (it names a file in the run folder)")
     cursor_file = run.dir / "consumers" / f"{consumer}.json" if consumer else None
-    seen = _seen(cursor_file)
+    seen, offset = _cursor(cursor_file)
     deadline = time.monotonic() + timeout
     while True:
+        # Read events after status so a terminal result cannot hide an earlier stall.
         current = state(run)
+        notice, offset = _stall_notice(run, offset) if cursor_file else (None, offset)
+        if notice is not None:
+            current = state(run)
+            if current["status"] == "stall_detected":
+                seen = current.get("seq", 0)
+            _save_cursor(cursor_file, seen, offset)
+            return {**current, "status": "stall_detected", "current_status": current["status"], "stall": notice}
         # A "stopped" run keeps the sequence number of its last "running" state, so it too is reported once
         if current["status"] in ATTENTION and current.get("seq", 0) > seen:
-            if cursor_file:
-                cursor_file.parent.mkdir(exist_ok=True)
-                write_json(cursor_file, {"seq": current.get("seq", 0)})  # atomic: a killed poller leaves no half file
+            _save_cursor(cursor_file, current.get("seq", 0), offset)
             return current
         if time.monotonic() >= deadline:
+            _save_cursor(cursor_file, seen, offset)
             return None
         time.sleep(0.2)
 
 
-def _seen(cursor_file: Path | None) -> int:
-    """The sequence number last reported to a consumer (-1: nothing yet, or the cursor is damaged)."""
+def _cursor(cursor_file: Path | None) -> tuple[int, int]:
+    """Read the last state sequence and event byte offset for a consumer."""
     try:
-        return int(json.loads(cursor_file.read_text(encoding="utf-8"))["seq"]) if cursor_file else -1
-    except (OSError, ValueError, KeyError, TypeError):
-        return -1
+        saved = json.loads(cursor_file.read_text(encoding="utf-8")) if cursor_file else {}
+        return int(saved.get("seq", -1)), max(0, int(saved.get("event_offset", 0)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return -1, 0
+
+
+def _save_cursor(cursor_file: Path | None, seen: int, offset: int) -> None:
+    if cursor_file:
+        cursor_file.parent.mkdir(exist_ok=True)
+        write_json(cursor_file, {"seq": seen, "event_offset": offset})
+
+
+def _stall_notice(run: Run, offset: int) -> tuple[dict | None, int]:
+    try:
+        file = (run.dir / "events.jsonl").open("rb")
+    except FileNotFoundError:
+        return None, offset
+    with file:
+        if offset > os.fstat(file.fileno()).st_size:
+            offset = 0
+        file.seek(offset)
+        while line := file.readline():
+            if not line.endswith(b"\n"):
+                break
+            offset = file.tell()
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("event") == "stall_detected":
+                return event, offset
+    return None, offset
 
 
 def _age(status: dict) -> float:

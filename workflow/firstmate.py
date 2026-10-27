@@ -172,7 +172,8 @@ def _bounded(state: dict, more: str) -> str:
     text = json.dumps(slim, ensure_ascii=False, default=str)
     if len(text.encode("utf-8")) <= MAX_OUTPUT:
         return text
-    keep = ("run", "status", "seq", "dir", "workflow", "follow_up", "nodes", "answer", "retry")
+    keep = ("run", "status", "seq", "dir", "workflow", "follow_up", "nodes", "answer", "retry",
+            "stall", "current_status")
     return json.dumps({k: state[k] for k in keep if k in state} | {"more": more})
 
 

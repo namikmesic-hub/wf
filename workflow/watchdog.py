@@ -63,6 +63,7 @@ class Watchdog(Recorder):
         self.longest_at = None
         self.detected = None
         self.alerted = False
+        self._stalled_tools: set[str] = set()
         self.stop = asyncio.Event()
         self.action = "end"
         self._pending_progress = None
@@ -108,9 +109,8 @@ class Watchdog(Recorder):
         self.window = self.awake
         self.retrying = False
         self._pending_progress = {"source": source, "last_progress_at": timestamp(self.last)}
-        if self.alerted and not self.stop.is_set():
+        if self.alerted and not self.stop.is_set() and not self._stalled_tools.intersection(self.tools):
             self._clear("progress")
-            self.tools = dict.fromkeys(self.tools, self.awake)
         self._write_progress(force=source in ("session_start", "tool_start", "tool_end", "turn_end"))
 
     def _write_progress(self, force=False):
@@ -123,6 +123,7 @@ class Watchdog(Recorder):
     def _clear(self, action):
         if self.alerted:
             self.alerted = False
+            self._stalled_tools.clear()
             self._write("stall_resolved", action=action)
 
     def event(self, event):
@@ -161,8 +162,9 @@ class Watchdog(Recorder):
         self.record.tool_call(call, tool, arguments)
 
     def tool_result(self, call, result, is_error=False, kept=True, characters=None):
-        self.progress("tool_end")
+        self.sample()
         self.tools.pop(str(call), None)
+        self.progress("tool_end")
         self._write("tool_end", call=str(call), is_error=is_error)
         self.record.tool_result(call, result, is_error, kept, characters)
 
@@ -180,6 +182,7 @@ class Watchdog(Recorder):
         if quiet < limit:
             return
         self.alerted = True
+        self._stalled_tools = {call for call, started in self.tools.items() if self.awake - started >= limit}
         self.detected = timestamp(self.before[0])
         self._write_progress(force=True)
         self._write("stall_detected", silent_wall_s=max(0.0, self.before[0] - self.last), awake_s=quiet,
