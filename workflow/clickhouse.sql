@@ -1,7 +1,8 @@
 -- The tables of wf runs in ClickHouse, in the database of metrics.url in config.toml.
 -- `wf metrics export` (export.py) makes the database and each table that is missing, before it writes rows.
 -- Each table is a ReplacingMergeTree on its natural key, so a second export of a run replaces its rows.
--- Read them with FINAL, or with argMax over loaded_at.
+-- Read them with FINAL. For a table of runs, argMax over loaded_at also gives the latest row.
+-- The row version of schema_version is applied_at, not loaded_at.
 -- An item of -1 is a job that isn't an item of a for_each node.
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS attempts (
     kind LowCardinality(String), harness LowCardinality(String), model LowCardinality(String), effort LowCardinality(String),
     access LowCardinality(String), session_id String, session_start LowCardinality(String),
     started DateTime64(3, 'UTC'), ended Nullable(DateTime64(3, 'UTC')), duration_s Nullable(Float64),
+    duration_basis Nullable(String), awake_s Nullable(Float64), asleep_s Nullable(Float64),
     outcome LowCardinality(String), error String, error_class LowCardinality(String),
     tokens UInt64, input_tokens UInt64, output_tokens UInt64, cache_read_tokens UInt64, cache_write_tokens UInt64,
     reasoning_tokens UInt64, cost_usd Float64, exit_code Nullable(Int32),
@@ -50,3 +52,12 @@ CREATE TABLE IF NOT EXISTS metric_points (
     loaded_at DateTime64(3, 'UTC') DEFAULT now64(3)
 ) ENGINE = ReplacingMergeTree(loaded_at) PARTITION BY toYYYYMM(time)
   ORDER BY (workflow, metric, run_id, node, pass, item, labels);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version UInt32, applied_at DateTime64(3, 'UTC') DEFAULT now64(3)
+) ENGINE = ReplacingMergeTree(applied_at) ORDER BY version;
+
+CREATE TABLE IF NOT EXISTS export_runs (
+    started_at DateTime64(6, 'UTC'), finished_at DateTime64(6, 'UTC'), runs_read UInt64, rows_written UInt64,
+    error_class LowCardinality(String), loaded_at DateTime64(3, 'UTC') DEFAULT now64(3)
+) ENGINE = ReplacingMergeTree(loaded_at) ORDER BY started_at;
