@@ -535,7 +535,10 @@ def _describe(current: dict) -> str:
     elif status == "limit":
         detail = f"paused at a limit: {current.get('reason')} ({current.get('retry')})"
     elif status == "running" and current.get("agents_waiting"):
-        detail = "running, waiting for an agent slot: " + ", ".join(w["node"] for w in current["agents_waiting"])
+        detail = "running, waiting for an agent slot: " + ", ".join(
+            w["node"] + (f" ({w['harness']}, {'global' if w['capacity'] == 'global' else 'harness'} cap)"
+                         if w.get("capacity") else "")
+            for w in current["agents_waiting"])
     else:
         detail = status
     return f"{run_id} [{current.get('workflow')}]: {detail}" + (f" (follow-up {n})" if (n := current.get("follow_up")) else "")

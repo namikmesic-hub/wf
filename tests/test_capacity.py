@@ -21,7 +21,7 @@ from textwrap import dedent
 
 import pytest
 
-from workflow import capacity, cli, harnesses, operate, runner, ui
+from workflow import capacity, cli, config, harnesses, operate, runner, ui
 from workflow.harnesses.base import TurnEnd, Usage
 from workflow.runs import Run
 from fakes import Fake, ends, submit
@@ -175,6 +175,41 @@ def test_another_key_in_the_config_leaves_the_cap_alone(wf_home):
     assert capacity.configured() == 2
 
 
+@pytest.mark.parametrize("harness", ["claude-code", "codex", "cursor"])
+def test_a_harness_variable_overrides_the_file(wf_home, monkeypatch, capsys, harness):
+    variable = f"WF_MAX_AGENTS_{harness.upper().replace('-', '_')}"
+    name = f"capacity.{harness}"
+    assert config.get().value(name) is None
+    (wf_home / "config.toml").write_text(f"[capacity]\n{harness} = 12\n")
+    assert config.get().value(name) == 12
+    monkeypatch.setenv(variable, "24")
+    assert config.get().value(name) == 24
+    assert cli.main(["config", "show"]) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith(name))
+    assert line.split() == [name, "24", "environment", f"({variable})"]
+    monkeypatch.setenv(variable, " ")
+    assert config.get().value(name) == 12
+
+
+@pytest.mark.parametrize("harness", ["claude-code", "codex", "cursor"])
+@pytest.mark.parametrize("value", ["0", "-1", "true", "1.5", '"4"'])
+def test_a_bad_harness_cap_stops_the_run(repo, wf_home, monkeypatch, capsys, harness, value):
+    (wf_home / "config.toml").write_text(f"[capacity]\n{harness} = {value}\n")
+    monkeypatch.setenv(f"WF_MAX_AGENTS_{harness.upper().replace('-', '_')}", "24")
+    assert cli.main(["run", agent_flow()]) == 1
+    assert f"capacity.{harness} must be a whole number of 1 or more" in capsys.readouterr().err
+    assert not Path(".wf").exists()
+
+
+@pytest.mark.parametrize("harness", ["claude-code", "codex", "cursor"])
+def test_a_bad_harness_variable_stops_the_run(repo, monkeypatch, capsys, harness):
+    variable = f"WF_MAX_AGENTS_{harness.upper().replace('-', '_')}"
+    monkeypatch.setenv(variable, "0")
+    assert cli.main(["run", agent_flow()]) == 1
+    assert f"{variable} must be a whole number of 1 or more" in capsys.readouterr().err
+    assert not Path(".wf").exists()
+
+
 UNKNOWN = "unknown key max_agent. The top of the file takes runs_dir and max_agents"
 
 
@@ -320,9 +355,11 @@ def test_wf_run_and_wf_retry_read_the_cap_once_when_they_start(repo, monkeypatch
     assert len(reads) == 2
 
 
-def test_without_a_cap_nothing_waits_and_no_slot_is_made(repo, monkeypatch, wf_home):
-    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", Fake("claude-code", submit({"summary": "done"})).factory)
-    assert cli.main(["run", agent_flow()]) == 0
+@pytest.mark.parametrize("harness", ["claude-code", "codex", "cursor"])
+def test_without_a_cap_nothing_waits_and_no_slot_is_made(repo, monkeypatch, wf_home, harness):
+    monkeypatch.setitem(harnesses.FACTORIES, harness, Fake(harness, submit({"summary": "done"})).factory)
+    node = f"work: {{needs: [start], instruction: Work., harness: {harness}, model: test}}"
+    assert cli.main(["run", agent_flow(node=node)]) == 0
     assert not (wf_home / "agent-slots").exists()
     assert not {"slot_waiting", "slot_taken"} & set(kinds("work"))
 
@@ -489,6 +526,61 @@ def test_a_retried_run_waits_for_a_slot(repo, monkeypatch):
 
 
 # ---------- across processes ----------
+
+
+@pytest.mark.parametrize("global_cap", [None, 2])
+def test_a_harness_cap_queues_only_that_harness(repo, wf_home, monkeypatch, marks, capsys, global_cap):
+    (wf_home / "config.toml").write_text("[capacity]\nclaude-code = 1\n")
+    if global_cap is not None:
+        monkeypatch.setenv("WF_MAX_AGENTS", str(global_cap))
+    (marks / "go").touch()
+    first = wf_process(marks, marks / "let-go", "run", agent_flow("one"))
+    second = None
+    try:
+        until(lambda: mark(marks, first, "started").exists())
+        second = wf_process(marks, marks / "go", "run", agent_flow("two"))
+        until(lambda: waiting("two"))
+        assert not mark(marks, second, "started").exists()
+        assert cli.main(["status", run_of("two").name]) == 0
+        assert "work (claude-code, harness cap)" in capsys.readouterr().out
+        fake = Fake("cursor", submit({"summary": "done"}))
+        monkeypatch.setitem(harnesses.FACTORIES, "cursor", fake.factory)
+        node = "work: {needs: [start], instruction: Work., harness: cursor, model: test}"
+        assert cli.main(["run", agent_flow("other", node=node, top="limits: {duration: 3s}")]) == 0
+        assert len(fake.sent) == 1
+        (marks / "let-go").touch()
+        succeeds(first)
+        succeeds(second)
+    finally:
+        for process in (first, second):
+            if process is not None:
+                process.kill()
+                process.wait()
+    assert float(mark(marks, second, "started").read_text()) >= float(mark(marks, first, "ended").read_text())
+
+
+def test_both_caps_apply_before_a_session_opens(repo, wf_home, monkeypatch):
+    (wf_home / "config.toml").write_text("max_agents = 1\n[capacity]\nclaude-code = 1\n")
+    seen = {}
+
+    async def look(session):
+        assert capacity.take(1, {}) is None
+        assert capacity.take(1, {}, harness="claude-code") is None
+        session.spec.tool.submit({"summary": "done"})
+        return TurnEnd("done", usage=Usage())
+
+    fake = Fake("claude-code", look)
+    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", fake.factory)
+    let_go = hold_slot(0.2, waiter="work", seen=seen)
+    try:
+        assert cli.main(["run", agent_flow()]) == 0
+    finally:
+        let_go()
+    assert seen["agents_waiting"][0]["capacity"] == "global"
+    for scope in ({}, {"harness": "claude-code"}):
+        slot = capacity.take(1, {}, **scope)
+        assert slot is not None
+        slot.release()
 
 
 def test_two_runs_in_separate_processes_share_the_cap(repo, monkeypatch, marks):

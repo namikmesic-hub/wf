@@ -601,7 +601,9 @@ def describe(event: dict) -> str | None:
         model = f" {event['model']}" if event.get("model") else ""
         return f"  {where}: attempt {event['attempt']} runs on {event['harness']}{model}, as the override for {event['override']} says"
     if kind == "slot_waiting":
-        return f"  {where}: attempt {event['attempt']} waits for an agent slot ({event['max_agents']} of {event['max_agents']} in use)"
+        scope = f" for {event['capacity']}" if event.get("capacity") not in (None, "global") else ""
+        return (f"  {where}: attempt {event['attempt']} waits for an agent slot{scope} "
+                f"({event['max_agents']} of {event['max_agents']} in use)")
     if kind == "slot_taken":
         return f"  {where}: attempt {event['attempt']} got an agent slot after {event['waited_s']:g}s"
     if kind == "warning":

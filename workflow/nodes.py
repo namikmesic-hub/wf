@@ -119,7 +119,7 @@ from typing import Any
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
-from . import capacity, dryrun, output_tool, overrides, schemas, templates, workspaces
+from . import capacity, config, dryrun, output_tool, overrides, schemas, templates, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
 from .harnesses import SessionSpec, StartFailed, Unavailable, Usage, reaches_keychain
@@ -631,33 +631,44 @@ def _in_run(ctx: RunContext, path: Path) -> str:
 
 @asynccontextmanager
 async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str) -> AsyncIterator[None]:
-    """Hold one of the agent slots (capacity.py) for attempt `number`, waiting for one if
-    they're all taken, until a limit is reached (_LimitWhileWaiting). No cap, or a dry run:
-    there's nothing to hold."""
+    """Hold the harness and global slots for an attempt until it ends.
+    A dry run takes no slots.
+    A wait ends when a slot is free or a run limit is reached."""
     root = ctx.root
-    if root.max_agents is None or root.script is not None:
+    if root.script is not None:
         yield
         return
+    caps = [(harness, config.get().value(f"capacity.{harness}")), (None, root.max_agents)]
     where = _path(ctx, job)
     holder = {"pid": os.getpid(), "run": root.run.id, "node": where, "attempt": number}
-    slot = capacity.take(root.max_agents, holder)
+    slots = []
     try:
-        if slot is None:
-            on = {**_label(job), "attempt": number, "harness": harness}
-            emit({"event": "slot_waiting", **on, "max_agents": root.max_agents})
-            began, key = time.monotonic(), f"{where}#{number}"
-            ctx.note_slot_wait(key, {"node": where, "attempt": number, "since": now()})
-            try:
-                slot = await capacity.wait(root.max_agents, holder, stop=lambda: ctx.limit_reached() is not None)
-            finally:
-                ctx.note_slot_wait(key, None)
-            reason = ctx.limit_reached()  # asked again: the slot may have come free just as a limit was reached
-            if slot is None or reason:
-                raise _LimitWhileWaiting(reason)
-            emit({"event": "slot_taken", **on, "waited_s": round(time.monotonic() - began, 1)})
+        for name, cap in caps:
+            if cap is None:
+                continue
+            scope = {"harness": name} if name is not None else {}
+            slot = capacity.take(cap, holder, **scope)
+            if slot is None:
+                on = {**_label(job), "attempt": number, "harness": harness, "capacity": name or "global"}
+                emit({"event": "slot_waiting", **on, "max_agents": cap})
+                began, key = time.monotonic(), f"{where}#{number}"
+                ctx.note_slot_wait(key, {"node": where, "attempt": number, "harness": harness,
+                                         "capacity": name or "global", "since": now()})
+                try:
+                    slot = await capacity.wait(cap, holder, stop=lambda: ctx.limit_reached() is not None, **scope)
+                finally:
+                    ctx.note_slot_wait(key, None)
+                if slot is not None:
+                    slots.append(slot)
+                reason = ctx.limit_reached()
+                if slot is None or reason:
+                    raise _LimitWhileWaiting(reason)
+                emit({"event": "slot_taken", **on, "waited_s": round(time.monotonic() - began, 1)})
+            else:
+                slots.append(slot)
         yield
     finally:
-        if slot is not None:
+        for slot in reversed(slots):
             slot.release()
 
 
