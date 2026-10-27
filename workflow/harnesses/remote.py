@@ -59,11 +59,10 @@ late_usage().
 A turn's kind, for turn.started: the first is the instruction. The runner sends only reminders
 (output_tool.REMINDER) and messages from `wf steer` after it, so the others are told apart by text.
 
-What the agent does goes where each adapter puts it (base.py): an agent_tool progress event when
-a tool call starts, the attempt's transcript (sent, text, tool, tool_result, turn, usage lines),
-and the trace (spec.trace). For a wf tool the peer sends only the size of the answer, and so the
-transcript and the trace keep only that. A block of the model's thinking (turn.thinking: its text
-and the milliseconds it took) and the runtime's id for a request (turn.request) go to the trace only.
+What the agent does goes where each adapter puts it (base.py).
+These records include agent_tool progress, the attempt's transcript (sent, text, tool, tool_result, and turn lines), and the trace (spec.trace).
+The peer sends only the size of a wf tool's answer, and the transcript and trace keep only that size.
+A block of the model's thinking, with its duration, and each runtime request id go to the trace only.
 """
 
 import asyncio

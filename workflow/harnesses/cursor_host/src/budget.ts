@@ -39,8 +39,8 @@ export class RequestBudget {
     }
   }
 
-  async wait(ms: number, pause: (ms: number) => Promise<unknown>): Promise<void> {
-    if (ms >= this.end - this.now()) throw this.expired();
+  async wait(ms: number, pause: (ms: number) => Promise<unknown>, refused?: Error): Promise<void> {
+    if (ms >= this.end - this.now()) throw refused ?? this.expired();
     await this.run(() => pause(ms));
   }
 }

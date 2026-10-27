@@ -1,11 +1,12 @@
 """Codex: agent threads through `codex app-server`, JSON-RPC over stdio.
 
-One app server process serves every Codex session in a stream of the graph:
-`codex app-server --disable hooks --disable apps`, with the codex of paths.codex,
-else the one on PATH. Then `initialize` (with experimentalApi, which dynamic tools
-need) and the `initialized` notification. Messages are JSON objects, one per line,
-in both directions. Requests carry an id, notifications don't, and either side can
-send requests.
+One app server process serves every Codex session in a stream of the graph.
+The command is `codex app-server --disable hooks --disable apps --disable plugins`.
+The program comes from paths.codex, or from PATH.
+Then wf sends `initialize` with experimentalApi and the `initialized` notification.
+Dynamic tools need experimentalApi.
+Messages are JSON objects, one per line, in both directions.
+Requests carry an id, notifications don't, and either side can send requests.
 
 A session is a thread (thread/start), and a turn is turn/start followed by
 notifications (item/started, item/completed, thread/tokenUsage/updated, ...)

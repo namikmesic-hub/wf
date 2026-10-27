@@ -84,11 +84,12 @@ export async function retryRateLimit<T>(action: () => Promise<T>, wait = sleep, 
     try {
       return await budget.run(action);
     } catch (error) {
-      if (classify(error).code !== "cursor.rate_limit" || attempt === 3) throw error;
+      const info = classify(error);
+      if (info.code !== "cursor.rate_limit" || attempt === 3) throw error;
       const retryAfter = rateLimitRetryAfter();
       budget.retrying(retryAfter);
       log(`Cursor rate limit. Try again in ${retryAfter} seconds.`);
-      await budget.wait(retryAfter * 1000, wait);
+      await budget.wait(retryAfter * 1000, wait, new HostError({ ...info, retry_after_s: retryAfter }));
     }
   }
 }

@@ -579,7 +579,10 @@ An id that names no model, or no single variant, makes Cursor unavailable for th
 The `runtime.check` operation always fetches the current catalog.
 The `wf validate` command checks workflow settings locally.
 Each attempt's transcript records the model and parameters of its session.
-A catalog or session-open rate limit waits 5, 10, then 20 seconds before each retry, with at most four attempts.
+A rate limit ends a catalog check or session open at once and keeps Cursor's error text.
+The node's retry waits 60 seconds plus up to 15 seconds of jitter.
+This wait covers Cursor's rate-limit window of one minute.
+With `retry: 0`, the node fails without another attempt.
 The cache wait, catalog call, and session open share one time limit below the client's request timeout.
 wf reclaims the catalog lock when its owner process stops or the lock is more than 60 seconds old.
 The Python adapter uses `workflow/config/` to set an absolute cache folder for the host.
@@ -1951,7 +1954,7 @@ A `failed` `TurnEnd` can also set `retry_after`, the seconds the runner waits be
 
 | | Claude Code | Codex | Cursor |
 |---|---|---|---|
-| Runs as | `claude-agent-sdk`: one process per session | one `codex app-server --disable hooks --disable apps` per run, JSON-RPC over stdio, one thread per session | the Cursor host, `node wf-cursor-host.js`, on `@cursor/sdk`: one process per session, which speaks the wf-session protocol over stdio, with the SDK's own reconnects on (`enableAgentRetries`) |
+| Runs as | `claude-agent-sdk`: one process per session | one `codex app-server --disable hooks --disable apps --disable plugins` per run, JSON-RPC over stdio, one thread per session | the Cursor host, `node wf-cursor-host.js`, on `@cursor/sdk`: one process per session, which speaks the wf-session protocol over stdio, with the SDK's own reconnects on (`enableAgentRetries`) |
 | `submit_result` | SDK MCP server | dynamic tool (`experimentalApi`) | a custom tool of the SDK: each call is a `call` frame to the runner |
 | `read-only` | Read, Grep, Glob, and Bash limited to read-only git commands | sandbox `read-only` | none of Cursor's own tools: wf's file tools and `git` tool read only the workspace and the files and folders the instruction names. Cursor's sandbox is on, and no other MCP server is offered |
 | `edit` | Read, Edit, Write, Bash with `permission_mode="dontAsk"` | sandbox `workspace-write` | through `cursor-agent`'s ACP: agent mode, with writes inside the workspace and commands allowed, and writes to temp folders and `~/.cursor` denied |
@@ -2009,7 +2012,9 @@ Notes:
 - A frame is at most 1 MiB.
   A tool's answer that is bigger reaches the agent as an error that says so, and a bigger turn fails.
 - Each turn's tokens come from the SDK's usage report.
-  Cursor bills later, so a session's cost in dollars isn't counted, and the transcript keeps what Cursor reported as billed when the session closed.
+  Cursor bills later, so wf does not count a session's cost in dollars.
+  Session close makes no billing request and adds no usage line to the transcript.
+  Use the host's `usage.read` operation to read billed cents explicitly.
 - The host ships as its TypeScript source, which Node 22.18 or later runs as it is.
   The SDK can't be bundled into one file, so the first Cursor session installs it beside the host with `npm ci --omit=dev --ignore-scripts`, from the host's `package-lock.json`.
   The protocol's frames are in `workflow/harnesses/cursor_host/protocol/`, as JSON Schema and an example of each.

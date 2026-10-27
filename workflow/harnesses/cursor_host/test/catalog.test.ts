@@ -119,7 +119,7 @@ test("an old lock cannot block the cache when its process id is in use", async (
 });
 
 test("cache waits and both retry loops share one request budget", async () => {
-  const rate = Object.assign(new Error("rate limit"), { name: "RateLimitError" });
+  const rate = Object.assign(new Error("rate limit for get_models: 30 requests per minute"), { name: "RateLimitError" });
   for (const cacheWait of [0, 10_000, 50_000]) {
     for (const source of ["catalog", "session"]) {
       let elapsed = 0;
@@ -133,7 +133,8 @@ test("cache waits and both retry loops share one request budget", async () => {
         await retryRateLimit(async () => { if (++sessionCalls < 4) throw rate; return "open"; }, wait, budget);
       };
       await assert.rejects(open(), error => error instanceof HostError
-        && error.info.code === "cursor.request_timeout" && error.info.retryable
+        && error.info.code === "cursor.rate_limit" && error.info.class === "transient" && error.info.retryable
+        && error.info.message === rate.message
         && error.info.retry_after_s! >= 60 && error.info.retry_after_s! <= 75);
       assert.equal(elapsed, cacheWait);
       assert.equal(catalogCalls, 1);
@@ -148,7 +149,8 @@ test("a pending SDK call cannot hold the request past its budget", async () => {
     const budget = new RequestBudget(100);
     budget.retrying();
     const pending = budget.run(() => new Promise(() => {}));
-    const refused = assert.rejects(pending, error => error instanceof HostError && error.info.retryable);
+    const refused = assert.rejects(pending, error => error instanceof HostError && error.info.retryable
+      && error.info.code === "cursor.request_timeout");
     mock.timers.tick(100);
     await refused;
   } finally {

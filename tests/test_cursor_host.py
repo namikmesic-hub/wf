@@ -205,9 +205,11 @@ def test_a_relative_wf_home_shares_one_cache_across_runs(tmp_path, monkeypatch, 
 
 
 @needs_node
-def test_a_rate_limit_before_open_returns_a_retry_before_the_client_timeout(tmp_path, monkeypatch, cursor_host):
-    error = {"name": "ConfigurationError", "message": "rate limit"}
-    use(monkeypatch, tmp_path, cursor_host, timeout=1, create_errors=[error])
+@pytest.mark.parametrize("source", ["catalog_errors", "create_errors"])
+def test_a_rate_limit_before_open_returns_a_retry_before_the_client_timeout(tmp_path, monkeypatch, cursor_host, source):
+    message = "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint"
+    error = {"name": "ConfigurationError", "message": message}
+    log = use(monkeypatch, tmp_path, cursor_host, timeout=1, **{source: [error]})
 
     async def main():
         harness = harnesses.create("cursor")
@@ -216,13 +218,35 @@ def test_a_rate_limit_before_open_returns_a_retry_before_the_client_timeout(tmp_
         spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="composer-2.5", effort=None,
                            tool=tool, log=tmp_path / "attempt.log", emit=lambda event: None)
         try:
-            with pytest.raises(harnesses.StartFailed, match="request time limit has expired") as failed:
+            with pytest.raises(harnesses.StartFailed) as failed:
                 await harness.session(spec)
+            assert str(failed.value) == f"cursor: {message}"
             assert 60 <= failed.value.retry_after <= 75
         finally:
             await harness.close()
 
     asyncio.run(main())
+    assert len(entries(log, "models.list" if source == "catalog_errors" else "create")) == 1
+
+
+@needs_node
+def test_a_model_check_keeps_cursor_rate_limit_text(tmp_path, monkeypatch, cursor_host):
+    message = "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint"
+    error = {"name": "ConfigurationError", "message": message}
+    log = use(monkeypatch, tmp_path, cursor_host, timeout=1, catalog_errors=[error])
+
+    async def main():
+        harness = harnesses.create("cursor")
+        await harness.open(tmp_path / "run")
+        try:
+            with pytest.raises(Unavailable) as failed:
+                await harness.check_model("composer-2.5")
+            assert str(failed.value) == message
+        finally:
+            await harness.close()
+
+    asyncio.run(main())
+    assert len(entries(log, "models.list")) == 1
 
 
 @needs_node
