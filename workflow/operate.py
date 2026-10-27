@@ -34,6 +34,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -84,46 +85,84 @@ def state(run: Run) -> dict:
 CONSUMER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # consumer names become file names
 
 
+@dataclass
+class _Cursor:
+    seq: int = -1
+    event_offset: int = 0
+    status: str | None = None
+    follow_up: int = 0
+
+
 def wait(run: Run, timeout: float, consumer: str | None = None) -> dict | None:
     """The run's state once it needs attention (and is new to `consumer`), or None at the timeout."""
     if consumer is not None and not CONSUMER.fullmatch(consumer):
         raise ValueError("a consumer name is letters, digits, . _ and - (it names a file in the run folder)")
     cursor_file = run.dir / "consumers" / f"{consumer}.json" if consumer else None
-    seen, offset = _cursor(cursor_file)
+    cursor = _cursor(cursor_file)
     deadline = time.monotonic() + timeout
     while True:
         # Read events after status so a terminal result cannot hide an earlier stall.
         current = state(run)
-        notice, offset = _stall_notice(run, offset) if cursor_file else (None, offset)
+        follow_up = current.get("follow_up", 0)
+        if cursor_file and follow_up != cursor.follow_up:
+            cursor.event_offset = max(cursor.event_offset, _follow_up_offset(run, follow_up))
+            cursor.follow_up = follow_up
+        notice, cursor.event_offset = _stall_notice(run, cursor.event_offset) if cursor_file else (None, cursor.event_offset)
         if notice is not None:
             current = state(run)
+            if current.get("follow_up", 0) != follow_up:
+                cursor.event_offset = 0
+                continue
             if current["status"] == "stall_detected":
-                seen = current.get("seq", 0)
-            _save_cursor(cursor_file, seen, offset)
+                cursor.seq, cursor.status = current.get("seq", 0), current["status"]
+            _save_cursor(cursor_file, cursor)
             return {**current, "status": "stall_detected", "current_status": current["status"], "stall": notice}
-        # A "stopped" run keeps the sequence number of its last "running" state, so it too is reported once
-        if current["status"] in ATTENTION and current.get("seq", 0) > seen:
-            _save_cursor(cursor_file, current.get("seq", 0), offset)
+        stopped = current["status"] == "stopped" and cursor.status != "stopped"
+        if current["status"] in ATTENTION and (current.get("seq", 0) > cursor.seq or stopped):
+            cursor.seq, cursor.status = current.get("seq", 0), current["status"]
+            _save_cursor(cursor_file, cursor)
             return current
         if time.monotonic() >= deadline:
-            _save_cursor(cursor_file, seen, offset)
+            _save_cursor(cursor_file, cursor)
             return None
         time.sleep(0.2)
 
 
-def _cursor(cursor_file: Path | None) -> tuple[int, int]:
-    """Read the last state sequence and event byte offset for a consumer."""
+def _cursor(cursor_file: Path | None) -> _Cursor:
+    """Read the last state and event position for a consumer."""
     try:
         saved = json.loads(cursor_file.read_text(encoding="utf-8")) if cursor_file else {}
-        return int(saved.get("seq", -1)), max(0, int(saved.get("event_offset", 0)))
+        return _Cursor(int(saved.get("seq", -1)), max(0, int(saved.get("event_offset", 0))),
+                       saved.get("status"), int(saved.get("follow_up", 0)))
     except (OSError, ValueError, TypeError, AttributeError):
-        return -1, 0
+        return _Cursor()
 
 
-def _save_cursor(cursor_file: Path | None, seen: int, offset: int) -> None:
+def _save_cursor(cursor_file: Path | None, cursor: _Cursor) -> None:
     if cursor_file:
         cursor_file.parent.mkdir(exist_ok=True)
-        write_json(cursor_file, {"seq": seen, "event_offset": offset})
+        write_json(cursor_file, asdict(cursor))
+
+
+def _follow_up_offset(run: Run, number: int) -> int:
+    """Find the first event position of the current follow-up."""
+    offset = 0
+    try:
+        with (run.dir / "events.jsonl").open("rb") as file:
+            while line := file.readline():
+                if not line.endswith(b"\n"):
+                    break
+                offset = file.tell()
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(event, dict) and event.get("event") == "follow_up"
+                        and not event.get("node") and event.get("number") == number):
+                    break
+    except FileNotFoundError:
+        pass
+    return offset
 
 
 def _stall_notice(run: Run, offset: int) -> tuple[dict | None, int]:

@@ -903,21 +903,29 @@ def test_a_detached_follow_up_prints_json_and_wait_reports_it(repo, capsys):
     assert state["output"]["notes"].splitlines()[-1] == "in the background (check is none)"
 
 
-def test_firstmate_sees_the_follow_up_as_a_new_pass_of_the_same_run(repo, monkeypatch, capsys):
+@pytest.mark.parametrize("has_stall", [False, True])
+def test_firstmate_sees_the_follow_up_as_a_new_pass_of_the_same_run(repo, monkeypatch, capsys, has_stall):
     monkeypatch.setattr(firstmate, "POLL_SECONDS", 1)
     run = ran(capsys)
+    run.add_event({"event": "stall_detected", "node": "work", "pass": 1, "attempt": 1})
 
     def poll(source: str) -> dict:
         reply = firstmate.invoke({"operation": "source.poll", "input": {"source_id": source, "config_ref": f"wf-run:{run.dir}"}})
         return json.loads(reply["result"]["output"])
 
+    assert poll("wf-run")["stall"]["pass"] == 1
     assert "follow_up" not in poll("wf-run")
-    assert cli.main(["continue", run.id, "more"]) == 0
-    state = poll("wf-run-1")
-    assert (state["status"], state["follow_up"]) == ("succeeded", 1)
+    for number in (1, 2):
+        assert cli.main(["continue", run.id, "more"]) == 0
+        if has_stall:
+            run.add_event({"event": "stall_detected", "node": "work", "pass": number + 1, "attempt": 1})
+            notice = poll(f"wf-run-{number}")
+            assert (notice["status"], notice["follow_up"], notice["stall"]["pass"]) == ("stall_detected", number, number + 1)
+        state = poll(f"wf-run-{number}")
+        assert (state["status"], state["follow_up"]) == ("succeeded", number)
     assert firstmate.invoke({"operation": "result.terminal", "input": {"content": json.dumps(state)}})["result"] == {"value": True}
     slim = json.loads(firstmate._bounded({**state, "nodes": ["x" * 40_000]}, "wf status"))
-    assert (slim["status"], slim["follow_up"]) == ("succeeded", 1)  # cut down to fit, it still says which pass
+    assert (slim["status"], slim["follow_up"]) == ("succeeded", 2)  # cut down to fit, it still says which pass
 
 
 # ---------- watching and reporting ----------

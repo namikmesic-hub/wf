@@ -258,7 +258,7 @@ The tests below are in `tests/test_config.py`, unless a row names another file.
 | `config.toml` belongs to another user than you and root, or its mode lets other users change it | Every command exits 1 before it starts, because the file names programs that wf runs. The message names the fix: `chmod go-w`, or a file of your own. Group write is fine while no other user has the group of the file, as primary group or as member. | `workflow/config/load.py:172`, `workflow/config/load.py:186`, `workflow/config/load.py:192` | `test_a_file_that_other_users_can_change_or_that_another_user_owns_is_refused`, `test_group_write_is_fine_while_the_group_of_the_file_is_yours_alone` |
 | `~/.wf/config.yaml` is there | Every command exits 1 before it starts. The message names each setting of `config.yaml` and its key in `config.toml`, and never a value. | `workflow/config/legacy.py:18` | `test_while_config_yaml_is_there_wf_stops_and_names_where_each_of_its_settings_goes`, `test_a_config_yaml_without_settings_still_stops_wf` |
 | A command runs | It keeps the configuration that it read when it started, also in its threads. A change of the file counts from the next command. | `workflow/cli.py:317`, `workflow/config/__init__.py:62` | `test_a_command_keeps_the_configuration_that_it_started_with`, `test_commands_that_end_in_another_order_than_they_started_leave_nothing_pinned` |
-| A command starts a background driver for a run | The driver gets the location of the run: `--runs-dir` for a run in a runs folder, else a blank `WF_RUNS_DIR`. So it finds the run, also after a change of `config.toml`. | `workflow/runs.py:113`, `workflow/operate.py:222` | `test_a_detached_run_finds_its_folder_after_runs_dir_changes_in_config_toml` in `tests/test_runs_dir.py` |
+| A command starts a background driver for a run | The driver gets the location of the run: `--runs-dir` for a run in a runs folder, else a blank `WF_RUNS_DIR`. So it finds the run, also after a change of `config.toml`. | `workflow/runs.py:113`, `workflow/operate.py:264` | `test_a_detached_run_finds_its_folder_after_runs_dir_changes_in_config_toml` in `tests/test_runs_dir.py` |
 | firstmate polls a run while the configuration has a problem | The poll answers the error `unavailable`, which firstmate can try again, before it waits for the run. So the poll still reports the next state of the run once. | `workflow/firstmate.py:151` | `test_a_configuration_with_problems_refuses_the_poll_and_keeps_the_state_for_the_next_one` in `tests/test_firstmate.py` |
 | A module outside `workflow/config/` needs a value | It gets it from the package. It doesn't read `config.toml`, `WF_HOME` or the variable of a key. | `workflow/config/__init__.py:54` | `test_only_the_config_package_reads_config_toml_or_the_variables_of_its_keys` |
 | There's no `config.toml` | Each key has wf's default, and `wf config show` says that the file isn't there. wf makes no file. | `workflow/config/load.py:83`, `workflow/config/show.py:13` | `test_without_a_file_each_key_has_wf_s_default_and_wf_writes_no_file`, `test_wf_config_show_says_when_there_is_no_file` |
@@ -467,7 +467,10 @@ Each result carries one notice in `stall` and the latest run state in `current_s
 The `stalls` field lists only open stalls.
 Live action commands apply only to these open stalls.
 All pending notices precede a terminal result.
-The consumer records an event byte offset apart from the status sequence number.
+A new consumer reads only notices from the current follow-up, after its `follow_up` event.
+Before the first follow-up, a new consumer reads notices from the start of the run.
+The consumer records an event byte offset, the follow-up number, the status sequence number, and the last reported status.
+If the driver stops during an attention stall, the consumer reports `stopped` once, even when the sequence number stays the same.
 
 ```sh
 wf stall <run-id> <node> end
@@ -952,7 +955,7 @@ The tests named below are in `tests/test_capacity.py`, unless another file is na
 | An attempt waits | `events.jsonl` gets `slot_waiting`, then `slot_taken` with `waited_s`. Until the attempt has its slot, `agents_waiting` in `status.json` lists it with its node, attempt number and start time, and `wf status` names it. | `workflow/nodes.py:673`, `workflow/nodes.py:684`, `workflow/context.py:186`, `workflow/cli.py:566` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot`, `test_a_killed_process_frees_its_slot` |
 | A run limit is reached during the wait (the `duration` limit counts the wait) | The wait ends, the attempt doesn't start, and the run pauses at the limit. A slot that comes free at that moment goes back unused. | `workflow/capacity.py:93`, `workflow/nodes.py:681` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts`, `test_a_slot_that_comes_free_as_a_limit_is_reached_goes_back_unused`, `test_a_retry_that_a_limit_stops_while_it_waits_starts_once_after_wf_retry` |
 | A process that holds a slot dies | The operating system releases the lock, and an attempt that waits can take the slot. | `workflow/capacity.py:74` | `test_a_killed_process_frees_its_slot` |
-| A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:60` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
+| A process dies while its attempt waits | `wf status` says `stopped`, without `agents_waiting`. | `workflow/operate.py:61` | `test_a_killed_waiter_is_stopped_and_no_longer_waiting` |
 | Processes run with different caps | A cap of N uses slots 0 to N-1, so the total stays within the biggest cap. | `workflow/capacity.py:71` | `test_a_smaller_cap_uses_only_the_first_slots` |
 | A `wf run` or `wf retry` process starts | It reads the cap once, and keeps it until it ends. | `workflow/runner.py:82`, `workflow/runner.py:162` | `test_wf_run_and_wf_retry_read_the_cap_once_when_they_start` |
 
@@ -1335,7 +1338,7 @@ The tests named below are in `tests/test_workspaces.py`.
   output.json                   the end output, once the run succeeds
   status.json                   running | stall_detected | waiting | succeeded | failed | limit, and the latest follow-up's number
   events.jsonl                  one line per event: node started, finished, route taken, agent session started, override, ...
-  consumers/<name>.json         the last state sequence and event byte offset read by each consumer
+  consumers/<name>.json         the last state, sequence, follow-up number, and event byte offset for each consumer
   trace.jsonl                   one record per line of what the run read, decided and did (see The trace)
   blobs/                        values too long for a line of the trace, by their sha256
   export.json, export.lock      where wf metrics export stopped reading the trace, and its lock (see Export to ClickHouse)

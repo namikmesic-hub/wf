@@ -121,6 +121,50 @@ def test_a_terminal_write_between_state_and_event_reads_keeps_the_stall(repo, mo
         "status"] == "succeeded"
 
 
+def test_a_follow_up_between_state_and_event_reads_keeps_its_first_stall(repo, monkeypatch, capsys):
+    folder = waiting_run(capsys)
+    run = runs.Run.at(folder)
+    monkeypatch.setattr(firstmate, "POLL_SECONDS", 0)
+    original = operate.state
+
+    def continuing(found):
+        current = original(found)
+        found.set_status("succeeded", follow_up=1)
+        found.add_event({"event": "follow_up", "number": 1, "to": ["work"]})
+        found.add_event({"event": "stall_detected", "node": "work", "pass": 2, "attempt": 1})
+        monkeypatch.setattr(operate, "state", original)
+        return current
+
+    monkeypatch.setattr(operate, "state", continuing)
+    request = {"source_id": "continuing", "config_ref": f"wf-run:{folder}"}
+    result = json.loads(firstmate._poll(request)["output"])
+    assert (result["status"], result["follow_up"], result["stall"]["pass"]) == ("stall_detected", 1, 2)
+    assert json.loads(firstmate._poll(request)["output"])["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("notice", [False, True])
+def test_poll_reports_a_driver_stop_after_an_attention_stall(repo, monkeypatch, capsys, notice):
+    folder = waiting_run(capsys)
+    run = runs.Run.at(folder)
+    monkeypatch.setattr(firstmate, "POLL_SECONDS", 0)
+    monkeypatch.setattr(operate, "GRACE_SECONDS", 0)
+    monkeypatch.setattr(runs.Run, "driven", lambda self: True)
+    if notice:
+        run.add_event({"event": "stall_detected", "node": "work", "pass": 1, "attempt": 1})
+    run.set_status("stall_detected", stalls=[{"node": "work", "attempt": 1}])
+    request = invoke("source.poll", source_id="stalled", config_ref=f"wf-run:{folder}")
+    reply = call(monkeypatch, capsys, "invoke", request)
+    stalled = json.loads(reply["result"]["output"])
+    assert stalled["status"] == "stall_detected"
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+    monkeypatch.setattr(runs.Run, "driven", lambda self: False)
+    reply = call(monkeypatch, capsys, "invoke", request)
+    stopped = json.loads(reply["result"]["output"])
+    assert stopped["status"] == "stopped" and stopped["seq"] == stalled["seq"]
+    assert stopped["retry"] == run.command("retry")
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+
+
 def test_bounded_output_keeps_the_stall_notice():
     state = {"run": "r", "status": "stall_detected", "current_status": "waiting", "dir": "/run",
              "stall": {"node": "work", "attempt": 1, "action": "retry"},
