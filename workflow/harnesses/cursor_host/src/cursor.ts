@@ -26,6 +26,7 @@ import {
   type Content, type ErrorInfo, type Usage, type Wire,
 } from "./protocol.ts";
 import { effective, resolveModel, type Resolved } from "./models.ts";
+import { cachedCatalog } from "./catalog.ts";
 
 type Sdk = typeof import("@cursor/sdk");
 
@@ -70,9 +71,22 @@ function needKey(apiKey: string | null): string {
 
 async function catalog(sdk: Sdk, apiKey: string): Promise<ModelListItem[]> {
   try {
-    return await sdk.Cursor.models.list({ apiKey });
+    return await retryRateLimit(() => sdk.Cursor.models.list({ apiKey }));
   } catch (error) {
     throw new HostError(classify(error));
+  }
+}
+
+export async function retryRateLimit<T>(action: () => Promise<T>, wait = sleep): Promise<T> {
+  const delays = [5_000, 10_000, 20_000];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      if (classify(error).code !== "cursor.rate_limit" || attempt === delays.length) throw error;
+      log(`Cursor rate limit. Try again in ${delays[attempt] / 1000} seconds.`);
+      await wait(delays[attempt]);
+    }
   }
 }
 
@@ -151,7 +165,10 @@ export class CursorSession {
     this.allowed = access.tools ? new Set(access.tools) : null;
     this.ownMcpOnly = args.only_given_tools === true || args.access !== "full";
     this.tools(Array.isArray(args.tools) ? args.tools : []);
-    this.resolved = resolveModel(args.model, await catalog(sdk, apiKey));
+    const models = await cachedCatalog(apiKey, () => catalog(sdk, apiKey));
+    this.resolved = resolveModel(args.model, models);
+    // SDK 1.0.38 reads this catalog for its own model check.
+    process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON = JSON.stringify(models);
     const start = (args.start ?? { kind: "fresh" }) as Record<string, unknown>;
     const options = {
       apiKey,
@@ -173,10 +190,10 @@ export class CursorSession {
     try {
       if (start.kind === "load") {
         if (typeof start.from !== "string") throw fail("invalid", "protocol.start", "start: load needs `from`");
-        this.agent = await sdk.Agent.resume(start.from, options);
+        this.agent = await retryRateLimit(() => sdk.Agent.resume(start.from as string, options));
         this.force = true; // a host that died mid-turn leaves that run active in the store
       } else {
-        this.agent = await sdk.Agent.create(options);
+        this.agent = await retryRateLimit(() => sdk.Agent.create(options));
       }
     } catch (error) {
       throw new HostError(classify(error));
@@ -475,11 +492,15 @@ export function fromTokens(tokens: TokenUsage | undefined): Usage {
 // The protocol's class for an error the SDK threw.
 export function classify(error: unknown): ErrorInfo {
   if (error instanceof HostError) return error.info;
-  const e = (error ?? {}) as { name?: string; message?: string; code?: string; isRetryable?: boolean };
+  const e = (error ?? {}) as { name?: string; message?: string; code?: string; isRetryable?: boolean; status?: number };
   const name = typeof e.name === "string" ? e.name : "";
   const message = typeof e.message === "string" && e.message ? e.message : String(error);
   const code = typeof e.code === "string" ? e.code : "";
   const retryable = e.isRetryable === true;
+  if (/rate[ _-]?limit|too many requests|requests per minute/i.test(message)
+      || (e.status === 429 && !/usage|quota|payment|plan/i.test(message))) {
+    return { class: "transient", code: "cursor.rate_limit", message, retryable: true, retry_after_s: RETRY_AFTER_S };
+  }
   switch (name) {
     case "AuthenticationError":
       return { class: "auth", code: "cursor.auth", message: `Cursor refused the API key: ${message}`, retryable: false };

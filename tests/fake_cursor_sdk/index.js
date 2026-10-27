@@ -142,6 +142,7 @@ export const Cursor = {
     async list(options = {}) {
       log("models.list", { api_key: options.apiKey ?? null });
       checkKey(options.apiKey);
+      if (SCENARIO.catalog_errors?.length) throw made(SCENARIO.catalog_errors.shift());
       return SCENARIO.catalog ?? CATALOG;
     },
   },
@@ -158,9 +159,11 @@ function never() {
 export const Agent = {
   async create(options) {
     log("create", plain(options));
+    log("local.catalog", JSON.parse(process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON ?? "null"));
     if (SCENARIO.silent_create) await never();
     checkKey(options.apiKey);
     if (SCENARIO.create_error) throw made(SCENARIO.create_error);
+    if (SCENARIO.create_errors?.length) throw made(SCENARIO.create_errors.shift());
     const catalog = SCENARIO.catalog ?? CATALOG;
     if (!catalog.some((m) => m.id === options.model?.id)) {
       throw new ConfigurationError(`Cannot use this model: ${options.model?.id}. Available models: ${catalog.map((m) => m.id).join(", ")}.`);

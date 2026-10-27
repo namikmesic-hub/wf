@@ -311,6 +311,22 @@ def test_without_settings_the_model_lists_defaults_are_used_not_your_codex_confi
     assert run() == 0
     (thread,) = sent(log, "thread/start")
     assert (thread["model"], thread["config"]["model_reasoning_effort"]) == ("gpt-b", "low")
+    assert sent(log, "model/list") == [{}]
+
+
+def test_a_pinned_model_and_effort_need_no_model_list(repo, monkeypatch):
+    log = codex(monkeypatch, repo, [GOOD], silent=["model/list"])
+    assert run("model: gpt-pinned\neffort: high\n") == 0
+    assert sent(log, "model/list") == []
+    (thread,) = sent(log, "thread/start")
+    assert (thread["model"], thread["config"]["model_reasoning_effort"]) == ("gpt-pinned", "high")
+
+
+@pytest.mark.parametrize("settings", ["model: gpt-a\n", "effort: high\n"])
+def test_a_missing_model_or_effort_needs_the_model_list(repo, monkeypatch, settings):
+    log = codex(monkeypatch, repo, [GOOD])
+    assert run(settings) == 0
+    assert sent(log, "model/list") == [{}]
 
 
 def test_a_model_with_no_known_effort_warns_that_your_codex_config_decides(repo, monkeypatch, capsys):

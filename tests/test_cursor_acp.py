@@ -345,21 +345,44 @@ def test_a_reminder_is_another_prompt_in_the_same_session(repo, monkeypatch):
     assert prompts[1]["prompt"][0]["text"] == REMINDER
 
 
-def test_a_model_cursor_does_not_list_is_unavailable_and_the_next_harness_runs(repo, monkeypatch, capsys):
-    from fakes import Fake, submit
+@pytest.mark.parametrize("model", ["composer-2.5", "composer-2.5[fast=true]"])
+def test_a_pinned_model_needs_no_model_list(repo, monkeypatch, model):
+    log = cursor(monkeypatch, repo, [GOOD])
+    assert run(f"model: {model}\n") == 0
+    assert entries(log, "list-models") == []
+    assert entries(log, "start")[0]["args"][:2] == ["--model", model]
+
+
+def test_an_explicit_model_check_refuses_an_unknown_model(repo, monkeypatch):
     log = cursor(monkeypatch, repo, models=["composer-2.5"])
-    claude = Fake("claude-code", submit({"summary": "from claude"}))
-    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", claude.factory)
-    assert run("harness: [cursor, claude-code]\nmodel: {cursor: claude-fable-9-max, claude-code: opus}\n") == 0
-    assert output() == {"out": "from claude"}
-    assert "Cursor has no model `claude-fable-9-max`" in capsys.readouterr().out
-    assert entries(log, "start") == []  # no cursor-agent was started for it
+
+    async def check():
+        harness = harnesses.create("cursor")
+        await harness.open(repo / "run")
+        try:
+            with pytest.raises(harnesses.Unavailable, match="Cursor has no model `claude-fable-9-max`"):
+                await harness.check_model("claude-fable-9-max")
+        finally:
+            await harness.close()
+
+    asyncio.run(check())
+    assert len(entries(log, "list-models")) == 1
+    assert entries(log, "start") == []
 
 
-def test_a_cursor_agent_that_is_not_logged_in_is_unavailable(repo, monkeypatch, capsys):
+def test_a_cursor_agent_that_is_not_logged_in_is_unavailable(repo, monkeypatch):
     cursor(monkeypatch, repo, logged_out=True)
-    assert run() == 1
-    assert "cursor is unavailable: `cursor-agent --list-models` failed (is it logged in? `cursor-agent login`)" in capsys.readouterr().out
+
+    async def check():
+        harness = harnesses.create("cursor")
+        await harness.open(repo / "run")
+        try:
+            with pytest.raises(harnesses.Unavailable, match="list-models.*failed"):
+                await harness.check_model("composer-2.5")
+        finally:
+            await harness.close()
+
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize("notice", [

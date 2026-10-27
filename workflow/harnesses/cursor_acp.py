@@ -70,9 +70,9 @@ Cursor would save.
 - full: everything is allowed.
 Web search and fetch follow `web` at every level.
 
-The model must be one `cursor-agent --list-models` lists (read when the harness
-opens); any other makes the session unavailable, so a fallback harness takes
-over. `effort` isn't used: Cursor model ids carry their own.
+An explicit model goes to cursor-agent without a model list call.
+The explicit model check calls `cursor-agent --list-models`.
+`effort` is not used because Cursor model ids carry their own.
 
 How a turn ends: Cursor reports a failed request as a paragraph it adds at
 the end of the turn's last message, with stopReason end_turn, not as an error.
@@ -187,7 +187,6 @@ class CursorAcp:
         self.home = workspaces.temp_root(Path(run_dir).name) / "cursor-agent"
         self.home.mkdir(parents=True, exist_ok=True)
         self.saved = workspaces.saved_sessions(Path(run_dir), "cursor-agent")
-        self.models = await self._list_models()
         installed = await self._version()
         if installed and installed != TESTED:
             self.warning = (f"cursor-agent {installed} is installed; wf is tested with {TESTED}, "
@@ -196,11 +195,13 @@ class CursorAcp:
         await self.tools.start()
 
     async def check_model(self, model: str | None, access: str = "read-only") -> None:
+        self.models = await self._list_models()
         if model is not None and model not in self.models:
             raise Unavailable(f"Cursor has no model `{model}`: `cursor-agent --list-models` lists the ones you can use")
 
     async def session(self, spec: SessionSpec) -> "CursorSession":
-        await self.check_model(spec.model)
+        if not spec.model:
+            raise Unavailable("Cursor needs a model")
         if self.warning:
             spec.emit({"event": "warning", "message": self.warning})
             self.warning = None

@@ -126,6 +126,50 @@ def test_the_hosts_own_tests_pass():
 
 
 @needs_node
+def test_pinned_and_bracket_sessions_share_the_catalog_but_checks_fetch_it(tmp_path, monkeypatch, cursor_host):
+    log = use(monkeypatch, tmp_path, cursor_host)
+
+    async def main():
+        harness = harnesses.create("cursor")
+        await harness.open(tmp_path / "run")
+        tool = ResultTool(schemas.object_schema({"summary": {"type": "string"}}))
+        try:
+            for model in ("composer-2.5", "composer-2.5[fast=true]"):
+                spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model=model, effort=None,
+                                   tool=tool, log=tmp_path / "attempt.log", emit=lambda event: None)
+                session = await harness.session(spec)
+                await session.close()
+            assert len(entries(log, "models.list")) == 1
+            assert all(catalog[0]["id"] == "composer-2.5" for catalog in entries(log, "local.catalog"))
+            await harness.check_model("composer-2.5")
+            assert len(entries(log, "models.list")) == 2
+        finally:
+            await harness.close()
+
+    asyncio.run(main())
+
+
+@needs_node
+@pytest.mark.parametrize("source", ["catalog_errors", "create_errors"])
+def test_cursor_rate_limits_retry_before_the_session_opens(repo, monkeypatch, cursor_host, source):
+    error = {"name": "ConfigurationError", "code": "resource_exhausted",
+             "message": "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint"}
+    log = use(monkeypatch, repo, cursor_host,
+              [{"tool": {"name": "submit_result", "arguments": {"summary": "hi"}}}], **{source: [error]})
+    Path("flow.yaml").write_text("""
+version: 1
+name: rate-limit
+defaults: {harness: cursor, harnesses: {cursor: {model: composer-2.5}}}
+start: {input: {}}
+nodes:
+  ask: {needs: [start], instruction: Say hi, retry: 0}
+end: {output: {out: "{{ ask.summary }}"}}
+""")
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert len(entries(log, "models.list" if source == "catalog_errors" else "create")) == 2
+
+
+@needs_node
 def test_a_model_check_asks_the_host_and_names_what_cursor_has(tmp_path, monkeypatch, cursor_host):
     use(monkeypatch, tmp_path, cursor_host)
 
