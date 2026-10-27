@@ -309,7 +309,7 @@ class Tracker:
         That is rules/print, or build[]/implement for the implement of each item together. With `cut`, the
         attempt of the workflow node around this one ended. So a step that ran in it failed."""
         self._read_again()
-        moving = status in ("running", None)
+        moving = status in ("running", "stall_detected", None)
         ahead = self.shape.topo.reachable(self._open(status))
         own = {node: _state(node, self.trace, ahead, moving, cut) for node in self.shape.order}
         inside: dict[str, list[str]] = {}
@@ -327,7 +327,7 @@ class Tracker:
         """The progress of the run so far. It counts the items that finished in the folder. Without
         `now`, the time is now, or the last event's while the run does not move."""
         self._read_again()
-        moving = status in ("running", None)
+        moving = status in ("running", "stall_detected", None)
         if now is None:
             now = _seconds(self.last) if not moving else time.time()
         shape, trace, folder = self.shape, self.trace, self.folder

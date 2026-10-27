@@ -202,7 +202,7 @@ def _checked_retry(run: runs.Run, workflows: list[spec.Workflow], name: str, ans
         return _refused(name, problems)
     if not _ended(run, state) and (problem := _signing_problem(workflows, _run_home(run, state))):
         print(f"{name}: {problem}", file=sys.stderr)
-        if run.status().get("status") == "running":  # a background driver: tell `wf wait` why it stopped
+        if run.status().get("status") in ("running", "stall_detected"):
             run.set_status("failed", error=problem)
         return 1
     if checked.found and ctx.script is None and (problems := asyncio.run(overrides.available(checked))):
@@ -459,8 +459,9 @@ async def _stream(ctx: RunContext, command) -> StateSnapshot:
                         run_stalls = list(stalls.values())
                         ctx.run.set_status("stall_detected", stalls=run_stalls,
                                            agents_waiting=list(ctx._agents_waiting.values()))
-                    elif event.get("event") == "stall_resolved":
-                        stalls.pop(key, None)
+                    elif (event.get("event") in ("stall_resolved", "session_ended", "attempt_failed", "harness_unavailable")
+                          and key in stalls):
+                        stalls.pop(key)
                         ctx.run.set_status("stall_detected" if stalls else "running", stalls=list(stalls.values()),
                                            agents_waiting=list(ctx._agents_waiting.values()))
                     if (line := describe(event)) is not None:
@@ -774,7 +775,7 @@ def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapsho
     if status == "limit":
         return (f"run {run.id} is paused at a limit: continue it with "
                 f"{run.command('retry', limits.hint(run.status().get('limit')))}")
-    if status == "running":  # and no process drives it, since this one holds its lock
+    if status in ("running", "stall_detected"):  # no process drives it, since this one holds its lock
         return f"run {run.id} stopped before it ended: continue it with {run.command('retry')}"
     if status != "succeeded":
         return f"run {run.id} hasn't succeeded (its status is {status}), and only a run that succeeded takes a follow-up"

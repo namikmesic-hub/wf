@@ -309,12 +309,13 @@ async def _attempts(job: Job, ctx: RunContext, emit,
     stall = getattr(ctx.workflow.nodes[node_id], "stall", None) if any(harnesses) else None
     stall_used = 0
     for position, harness in enumerate(harnesses):
+        first_on_harness = number
         tries = 0
         while tries <= retry:
             if number > first and (reason := ctx.limit_reached()):
                 raise _limit_stop(error, number, reason)
             on = {"harness": harness} if harness else {}
-            fallback = {"fallback": True} if position and not tries and not handed_over else {}
+            fallback = {"fallback": True} if position and number == first_on_harness and not handed_over else {}
             handed_over = False
             deadline, wait = None, 0
             try:

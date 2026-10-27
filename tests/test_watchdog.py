@@ -302,3 +302,147 @@ def test_sleep_resets_the_watchdog_without_resetting_the_measured_progress_gap(m
     clock.advance(200)
     result = finished(clock, watch)
     assert (result["asleep_s"], result["idle_s"], result["active_s"], result["longest_gap_s"]) == (3600, 400, 0, 400)
+
+
+def test_progress_clears_attention_and_arms_the_watchdog_again(measured):
+    clock, watch, events = measured
+    watch.event({"event": "session_started"})
+    clock.advance(20)
+    watch.check()
+    assert watch.alerted
+    watch.text("The tool answered.")
+    assert not watch.alerted
+    assert next(event for event in events if event["event"] == "stall_resolved")["action"] == "progress"
+    clock.advance(19)
+    watch.check()
+    assert not watch.alerted
+    clock.advance(1)
+    watch.check()
+    assert sum(event["event"] == "stall_detected" for event in events) == 2
+
+
+@pytest.mark.parametrize("action", ["attention", "retry", "fallback"])
+def test_an_attempt_end_clears_its_stall(measured, action):
+    clock, watch, events = measured
+    watch.policy = watch.policy.model_copy(update={"then": action})
+    watch.event({"event": "session_started"})
+    clock.advance(20)
+    watch.check()
+    assert watch.alerted
+    finished(clock, watch)
+    assert not watch.alerted
+    assert [event["action"] for event in events if event["event"] == "stall_resolved"] == ["attempt_end"]
+
+
+def test_streamed_progress_keeps_its_latest_time_with_bounded_writes(measured):
+    clock, watch, events = measured
+    watch.event({"event": "session_started"})
+    for _ in range(2000):
+        clock.advance(0.001)
+        watch.event({"event": "progress", "source": "thinking"})
+        watch.check()
+    result = finished(clock, watch)
+    written = [event for event in events if event["event"] == "progress"]
+    traced = [event for event in watch.record.signals if event["event"] == "progress"]
+    assert len(written) <= 4 and len(traced) == len(written)
+    assert written[-1]["last_progress_at"] == watchdog.timestamp(clock.wall) == result["last_progress_at"]
+    assert result["active_s"] == pytest.approx(2)
+    assert result["idle_s"] == 0 and not watch.alerted
+
+
+def test_a_delayed_progress_write_does_not_extend_the_watchdog_window(measured):
+    clock, watch, events = measured
+    watch.event({"event": "session_started"})
+    clock.advance(0.1)
+    watch.text("A piece of text")
+    last = watchdog.timestamp(clock.wall)
+    clock.advance(20)
+    watch.check()
+    assert watch.alerted
+    alert = next(event for event in events if event["event"] == "stall_detected")
+    assert alert["last_progress_at"] == last
+    assert alert["awake_s"] == pytest.approx(20)
+
+
+def test_a_stall_retry_on_a_later_harness_is_not_a_fallback(repo, monkeypatch, capsys):
+    fast(monkeypatch)
+    first = Fake("claude-code", ends("failed", "try the next harness"))
+    second = Fake("codex", hang(), submit({"ok": True}))
+    install(monkeypatch, first, second)
+    assert cli.main(["run", flow(node("retry", retry=0, harness="[claude-code, codex]"))]) == 0
+    assert capsys.readouterr().out.count("falling back to codex") == 1
+    events = [json.loads(line) for line in (run_dir() / "events.jsonl").read_text().splitlines()]
+    attempts = [event for event in events if event["event"] == "attempt_started"]
+    assert [(event["attempt"], event.get("fallback", False)) for event in attempts] == [(2, True), (3, False)]
+    records = [json.loads(line) for line in (run_dir() / "trace.jsonl").read_text().splitlines()]
+    assert [(record["attempt"], record.get("fallback", False)) for record in records if record["kind"] == "attempt"] == [
+        (1, False), (2, True), (3, False)]
+
+
+@pytest.mark.parametrize("ended", ["session_ended", "attempt_failed", "harness_unavailable", "stall_resolved"])
+def test_the_driver_removes_an_ended_attempt_from_its_stall_state(repo, monkeypatch, ended):
+    from types import SimpleNamespace
+    from workflow import operate, runner
+
+    flow(node("retry"))
+    run = runs.create(Path.cwd(), "agents", [Path("flow.yaml")], Path("flow.yaml"), {})
+    place = {"node": "work", "pass": 1, "attempt": 1, "harness": "claude-code"}
+
+    class Compiled:
+        async def aget_state(self, config):
+            return SimpleNamespace(values={})
+
+        async def astream(self, *args, **kwargs):
+            yield {"event": "stall_detected", **place, "action": "retry"}
+            assert run.status()["status"] == "stall_detected"
+            assert operate.wait(run, 0, consumer="test")["status"] == "stall_detected"
+            yield {"event": ended, **place, "error": "stalled", "next": None}
+            assert run.status()["status"] == "running"
+            assert run.status()["stalls"] == []
+            yield {"event": "attempt_started", **place, "attempt": 2}
+            yield {"event": "progress", **place, "attempt": 2, "source": "text"}
+            yield {"event": "session_ended", **place, "attempt": 2}
+            assert operate.wait(run, 0, consumer="test") is None
+
+    async def close():
+        pass
+
+    ctx = SimpleNamespace(run=run, _agents_waiting={}, new_event_loop=lambda: None, resume=lambda values: None,
+                          trace=SimpleNamespace(know=lambda callback: None), steering=steer.Steering(), close_harnesses=close)
+    monkeypatch.setattr(runner.graph, "build", lambda saver: Compiled())
+    with run.driving():
+        asyncio.run(runner._stream(ctx, None))
+
+
+def test_one_attempt_cannot_clear_a_siblings_stall(repo, monkeypatch):
+    from types import SimpleNamespace
+    from workflow import runner
+
+    flow(node("attention"))
+    run = runs.create(Path.cwd(), "agents", [Path("flow.yaml")], Path("flow.yaml"), {})
+    place = {"pass": 1, "attempt": 1}
+
+    class Compiled:
+        async def aget_state(self, config):
+            return SimpleNamespace(values={})
+
+        async def astream(self, *args, **kwargs):
+            yield {"event": "stall_detected", **place, "node": "work", "action": "attention"}
+            yield {"event": "stall_detected", **place, "node": "sibling", "action": "attention"}
+            yield {"event": "session_ended", **place, "node": "work"}
+            current = run.status()
+            assert current["status"] == "stall_detected"
+            assert [stall["node"] for stall in current["stalls"]] == ["sibling"]
+            yield {"event": "stall_resolved", **place, "node": "work", "action": "attempt_end"}
+            assert run.status()["seq"] == current["seq"]
+            yield {"event": "session_ended", **place, "node": "sibling"}
+            assert run.status()["status"] == "running"
+
+    async def close():
+        pass
+
+    ctx = SimpleNamespace(run=run, _agents_waiting={}, new_event_loop=lambda: None, resume=lambda values: None,
+                          trace=SimpleNamespace(know=lambda callback: None), steering=steer.Steering(), close_harnesses=close)
+    monkeypatch.setattr(runner.graph, "build", lambda saver: Compiled())
+    with run.driving():
+        asyncio.run(runner._stream(ctx, None))

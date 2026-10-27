@@ -59,7 +59,7 @@ STATIC = {"/": ("page.html", "text/html"), "/page.js": ("page.js", "text/javascr
 FILES = re.compile(r"instruction\.md|output\.json|session\.json|attempt-\d+\.log")
 POLICY = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; "
           "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-MOVING = ("running", "waiting")  # the runs whose progress the list shows
+MOVING = ("running", "stall_detected", "waiting")  # the runs whose progress the list shows
 
 
 class Source:
@@ -233,7 +233,7 @@ class _View:
     def metrics(self, status: str | None) -> dict:
         """The numbers of `wf report`, with what each pass that runs has done so far. That is until now,
         or until the last event while the run doesn't move."""
-        now = time.time() if status in ("running", None) or self.last is None else observe.timestamp(self.last)
+        now = time.time() if status in ("running", "stall_detected", None) or self.last is None else observe.timestamp(self.last)
         found = self.tally.report(now)
         return {"run": found["runs"][0], "nodes": found["nodes"], "notes": found["notes"]}
 

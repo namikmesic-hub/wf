@@ -11,6 +11,7 @@ from .harnesses.base import Recorder
 from .spec import seconds
 
 POLL_SECONDS = 0.2
+PROGRESS_SECONDS = 1.0
 ACTIVE_GAP = 300
 SLEEP_GAP = 60
 
@@ -64,6 +65,8 @@ class Watchdog(Recorder):
         self.alerted = False
         self.stop = asyncio.Event()
         self.action = "end"
+        self._pending_progress = None
+        self._progress_written = None
 
     def _write(self, kind, **data):
         self.record.signal(kind, **data)
@@ -104,7 +107,23 @@ class Watchdog(Recorder):
         self.last = self.before[0]
         self.window = self.awake
         self.retrying = False
-        self._write("progress", source=source, last_progress_at=timestamp(self.last))
+        self._pending_progress = {"source": source, "last_progress_at": timestamp(self.last)}
+        if self.alerted and not self.stop.is_set():
+            self._clear("progress")
+            self.tools = dict.fromkeys(self.tools, self.awake)
+        self._write_progress(force=source in ("session_start", "tool_start", "tool_end", "turn_end"))
+
+    def _write_progress(self, force=False):
+        if self._pending_progress is not None and (force or self._progress_written is None
+                                                  or self.awake - self._progress_written >= PROGRESS_SECONDS):
+            pending, self._pending_progress = self._pending_progress, None
+            self._progress_written = self.awake
+            self._write("progress", **pending)
+
+    def _clear(self, action):
+        if self.alerted:
+            self.alerted = False
+            self._write("stall_resolved", action=action)
 
     def event(self, event):
         kind = event.get("event")
@@ -136,8 +155,9 @@ class Watchdog(Recorder):
         self.record.request(request_id)
 
     def tool_call(self, call, tool, arguments):
-        self.progress("tool_start")
-        self.tools.setdefault(str(call), self.awake)
+        if str(call) not in self.tools:
+            self.progress("tool_start")
+            self.tools[str(call)] = self.awake
         self.record.tool_call(call, tool, arguments)
 
     def tool_result(self, call, result, is_error=False, kept=True, characters=None):
@@ -147,7 +167,9 @@ class Watchdog(Recorder):
         self.record.tool_result(call, result, is_error, kept, characters)
 
     def check(self):
-        if self.sample() or not self.session or self.policy is None or self.alerted:
+        slept = self.sample()
+        self._write_progress()
+        if slept or not self.session or self.policy is None or self.alerted:
             return
         policy = self.policy
         if self.tools:
@@ -159,6 +181,7 @@ class Watchdog(Recorder):
             return
         self.alerted = True
         self.detected = timestamp(self.before[0])
+        self._write_progress(force=True)
         self._write("stall_detected", silent_wall_s=max(0.0, self.before[0] - self.last), awake_s=quiet,
                     last_progress_at=timestamp(self.last), action=policy.then, threshold=reason)
         if policy.then != "attention":
@@ -169,12 +192,11 @@ class Watchdog(Recorder):
         if not self.alerted or action not in ("end", "wait"):
             return False
         self.sample()
-        self._write("stall_resolved", action=action)
+        self._clear(action)
         if action == "end":
             self.action = action
             self.stop.set()
         else:
-            self.alerted = False
             self.window = self.awake
             self.tools = dict.fromkeys(self.tools, self.awake)
         return True
@@ -215,6 +237,8 @@ class Watchdog(Recorder):
     def finish(self, wall_s):
         self.sample()
         self._flush()
+        self._write_progress(force=True)
+        self._clear("attempt_end")
         # Keep the split equal to the trace's wall time at millisecond precision.
         total = sum(self.parts.values())
         if total > wall_s and total:

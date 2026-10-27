@@ -277,6 +277,7 @@ class CursorSession:
         self.turn = False  # updates count only while a turn runs (session/load replays history)
         self.calls: dict[str, dict] = {}  # tool calls in progress, as their updates describe them
         self.text = ""  # the agent's message since the last tool call
+        self.thought = ""
         self.succeeded = False  # a turn ended with a result: the attempt has its result
         # Marks a continued session while an attempt that continued it has no result
         self.continuing = harness.home / "continuing" / spec.fork_from if spec.fork_from else None
@@ -381,11 +382,18 @@ class CursorSession:
         if not self.turn:
             return
         if kind == "agent_message_chunk":
+            if self.thought:
+                self._flush()
             if (update.get("content") or {}).get("text"):
                 self.spec.emit({"event": "progress", "source": "text"})
             self.text += (update.get("content") or {}).get("text") or ""
         elif kind == "agent_thought_chunk":
-            self.spec.trace.thinking((update.get("content") or {}).get("text") or "", None)
+            if self.text:
+                self._flush()
+            text = (update.get("content") or {}).get("text") or ""
+            if text:
+                self.spec.emit({"event": "progress", "source": "thinking"})
+                self.thought += text
         elif kind in ("tool_call", "tool_call_update"):
             self._flush()
             self._tool_call(update)
@@ -428,6 +436,9 @@ class CursorSession:
             self.spec.trace.tool_call(call_id, _label(call), arguments)
 
     def _flush(self) -> None:
+        if self.thought:
+            self.spec.trace.thinking(self.thought, None)
+            self.thought = ""
         if self.text.strip():
             transcript(self.spec.log, "text", text=self.text)
             self.spec.trace.text(self.text)

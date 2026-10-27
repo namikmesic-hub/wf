@@ -353,7 +353,8 @@ def test_a_run_that_waits_or_failed_is_refused_and_stays_as_it_was(repo, capsys,
 def test_a_run_at_a_limit_or_one_that_stopped_is_refused(repo, capsys):
     run = ran(capsys)
     for state, details, why in (("limit", {"limit": "tokens"}, f"is paused at a limit: continue it with wf retry {run.id} --limit tokens=<more>"),
-                                ("running", {}, f"stopped before it ended: continue it with wf retry {run.id}")):
+                                ("running", {}, f"stopped before it ended: continue it with wf retry {run.id}"),
+                                ("stall_detected", {}, f"stopped before it ended: continue it with wf retry {run.id}")):
         run.set_status(state, **details)
         assert cli.main(["continue", run.id, "more"]) == 1
         assert capsys.readouterr().err == f"wf continue: run {run.id} {why}\n"

@@ -558,10 +558,12 @@ def _describe(current: dict) -> str:
         detail = f"stopped: {current.get('reason')} ({current.get('retry')})"
     elif status == "limit":
         detail = f"paused at a limit: {current.get('reason')} ({current.get('retry')})"
-    elif status == "running" and current.get("agents_waiting"):
-        detail = "running, waiting for an agent slot: " + ", ".join(w["node"] for w in current["agents_waiting"])
+    elif status == "stall_detected":
+        detail = "running, no progress: " + ", ".join(observe.where(stall) for stall in current.get("stalls", []))
     else:
         detail = status
+    if status in ("running", "stall_detected") and current.get("agents_waiting"):
+        detail += ", waiting for an agent slot: " + ", ".join(w["node"] for w in current["agents_waiting"])
     return f"{run_id} [{current.get('workflow')}]: {detail}" + (f" (follow-up {n})" if (n := current.get("follow_up")) else "")
 
 

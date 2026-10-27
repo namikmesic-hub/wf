@@ -719,3 +719,27 @@ def test_a_message_for_cursor_is_dropped_when_the_agent_submits_first(repo, monk
     queued, dropped = steer_events()
     assert (queued["status"], dropped["status"]) == ("queued", "dropped")
     assert dropped["reason"] == "the agent submitted its result before it read the message"
+
+
+def test_thought_chunks_form_one_block_and_keep_live_progress(tmp_path):
+    from workflow.harnesses.base import Recorder
+    from workflow.harnesses.cursor_acp import CursorSession
+
+    class Thinking(Recorder):
+        def __init__(self):
+            self.blocks = []
+
+        def thinking(self, text, duration_ms):
+            self.blocks.append((text, duration_ms))
+
+    events, trace = [], Thinking()
+    settings = SessionSpec(cwd=tmp_path, access="read-only", web=False, model=None, effort=None,
+                           tool=ResultTool({}), log=tmp_path / "attempt.log", emit=events.append, trace=trace)
+    session = CursorSession(CursorAcp(), settings)
+    session.turn = True
+    for _ in range(100):
+        session.update({"update": {"sessionUpdate": "agent_thought_chunk", "content": {"text": "x"}}})
+    assert trace.blocks == []
+    assert len(events) == 100 and all(event == {"event": "progress", "source": "thinking"} for event in events)
+    session.update({"update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "Done"}}})
+    assert trace.blocks == [("x" * 100, None)]

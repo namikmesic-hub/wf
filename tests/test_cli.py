@@ -155,3 +155,9 @@ def test_examples_are_copied_out_and_valid(tmp_path, monkeypatch, capsys):
     assert cli.main(["validate", "wf-examples/feature.yaml"]) == 0
     assert cli.main(["examples"]) == 0  # again: nothing is overwritten
     assert "already exists" in capsys.readouterr().out
+
+
+def test_a_stall_status_names_the_live_node_and_the_agent_slot_wait():
+    current = {"status": "stall_detected", "run": "run-id", "workflow": "flow",
+               "stalls": [{"node": "sub/work", "index": 2}], "agents_waiting": [{"node": "next"}]}
+    assert cli._describe(current) == "run-id [flow]: running, no progress: sub/work[2], waiting for an agent slot: next"
