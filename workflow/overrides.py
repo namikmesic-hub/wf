@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import harnesses, templates, workspaces
+from . import harnesses, scheduler, state, templates, workspaces
 from .spec import HARNESSES, Workflow
 
 SETTINGS = ("harness", "model", "effort")
@@ -183,7 +183,32 @@ class Checked:
     access: dict[str, str] = field(default_factory=dict)  # by target: its node's access level, which can decide the runtime
 
 
-def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: dict) -> Checked:
+def check_start(given: dict[str, dict[str, str]], workflows: list[Workflow], inputs: dict) -> Checked:
+    """Check overrides before a run starts, with items that its start input can define."""
+    workflow = workflows[0]
+    progress = state.Progress({}, workflow, scheduler.Topology.of(workflow), lambda event: None)
+    progress.begin(inputs, {})
+    variables = progress.vars()
+    for key in given:
+        node_id, _ = split(key)
+        node = workflow.nodes.get(node_id)
+        if node is None or node.kind != "agent":
+            continue
+        items = None
+        if node.for_each is not None:
+            try:
+                items = templates.evaluate(node.for_each, variables)
+            except templates.TemplateError:
+                continue
+            if not isinstance(items, (list, tuple)):
+                continue
+            items = list(items)
+        progress.s["active"][node_id] = {"items": items, "vars": variables, "outputs": {}}
+    return check(given, workflows, progress.s, before_start=True)
+
+
+def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: dict,
+          *, before_start: bool = False) -> Checked:
     """The overrides, each with its harness filled in, what is wrong with them, and the models to check.
     Here workflows holds the run's copies, its own workflow first, and values holds its state (state.RunState)."""
     workflow, checked = workflows[0], Checked()
@@ -193,11 +218,11 @@ def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: d
         jobs = _jobs(values, node_id, index) if problem is None else {}
         harness = None
         if problem is None:
-            harness, problem = _harness(key, node_id, index, settings, workflow, jobs)
+            harness, problem = _harness(key, node_id, index, settings, workflow, jobs, before_start=before_start)
         override = {"harness": harness, "model": settings.get("model"), "effort": settings.get("effort")}
         models = None
         if problem is None:
-            models, problem = _models(key, node_id, override, workflow, jobs)
+            models, problem = _models(key, node_id, override, workflow, jobs, before_start=before_start)
         if problem is not None:
             checked.problems.append(problem)
             continue
@@ -253,9 +278,9 @@ def _jobs(values: dict, node_id: str, index: int | None) -> dict[str, dict]:
 
 
 def _harness(key: str, node_id: str, index: int | None, settings: dict[str, str], workflow: Workflow,
-             jobs: dict[str, dict]) -> tuple[str | None, str | None]:
+             jobs: dict[str, dict], *, before_start: bool = False) -> tuple[str | None, str | None]:
     """(the harness the override runs its target on, None), or (None, why it can't)."""
-    own = _own_harness(workflow, node_id, index, jobs)
+    own = _own_harness(workflow, node_id, index, jobs, before_start=before_start)
     harness = settings.get("harness") or own
     if harness is None:
         how = "from a list" if isinstance(workflow.setting(node_id, "harness"), list) else "with a template"
@@ -278,7 +303,8 @@ def _harness(key: str, node_id: str, index: int | None, settings: dict[str, str]
     return harness, None
 
 
-def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict[str, dict]) -> str | None:
+def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict[str, dict],
+                 *, before_start: bool = False) -> str | None:
     """The one harness that the node names. When the target is one job still to run in the pass in progress, also
     the harness that the node's template gives that job, as nodes._agent renders it. None for a list, or when wf
     can't tell."""
@@ -291,7 +317,11 @@ def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict
     if not one_job or len(jobs) != 1:
         return None
     try:
-        return job_harnesses(workflow, node_id, {}, next(iter(jobs.values())))[0]
+        harness, reads = templates.watched(templates.render, own, next(iter(jobs.values())))
+        later = set(workflow.nodes) | {"run", "workspace", "history", "results", "errors"}
+        if before_start and any(read.path[0] in later for read in reads):
+            return None
+        return harness.strip()
     except templates.TemplateError:
         return None
 
@@ -302,7 +332,7 @@ def _for_harness(where: str | None, harness: str) -> bool:
 
 
 def _models(key: str, node_id: str, override: dict, workflow: Workflow,
-            jobs: dict[str, dict]) -> tuple[set[str] | None, str | None]:
+            jobs: dict[str, dict], *, before_start: bool = False) -> tuple[set[str] | None, str | None]:
     """The models of the target's jobs on the override's harness, as far as wf knows them now, or why one
     of them can't run. A job still to run in the pass in progress renders its settings as its next attempt
     will. Else wf takes the override's model, or the workflow's model when it isn't a template."""
@@ -311,7 +341,10 @@ def _models(key: str, node_id: str, override: dict, workflow: Workflow,
         models = set()
         for job, variables in jobs.items():
             try:
-                model, _ = job_setting(workflow, node_id, harness, override, variables)
+                if before_start:
+                    model = _start_model(workflow, node_id, override, variables)
+                else:
+                    model, _ = job_setting(workflow, node_id, harness, override, variables)
             except SettingError as error:
                 return None, f"{key}: {error}"
             except templates.TemplateError as error:
@@ -325,6 +358,36 @@ def _models(key: str, node_id: str, override: dict, workflow: Workflow,
         return models, None
     model = override["model"] or workflow.harness_setting(node_id, harness, "model")
     return ({model.strip()} if model is not None and "{{" not in model and "{%" not in model else set()), None
+
+
+def _start_model(workflow: Workflow, node_id: str, override: dict, variables: dict) -> str | None:
+    """Check each setting whose inputs exist, and leave the others for the node's pass."""
+    later = set(workflow.nodes) | {"run", "workspace", "history", "results", "errors"}
+    harness, known = override["harness"], {}
+    for name in (("model",) if harness == "cursor" else ("model", "effort")):
+        if override.get(name) is not None:
+            known[name] = override[name]
+            continue
+        reads = []
+
+        def render(field, source, variables, call=templates.render, **facts):
+            try:
+                value, used = templates.watched(call, source, variables)
+            except templates.TemplateError as error:
+                reads.extend(error.reads)
+                raise
+            reads.extend(used)
+            return value
+
+        try:
+            value = _rendered(workflow, node_id, harness, name, variables, render)
+        except (templates.TemplateError, SettingError):
+            if any(read.path[0] in later for read in reads):
+                continue
+            raise
+        if not any(read.path[0] in later for read in reads):
+            known[name] = value
+    return known.get("model")
 
 
 async def available(checked: Checked) -> list[str]:
