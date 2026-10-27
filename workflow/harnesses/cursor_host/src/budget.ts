@@ -1,9 +1,14 @@
 import { fail } from "./protocol.ts";
 
+export function rateLimitRetryAfter(): number {
+  return 60 + Math.floor(Math.random() * 16);
+}
+
 export class RequestBudget {
   private end: number;
   private now: () => number;
   private retryable = false;
+  private retryAfter = 30;
 
   constructor(ms = 54_000, now = () => performance.now()) {
     this.now = now;
@@ -12,11 +17,12 @@ export class RequestBudget {
 
   private expired() {
     return fail(this.retryable ? "transient" : "unavailable", "cursor.request_timeout", "Cursor's request time limit has expired. Try again.",
-      { retryable: this.retryable, ...(this.retryable ? { retry_after_s: 30 } : {}) });
+      { retryable: this.retryable, ...(this.retryable ? { retry_after_s: this.retryAfter } : {}) });
   }
 
-  retrying(): void {
+  retrying(retryAfter = rateLimitRetryAfter()): void {
     this.retryable = true;
+    this.retryAfter = retryAfter;
   }
 
   async run<T>(action: () => Promise<T>): Promise<T> {

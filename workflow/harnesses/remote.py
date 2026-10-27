@@ -34,8 +34,7 @@ How the operations map onto base.py's interfaces:
   steer.status event brings it. A message the runtime then declines goes back to the runner
   (given_back()), which sends it as the next turn, as it sends the ones that steer() returned None
   for. One that the runtime never answers for is unconfirmed when the session closes.
-- Session.close() is turn.cancel when a turn still runs, usage.read for the transcript, and
-  session.close.
+- Session.close() sends turn.cancel when a turn still runs, then session.close.
 
 Error classes, in an answer or in turn.ended: unavailable, auth and usage_limit make the harness
 unavailable for the attempt, so the runner goes to the node's next harness. An auth error's text
@@ -84,7 +83,6 @@ PROTOCOL = "wf-session/0"
 MAX_FRAME = 1024 * 1024
 STEER_TIMEOUT = 10  # seconds: inside the time `wf steer` waits for an answer (steer.py)
 CLOSE_TIMEOUT = 5  # seconds for each step of closing a session
-USAGE_TIMEOUT = 6  # seconds: the Cursor host gives Cursor 3 to answer, then answers without it
 RETRY_AFTER = 30  # seconds before the retry after a `transient` error that names no wait
 UNAVAILABLE = ("unavailable", "auth", "usage_limit", "not_found")
 CLOSED = {"kind": "peer.closed"}  # in a session's events: the peer is gone
@@ -615,9 +613,6 @@ class RemoteSession:
                     with contextlib.suppress(Exception):
                         await self.peer.request("turn.cancel", {"session": self.session}, timeout=CLOSE_TIMEOUT)
                         await asyncio.wait_for(self._turn_end(), CLOSE_TIMEOUT)
-                with contextlib.suppress(Exception):
-                    read = await self.peer.request("usage.read", {"session": self.session}, timeout=USAGE_TIMEOUT)
-                    transcript(self.spec.log, "usage", **read)
                 with contextlib.suppress(Exception):
                     await self.peer.request("session.close", {"session": self.session, "reason": "the attempt ended"},
                                             timeout=CLOSE_TIMEOUT)

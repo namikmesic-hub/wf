@@ -91,7 +91,8 @@ from .. import config, output_tool
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
 TESTED = "0.163.0"
-APP_SERVER = ["app-server", "--disable", "hooks", "--disable", "apps"]
+APP_SERVER = ["app-server", "--disable", "hooks", "--disable", "apps",
+              "--disable", "plugins"]
 SANDBOX = {"read-only": "read-only", "edit": "workspace-write", "full": "danger-full-access"}
 UNAVAILABLE = {"usageLimitExceeded", "unauthorized"}
 STEER_TIMEOUT = 10  # seconds for turn/steer: inside the time `wf steer` waits for an answer (steer.py)
