@@ -150,12 +150,21 @@ class ConnectionString(Kind):
 
 
 def key(kind: Kind, default: object = None, *, variable: str | None = None, flag: str | None = None,
-        none: str = "", secret: bool = False, blank_is_default: bool = False):
+        none: str = "", secret: bool = False, blank_is_default: bool = False, name: str | None = None):
     """A field that is a key: `none` says what no value means, for `wf config show`. A `secret` key's
     value is never in a message, and `wf config show` shows it masked. A blank variable counts as no
     variable, but with `blank_is_default` it gives the default, also over the file."""
     return field(default=default, metadata={"kind": kind, "variable": variable, "flag": flag, "none": none, "secret": secret,
-                                            "blank_is_default": blank_is_default})
+                                            "blank_is_default": blank_is_default, "name": name})
+
+
+@dataclass(frozen=True)
+class Capacity:
+    """[capacity]: optional caps on live agent sessions per harness."""
+
+    claude_code: int | None = key(Whole(1), variable="WF_MAX_AGENTS_CLAUDE_CODE", none="no cap", name="claude-code")
+    codex: int | None = key(Whole(1), variable="WF_MAX_AGENTS_CODEX", none="no cap")
+    cursor: int | None = key(Whole(1), variable="WF_MAX_AGENTS_CURSOR", none="no cap")
 
 
 @dataclass(frozen=True)
@@ -233,6 +242,7 @@ class Config:
     runs_dir: Path | None = key(Location(), variable="WF_RUNS_DIR", flag="--runs-dir", none=".wf/runs in each repo",
                                 blank_is_default=True)  # WF_RUNS_DIR= finds a run in .wf/runs (runs.Run.command)
     max_agents: int | None = key(Whole(1), variable="WF_MAX_AGENTS", none="no cap")
+    capacity: Capacity = field(default_factory=Capacity)
     claude: Claude = field(default_factory=Claude)
     cursor: Cursor = field(default_factory=Cursor)
     ui: UI = field(default_factory=UI)
@@ -250,7 +260,7 @@ class Config:
     def value(self, name: str) -> object:
         """A key's value by its name, as cursor.runtime."""
         section, _, leaf = name.rpartition(".")
-        return getattr(getattr(self, section) if section else self, leaf)
+        return getattr(getattr(self, section) if section else self, leaf.replace("-", "_"))
 
     def given(self, flags: Mapping[str, object]) -> "Config":
         """This configuration with the values of flags, by key name. A flag wins over each other source.
@@ -293,10 +303,13 @@ SECTIONS = {top.name: top.default_factory for top in fields(Config) if is_datacl
 def _keys() -> dict[str, Key]:
     found = {}
     for top in fields(Config):
-        members = [(f"{top.name}.{one.name}", one) for one in fields(top.type)] if top.name in SECTIONS else [(top.name, top)]
-        for name, one in members:
+        members = fields(top.type) if top.name in SECTIONS else (top,)
+        for one in members:
             if "kind" in one.metadata:
-                found[name] = Key(name, default=one.default, **one.metadata)
+                metadata = dict(one.metadata)
+                leaf = metadata.pop("name") or one.name
+                name = f"{top.name}.{leaf}" if top.name in SECTIONS else leaf
+                found[name] = Key(name, default=one.default, **metadata)
     return found
 
 
@@ -308,5 +321,5 @@ def build(values: Mapping[str, object], sources: Mapping[str, Source], file: Pat
     """A Config from each key's value, by name, and the values that the file sets."""
     parts = {name: values[name] for name in KEYS if not KEYS[name].section}
     for section, make in SECTIONS.items():
-        parts[section] = make(**{one.name: values[f"{section}.{one.name}"] for one in fields(make)})
+        parts[section] = make(**{one.name: values[f"{section}.{one.metadata['name'] or one.name}"] for one in fields(make)})
     return Config(**parts, file=file, sources=dict(sources), in_file=dict(in_file or {}))
