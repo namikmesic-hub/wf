@@ -85,7 +85,8 @@ def test_the_readme_gives_the_commands_and_the_url_of_the_example(wf_home):
 def test_the_dashboard_reads_the_database_of_the_example_through_one_datasource():
     dashboard = json.loads(DASHBOARD.read_text(encoding="utf-8"))
     database = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]["clickhouse"]["environment"]["CLICKHOUSE_DB"]
-    queries = [panel["targets"][0] for panel in dashboard["panels"]] + [variable["query"] for variable in dashboard["templating"]["list"]]
+    queries = ([panel["targets"][0] for panel in dashboard["panels"] if panel.get("targets")]
+               + [variable["query"] for variable in dashboard["templating"]["list"]])
     assert {target["datasource"]["uid"] for target in [*dashboard["panels"], *dashboard["templating"]["list"]]} == {"clickhouse"}
     assert all(set(re.findall(r"\bFROM (\w+)\.", query["rawSql"])) == {database} for query in queries)
 

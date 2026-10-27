@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
 
@@ -762,3 +763,40 @@ def test_a_render_reads_each_path_it_used_with_its_value(source, call, expected)
                  "history": {"implement": [{"ok": True}, {"ok": False}]}, "i": 1}
     _, reads = templates.watched(call, source, variables)
     assert [(templates.path_text(r.path), r.value) for r in reads] == expected
+
+
+@pytest.mark.parametrize("wall,awake,continuous,asleep", [
+    (620, 20, 620, 600),
+    (920, 20, 20, 0),
+    (-880, 20, 20, 0),
+    (20, 20, 20, 0),
+    (80, 20, 80, 0),
+])
+def test_attempt_clocks_separate_sleep_from_wall_clock_steps(tmp_path, monkeypatch, wall, awake, continuous, asleep):
+    clock = {"wall": 1_000_000.0, "awake": 100.0, "continuous": 100.0}
+    monkeypatch.setattr(trace.time, "time", lambda: clock["wall"])
+    monkeypatch.setattr(trace.time, "monotonic", lambda: clock["awake"])
+    monkeypatch.setattr(trace, "_continuous_clock", lambda: lambda: clock["continuous"])
+    monkeypatch.setattr(trace, "_now", lambda: datetime.fromtimestamp(clock["wall"], timezone.utc).isoformat(timespec="milliseconds"))
+    events = []
+    written = trace.Trace(tmp_path, events.append)
+    path = tmp_path / "flow.yaml"
+    path.write_text(COUNTED)
+    scope = trace.Scope(written, spec.load(path), spec.load)
+    attempt = scope.attempt({"node": "count", "pass_no": 1}, 1, None, command="true")
+    attempt.begin()
+    clock["wall"] += wall
+    clock["awake"] += awake
+    clock["continuous"] += continuous
+    attempt.end("succeeded")
+    found = [json.loads(line) for line in (tmp_path / "trace.jsonl").read_text().splitlines()]
+    ended = found[-1]
+    assert (ended["duration_basis"], ended["awake_s"], ended["asleep_s"]) == ("monotonic", awake, asleep)
+    sleeps = [record for record in found if record["kind"] == "host_slept"]
+    assert len(sleeps) == len(events) == bool(asleep)
+    if asleep:
+        assert events[0]["event"] == "host_slept"
+        assert sleeps[0]["asleep_s"] == asleep
+        assert (datetime.fromisoformat(sleeps[0]["ended"]) - datetime.fromisoformat(sleeps[0]["started"])).total_seconds() == asleep
+    written.check_clock()
+    assert len(events) == bool(asleep)

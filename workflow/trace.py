@@ -68,6 +68,9 @@ Writing the trace never stops a run. When wf can't write it, wf says so once,
 and the run continues.
 """
 
+import asyncio
+import ctypes
+import functools
 import hashlib
 import json
 import os
@@ -76,8 +79,9 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -105,14 +109,36 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
+@functools.cache
+def _continuous_clock() -> Callable[[], float]:
+    if sys.platform == "darwin":
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+
+        class Timebase(ctypes.Structure):
+            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+        base = Timebase()
+        library.mach_timebase_info(ctypes.byref(base))
+        library.mach_continuous_time.restype = ctypes.c_uint64
+        scale = base.numer / base.denom / 1_000_000_000
+        return lambda: library.mach_continuous_time() * scale
+    if hasattr(time, "CLOCK_BOOTTIME"):
+        return lambda: time.clock_gettime(time.CLOCK_BOOTTIME)
+    return time.monotonic
+
+
 class Trace:
     """A run's trace.jsonl and blobs/. One per process that drives the run."""
 
-    def __init__(self, folder: Path):
+    def __init__(self, folder: Path, on_sleep: Callable[[dict], None] | None = None):
         self.folder = Path(folder)
         self.hidden: set[str] = set()  # secret text found so far
         self._lock = threading.Lock()
         self._failed = False
+        self._continuous = _continuous_clock()
+        self._sample = (time.time(), time.monotonic(), self._continuous())
+        self.asleep_s = 0.0
+        self.on_sleep = on_sleep
 
     def hide(self, value: Any) -> None:
         """Remove the text of `value`, and of everything in it, from every later record."""
@@ -128,17 +154,61 @@ class Trace:
     def write(self, record: dict) -> None:
         try:
             with self._lock:
-                ready = self._ready(record)
-                try:
-                    line = (json.dumps(ready, ensure_ascii=False, default=str) + "\n").encode("utf-8")
-                except UnicodeEncodeError:  # text with a lone surrogate, which UTF-8 can't hold: escape all of it
-                    line = (json.dumps(ready, default=str) + "\n").encode("ascii")
-                with (self.folder / FILE).open("ab") as file:
-                    file.write(line)
+                self._check_clock()
+                self._append(record)
         except (OSError, ValueError, TypeError) as error:
-            if not self._failed:
-                self._failed = True
-                print(f"wf: can't write the run's trace ({error}). The run continues without it.", file=sys.stderr)
+            self._write_error(error)
+
+    def _append(self, record: dict) -> None:
+        ready = self._ready(record)
+        try:
+            line = (json.dumps(ready, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+        except UnicodeEncodeError:
+            line = (json.dumps(ready, default=str) + "\n").encode("ascii")
+        with (self.folder / FILE).open("ab") as file:
+            file.write(line)
+
+    def _write_error(self, error: Exception) -> None:
+        if not self._failed:
+            self._failed = True
+            print(f"wf: can't write the run's trace ({error}). The run continues without it.", file=sys.stderr)
+
+    def check_clock(self) -> None:
+        try:
+            with self._lock:
+                self._check_clock()
+        except (OSError, ValueError, TypeError) as error:
+            self._write_error(error)
+
+    def _check_clock(self) -> None:
+        current = (time.time(), time.monotonic(), self._continuous())
+        wall, awake, continuous = (now - before for now, before in zip(current, self._sample))
+        self._sample = current
+        slept = continuous - awake
+        if wall - awake > 60 and slept > 60:
+            self.asleep_s += slept
+            end = datetime.fromtimestamp(current[0]).astimezone()
+            event = {"started": (end - timedelta(seconds=slept)).isoformat(timespec="milliseconds"),
+                     "ended": end.isoformat(timespec="milliseconds"), "asleep_s": round(slept, 3)}
+            self._append({"kind": "host_slept", "id": f"run.sleep.{current[1]}", "parent": "run", **event})
+            if self.on_sleep is not None:
+                self.on_sleep({"event": "host_slept", **event})
+
+    @asynccontextmanager
+    async def watching(self):
+        async def poll():
+            while True:
+                await asyncio.sleep(30)
+                self.check_clock()
+
+        task = asyncio.create_task(poll())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            self.check_clock()
 
     def _ready(self, record: dict) -> dict:
         secrets = sorted(self.hidden | _everywhere, key=len, reverse=True)
@@ -544,6 +614,8 @@ class Attempt:
         self.id = f"{self.parent}.a{number}"
         self.place = {**place(job), "attempt": number}
         self.facts = {**({"harness": harness} if harness else {}), **facts}
+        scope.trace.check_clock()
+        self._asleep_start = scope.trace.asleep_s
         self.started, self._clock = _now(), time.monotonic()
         self._turn = 0
         self._calls: dict[str, str] = {}  # the harness's call id -> the trace's
@@ -556,8 +628,11 @@ class Attempt:
 
     def end(self, outcome: str, error: str | None = None) -> None:
         """outcome: succeeded, failed, timed_out, unavailable, limit, waiting or cancelled."""
+        self.scope.trace.check_clock()
+        awake = round(time.monotonic() - self._clock, 3)
         self.scope.write("attempt_end", self.id, self.parent, **self.place, **self.facts, started=self.started,
-                         ended=_now(), duration_s=round(time.monotonic() - self._clock, 1), outcome=outcome,
+                         ended=_now(), duration_s=round(awake, 1), duration_basis="monotonic", awake_s=awake,
+                         asleep_s=round(self.scope.trace.asleep_s - self._asleep_start, 3), outcome=outcome,
                          **({"error": error} if error else {}))
 
     async def turn(self, number: int, sends: str, text: str, sending) -> Any:

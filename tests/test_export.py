@@ -40,12 +40,14 @@ class Memory:
 
     def __init__(self, identity: str = "tables-1"):
         self.identity, self.inserts = identity, []
+        self.rows_written = 0
 
     def prepare(self) -> None:
         pass
 
     def insert(self, table: str, rows: list[dict]) -> None:
         self.inserts.append((table, rows))
+        self.rows_written += len(rows)
 
     def final(self) -> dict[str, list[dict]]:
         """Each table as ClickHouse reads it with FINAL: the last row of each natural key, in the order of the keys."""
@@ -260,7 +262,8 @@ def attempt(run_id: str, node: str, pass_no: int, item: int, number: int, **row)
     return {"run_id": run_id, "workflow": "deliver", "node": node, "pass": pass_no, "item": item, "attempt": number,
             "kind": "agent", "harness": "", "model": "", "effort": "", "access": "", "session_id": "", "session_start": "",
             "ended": None, "duration_s": None, "outcome": "succeeded", "error": "", "error_class": "", **counts(),
-            "exit_code": None, **row}
+            "exit_code": None, "duration_basis": "monotonic" if run_id == TRACED else "wall",
+            "awake_s": row.get("duration_s") if run_id == TRACED else None, "asleep_s": None, **row}
 
 
 def call(run_id: str, node: str, pass_no: int, item: int, number: int, turn: int, call_id: str, tool: str, harness: str,
@@ -381,7 +384,7 @@ def test_each_row_has_the_columns_of_its_table():
 
 def test_the_schema_has_the_tables_of_the_metrics_stack_with_each_count_of_usage_and_the_metric_columns():
     tables = export.schema()
-    assert sorted(tables) == ["attempts", "metric_points", "routes", "runs", "tool_calls", "turns"]
+    assert sorted(tables) == ["attempts", "export_runs", "metric_points", "routes", "runs", "schema_version", "tool_calls", "turns"]
     for table in ("attempts", "turns"):
         assert {count.name for count in fields(Usage)} <= set(tables[table]["columns"])
     assert {"harness": "LowCardinality(String)", "model": "LowCardinality(String)",
@@ -941,7 +944,7 @@ def test_prepare_makes_the_database_and_the_tables_that_are_missing_and_names_th
         assert sorted(made) == sorted(export.schema())
         first = store.identity
         store.prepare()  # nothing missing: nothing made, and the same identity
-        assert store.identity == first and len(made) == 6
+        assert store.identity == first and len(made) == 8
         del made["attempts"]
         store.prepare()  # made again, with a new id
         assert store.identity not in ("", first) and len(databases) == 1
@@ -1000,6 +1003,8 @@ def test_wf_metrics_export_writes_each_run_of_the_repo_and_then_nothing_new(repo
         f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes"]
     assert str(stores[0].url) == "http://wf:***@127.0.0.1:8123/wf"
     found = stores[0].final()
+    (audit,) = found.pop("export_runs")
+    assert (audit["runs_read"], audit["rows_written"], audit["error_class"]) == (2, 36, "")
     assert {row["repo_key"] for row in found.pop("runs")} == {runs.repo_key(repo.resolve())}  # from the repo's path
     assert found == {table: ordered(table, TRACE_ROWS[table] + EVENT_ROWS.get(table, [])) for table in TRACE_ROWS if table != "runs"}
     assert cli.main(["metrics", "export", TRACED]) == 0
@@ -1279,6 +1284,116 @@ def test_the_export_makes_its_database_and_tables_where_the_url_says(clickhouse,
     assert cli.main(["metrics", "export", "--all-repos", "--runs-dir", str(runs_dir)]) == 0
     assert capsys.readouterr().out == f"{TRACED}: 1 run, 10 attempts, 3 turns, 4 tool calls, 2 routes\n"
     made = query(clickhouse, "SELECT name FROM system.tables WHERE database = 'runs of wf' ORDER BY name").split()
-    assert made == sorted(export.schema())
+    assert made == sorted([*export.schema(), "attempt_times"])
     assert query(clickhouse, "SELECT count() FROM `runs of wf`.runs") == "1\n"
     assert query(clickhouse, "SELECT count() FROM system.databases WHERE name = 'wf'") == "0\n"
+
+
+@pytest.mark.docker
+def test_prepare_adds_version_one_to_the_old_schema_and_keeps_old_rows(empty):
+    store = store_at(empty)
+    query(empty, "CREATE DATABASE wf")
+    old = export.SCHEMA.read_text().split("CREATE TABLE IF NOT EXISTS schema_version")[0]
+    old = old.replace("    duration_basis Nullable(String), awake_s Nullable(Float64), asleep_s Nullable(Float64),\n", "")
+    for statement in export._statements(old):
+        query(empty, statement.replace("EXISTS ", "EXISTS wf.", 1))
+    store.insert("runs", TRACE_ROWS["runs"])
+    rows = [{key: value for key, value in row.items() if key not in ("duration_basis", "awake_s", "asleep_s")}
+            for row in TRACE_ROWS["attempts"]]
+    store.insert("attempts", rows)
+    before = query(empty, "SELECT count() FROM wf.attempts FINAL")
+    store.prepare()
+    assert query(empty, "SELECT max(version) FROM wf.schema_version") == "1\n"
+    assert query(empty, "EXISTS TABLE wf.export_runs") == "1\n"
+    assert query(empty, "SELECT count() FROM wf.attempts FINAL") == before
+    assert query(empty, "SELECT count() FROM wf.attempts FINAL WHERE duration_basis IS NOT NULL") == "0\n"
+    expected = query(empty, "SELECT count() FROM wf.attempts FINAL WHERE kind IN ('agent', 'command') "
+                           "AND ended IS NOT NULL AND duration_s IS NOT NULL AND outcome != 'cancelled'")
+    assert query(empty, "SELECT count() FROM wf.attempt_times") == expected
+    first = store.identity
+    store.prepare()
+    assert store.identity == first
+    assert query(empty, "SELECT count() FROM wf.schema_version") == "1\n"
+    excluded = dict(TRACE_ROWS["attempts"][-1], node="wall-clock", duration_basis="wall", awake_s=None)
+    store.insert("attempts", [excluded, dict(excluded, node="cancelled", duration_basis="monotonic", outcome="cancelled")])
+    assert query(empty, "SELECT count() FROM wf.attempt_times") == expected
+
+
+@pytest.mark.docker
+def test_empty_exports_and_three_failures_keep_the_last_success(empty, runs_dir, monkeypatch, capsys):
+    traced_folder(runs_dir / REPO)
+    args = ["metrics", "export", "--all-repos", "--runs-dir", str(runs_dir)]
+    assert cli.main(args) == 0
+    assert cli.main(args) == 0
+    audits = rows_of(empty, "export_runs")
+    assert len(audits) == 2
+    assert (audits[-1]["runs_read"], audits[-1]["rows_written"], audits[-1]["error_class"]) == (1, 0, "")
+    successful = query(empty, "SELECT maxIfOrNull(finished_at, error_class = '') FROM wf.export_runs FINAL")
+    for error in (export.StoreDown, export.SchemaMismatch, export.UnreadableFolder):
+        def fail(*args, error=error):
+            raise error("test failure")
+        monkeypatch.setattr(export, "export", fail)
+        assert cli.main(args) == 1
+    audits = rows_of(empty, "export_runs")
+    assert [row["error_class"] for row in audits] == ["", "", "StoreDown", "SchemaMismatch", "UnreadableFolder"]
+    assert query(empty, "SELECT maxIfOrNull(finished_at, error_class = '') FROM wf.export_runs FINAL") == successful
+    dashboard = json.loads((Path(__file__).parent.parent / "docs/metrics/grafana/wf-runs.json").read_text())
+    for panel in dashboard["panels"]:
+        if panel["title"] not in {"Time per node", "Data age", "Exporter heartbeat", "Last successful export", "Failed exports"}:
+            continue
+        sql = panel["targets"][0]["rawSql"].replace("$__timeFilter(started)", "1")
+        sql = re.sub(r"\$__conditionalAll\([^\n]+, \$(?:workflow|run|node)\)", "1", sql)
+        values = [json.loads(line) for line in query(empty, f"{sql} FORMAT JSONEachRow").splitlines()]
+        assert values, panel["title"]
+        if panel["title"] == "Failed exports":
+            assert values == [{"failed": 3}]
+
+
+def test_export_keeps_the_clock_basis_and_sleep_of_a_new_attempt(runs_dir):
+    records = traced({})
+    ended = next(record for record in records if record["kind"] == "attempt_end")
+    ended.update(duration_basis="monotonic", awake_s=3.5, asleep_s=120.0)
+    path = folder(runs_dir / REPO, TRACED, {"trace.jsonl": lines(records)})
+    store = Memory()
+    export.export(of(path), store)
+    row = next(row for row in store.final()["attempts"] if row["node"] == ended["node"] and row["attempt"] == ended["attempt"])
+    assert (row["duration_basis"], row["awake_s"], row["asleep_s"]) == ("monotonic", 3.5, 120.0)
+
+
+def test_an_export_with_no_run_records_its_success(repo, stores, capsys):
+    assert cli.main(["metrics", "export"]) == 0
+    (audit,) = stores[0].final()["export_runs"]
+    assert (audit["runs_read"], audit["rows_written"], audit["error_class"]) == (0, 0, "")
+
+
+def test_an_unreadable_runs_folder_records_a_failed_export(repo, stores, monkeypatch, capsys):
+    def unreadable(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(repo / ".wf/runs"))
+
+    monkeypatch.setattr(export, "runs_in", unreadable)
+    assert cli.main(["metrics", "export"]) == 1
+    (audit,) = stores[0].final()["export_runs"]
+    assert (audit["runs_read"], audit["rows_written"], audit["error_class"]) == (0, 0, "UnreadableFolder")
+    assert "can't list the runs" in capsys.readouterr().err
+
+
+def test_a_failed_export_counts_the_rows_that_clickhouse_took(repo, wf_home, monkeypatch, capsys):
+    opened = []
+
+    class Partial(Memory):
+        def __init__(self, url):
+            super().__init__()
+            opened.append(self)
+
+        def insert(self, table, rows):
+            if table == "attempts":
+                raise export.SchemaMismatch("attempts table differs")
+            super().insert(table, rows)
+
+    monkeypatch.setattr(export, "Store", Partial)
+    metrics_on(wf_home, metrics_url("127.0.0.1:8123"))
+    path = traced_folder(runs.runs_folder(repo))
+    assert cli.main(["metrics", "export"]) == 1
+    (audit,) = opened[0].final()["export_runs"]
+    assert (audit["runs_read"], audit["rows_written"], audit["error_class"]) == (1, 1, "SchemaMismatch")
+    assert not (path / "export.json").exists()

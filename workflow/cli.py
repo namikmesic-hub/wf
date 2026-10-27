@@ -823,42 +823,50 @@ def _metrics_export(args) -> int:
     folder = runs.runs_folder(Path.cwd(), args.runs_dir)
     if args.all_repos:
         folder = folder.parent
-    chosen = _runs_to_export(args, folder)
+    started = export.export_time()
+    failure = ""
+    try:
+        chosen = _runs_to_export(args, folder)
+    except OSError as error:
+        print(f"wf metrics export: can't list the runs in {error.filename or folder}: {error.strerror or error}",
+              file=sys.stderr)
+        chosen, failure = [], "UnreadableFolder"
     if chosen is None:
         return 1
-    if not chosen:
-        print(f"wf metrics export: no runs in {folder}")
-        return 0
     store = export.Store(chosen_config.metrics.url)
+    runs_read, rows_written = 0, 0
     try:
         store.prepare()
     except export.ExportError as error:
         print(f"wf metrics export: {error}", file=sys.stderr)
+        export.record_export(store, started, runs_read, rows_written, type(error).__name__)
         return 1
-    failed = False
+    before = store.rows_written
+    if not chosen and not failure:
+        print(f"wf metrics export: no runs in {folder}")
     for run in chosen:
+        runs_read += 1
         try:
             written = export.export(run, store)
         except export.UnreadableFolder as error:
             print(f"wf metrics export: run {run.id}: {error}", file=sys.stderr)
-            failed = True
+            failure = type(error).__name__
             continue
         except export.ExportError as error:  # ClickHouse: the runs after this one would fail the same way
             print(f"wf metrics export: run {run.id}: {error}", file=sys.stderr)
-            return 1
+            failure = type(error).__name__
+            break
         print(f"{run.id}: " + (", ".join(_count(count, ROWS[table]) for table, count in written.items()) or "nothing new"))
-    return 1 if failed else 0
+    recorded = export.record_export(store, started, runs_read, store.rows_written - before, failure)
+    return 1 if failure or not recorded else 0
 
 
 def _runs_to_export(args, folder: Path) -> list[runs.Run] | None:
-    """The runs named, once each and in their order, or else each run in `folder` (export.runs_in). None, after
-    it said why, when wf can't list `folder` or a run named isn't in it."""
-    try:
-        listed = export.runs_in(folder, every_repo=args.all_repos)
-    except OSError as error:
-        print(f"wf metrics export: can't list the runs in {error.filename or folder}: {error.strerror or error}",
-              file=sys.stderr)
-        return None
+    """Select the named runs, or all runs in the folder.
+    Return None after a message when a named run is absent.
+    Raise OSError when the folder cannot be read.
+    """
+    listed = export.runs_in(folder, every_repo=args.all_repos)
     named = {run.id: run for run in listed}
     for run_id in args.run_ids:
         if run_id not in named:
