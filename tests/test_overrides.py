@@ -1057,3 +1057,108 @@ def test_continue_restores_settings_and_worktrees_when_all_new_writes_fail(repo,
     assert "No space left on device" in capsys.readouterr().err
     assert record() == before
     assert not restored.exists()
+
+
+@pytest.mark.parametrize("harness, target, source, effort, from_input", [
+    ("cursor", "review[0]", "{{ item.model }}", None, False),
+    ("cursor", "review[0]", "{{ item.model if true else prepare.value }}", None, False),
+    ("codex", "review[0]", "{{ item.model }}", "{{ prepare.value }}", False),
+    ("cursor", "review", "{{ item.model }}", None, False),
+    ("cursor", "review", "{{ start.model }}", None, True),
+])
+def test_run_refuses_known_unavailable_template_models_before_creation(repo, monkeypatch, capsys,
+                                                                      harness, target, source, effort, from_input):
+    flow = yaml.safe_load("""
+        version: 1
+        name: known
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus, effort: high}}}
+        start: {input: {}}
+        nodes:
+          prepare:
+            needs: [start]
+            instruction: Prepare the setting
+            output: {value: {type: string}}
+          review:
+            needs: [prepare]
+            for_each: "[{'model': 'unknown'}, {'model': 'known'}]"
+            instruction: Review the change
+        end: {output: {}}
+    """)
+    flow["nodes"]["review"]["model"] = {"claude-code": "opus", harness: source}
+    if effort is not None:
+        flow["nodes"]["review"]["effort"] = effort
+    inputs = []
+    if from_input:
+        flow["start"] = {"input": {"model": {"type": "string"}}}
+        flow["nodes"]["review"].pop("for_each")
+        inputs = ["model=unknown"]
+    Path("known.yaml").write_text(yaml.safe_dump(flow))
+    fake = Fake(harness, models={"known"})
+    monkeypatch.setitem(harnesses.FACTORIES, harness, fake.factory)
+    monkeypatch.setattr(runs, "create", lambda *args, **kwargs: pytest.fail("An unavailable model created a run."))
+    before = {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()}
+    assert cli.main(["run", "known.yaml", *inputs, "--harness", f"{target}={harness}"]) == 1
+    assert f"{target}: {harness} has no model `unknown`" in capsys.readouterr().err
+    assert {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()} == before
+    assert fake.opened == 1 and fake.specs == []
+
+
+@pytest.mark.parametrize("setting", ["model", "effort"])
+@pytest.mark.parametrize("value", [None, "", 7])
+def test_run_refuses_known_invalid_settings_even_when_another_setting_needs_prior_output(
+        repo, no_real_harness, monkeypatch, capsys, setting, value):
+    flow = yaml.safe_load("""
+        version: 1
+        name: known
+        defaults: {harness: claude-code}
+        start: {input: {}}
+        nodes:
+          prepare:
+            needs: [start]
+            instruction: Prepare the setting
+            output: {value: {type: string}}
+          review:
+            needs: [prepare]
+            for_each: start.items
+            model: "{{ prepare.value }}"
+            effort: "{{ prepare.value }}"
+            instruction: Review the change
+        end: {output: {}}
+    """)
+    flow["start"] = {"input": {"items": {"type": "array", "default": [{"value": value}]}}}
+    flow["nodes"]["review"][setting] = "{{ item.value }}"
+    Path("known.yaml").write_text(yaml.safe_dump(flow))
+    monkeypatch.setattr(runs, "create", lambda *args, **kwargs: pytest.fail("An invalid setting created a run."))
+    before = {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()}
+    assert cli.main(["run", "known.yaml", "--harness", "review[0]=claude-code"]) == 1
+    assert f"`{setting}` of node `review` renders to" in capsys.readouterr().err
+    assert {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()} == before
+
+
+def test_run_defers_a_model_whose_guard_reads_prior_output(repo, monkeypatch):
+    write("guard.yaml", """
+        version: 1
+        name: guard
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {}}
+        nodes:
+          prepare:
+            needs: [start]
+            instruction: Prepare the setting
+            output: {value: {type: string}}
+          review:
+            needs: [prepare]
+            for_each: "[1, 2]"
+            model:
+              claude-code: opus
+              cursor: "{{ prepare.value if prepare else 'unknown' }}"
+            instruction: Review the change
+        end: {output: {}}
+    """)
+    claude = Fake("claude-code", submit({"value": "known"}), submit({"summary": "b"}))
+    cursor = Fake("cursor", submit({"summary": "a"}), models={"known"})
+    for fake in (claude, cursor):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    assert cli.main(["run", "guard.yaml", "--harness", "review[0]=cursor"]) == 0
+    assert [session.model for session in cursor.specs] == ["known"]
+    assert [session.model for session in claude.specs] == ["opus", "opus"]
