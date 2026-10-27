@@ -787,3 +787,164 @@ def test_an_item_override_wins_over_its_node():
 def test_an_item_index_is_read_as_a_number():
     assert overrides.parse({"model": ["review[02]=a"], "effort": [" review[2] = max "]}) == {
         "review[2]": {"model": "a", "effort": "max"}}
+
+
+@pytest.mark.parametrize("command", ["run", "continue"])
+@pytest.mark.parametrize("detach", [False, True])
+def test_run_and_continue_override_only_named_nodes(repo, no_real_harness, monkeypatch, command, detach):
+    flow = TWO.replace("limits: {tokens: 1000}\n", "follow_up: {to: a}\n").replace(
+        "defaults: {harness: claude-code}",
+        "defaults: {harness: claude-code, harnesses: {claude-code: {model: opus, effort: high}}}")
+    write("two.yaml", flow)
+    steps = {"agents": {node: [{"summary": "done"}] * 3 for node in ("a", "b")}}
+    base = ["run", "two.yaml", "--dry-run", script(steps)]
+    pass_no = 1
+    if command == "continue":
+        assert cli.main(base) == 0
+        base = ["continue", only_run().name, "Do it again"]
+        pass_no = 2
+    if detach:
+        monkeypatch.setattr(runner.operate, "detach", lambda *args: 123)
+        base.append("--detach")
+    assert cli.main([*base, "--harness", "a=codex", "--model", "a=gpt-6", "--effort", "a=low"]) == 0
+    if detach:
+        assert cli.main(["retry", only_run().name]) == 0
+    folder = only_run() / "nodes"
+    assert given(folder / "a" / str(pass_no) / "attempt-1.log") == ("codex", "gpt-6", "low")
+    assert given(folder / "b" / str(pass_no) / "attempt-1.log") == ("claude-code", "opus", "high")
+    assert events("override") == [{"event": "override", "node": "a", "harness": "codex",
+                                   "model": "gpt-6", "effort": "low"}]
+    assert cli.main(["continue", only_run().name, "Do it once more"]) == 0
+    assert given(folder / "a" / str(pass_no + 1) / "attempt-1.log") == ("codex", "gpt-6", "low")
+    assert given(folder / "b" / str(pass_no + 1) / "attempt-1.log") == ("claude-code", "opus", "high")
+
+
+@pytest.mark.parametrize("command", ["run", "continue"])
+@pytest.mark.parametrize("from_input", [False, True])
+def test_run_and_continue_override_only_named_items(repo, no_real_harness, command, from_input):
+    flow = FAN.replace("nodes:\n", "follow_up: {to: review}\nnodes:\n")
+    inputs = []
+    if from_input:
+        source = yaml.safe_load(flow)
+        inputs = ["items=" + json.dumps(overrides.templates.evaluate(source["nodes"]["review"]["for_each"], {}))]
+        source["start"] = {"input": {"items": {"type": "array"}}}
+        source["nodes"]["review"]["for_each"] = "start.items"
+        flow = yaml.safe_dump(source)
+    write("fan.yaml", flow)
+    steps = {"agents": {f"review[{i}]": [{"summary": "done"}] * 2 for i in range(3)}}
+    base = ["run", "fan.yaml", *inputs, "--dry-run", script(steps)]
+    pass_no = 1
+    if command == "continue":
+        assert cli.main(base) == 0
+        base = ["continue", only_run().name, "Check it again"]
+        pass_no = 2
+    assert cli.main([*base, "--harness", "review[1]=claude-code", "--model", "review[1]=sonnet",
+                     "--effort", "review[1]=low"]) == 0
+    items = only_run() / "nodes" / "review" / str(pass_no)
+    assert [given(items / str(i) / "attempt-1.log") for i in range(3)] == [
+        ("cursor", "grok", None), ("claude-code", "sonnet", "low"), ("claude-code", "opus", "high")]
+    assert events("override") == [{"event": "override", "node": "review", "index": 1,
+                                   "harness": "claude-code", "model": "sonnet", "effort": "low"}]
+
+
+@pytest.mark.parametrize("command", ["run", "continue"])
+def test_run_and_continue_overrides_hold_for_every_pass_and_flags_can_repeat(repo, no_real_harness, command):
+    flow = LOOP.replace("nodes:\n", "follow_up: {to: [write, other]}\nnodes:\n"
+                        "  other: {needs: [start], instruction: Check it}\n")
+    write("loop.yaml", flow)
+    steps = {"agents": {"write": [{"summary": "again"}, {"summary": "done"}] * 2,
+                         "other": [{"summary": "checked"}] * 2}}
+    base = ["run", "loop.yaml", "--dry-run", script(steps)]
+    first_pass = 1
+    if command == "continue":
+        assert cli.main(base) == 0
+        base = ["continue", only_run().name, "Do it again"]
+        first_pass = 3
+    assert cli.main([*base,
+                     "--harness", "write=codex", "--harness", "other=claude-code",
+                     "--model", "write=gpt-6", "--model", "other=sonnet",
+                     "--effort", "write=low", "--effort", "other=max"]) == 0
+    folder = only_run() / "nodes"
+    assert [given(folder / "write" / str(i) / "attempt-1.log") for i in (first_pass, first_pass + 1)] == [
+        ("codex", "gpt-6", "low")] * 2
+    assert given(folder / "other" / str(1 if command == "run" else 2) / "attempt-1.log") == ("claude-code", "sonnet", "max")
+    assert len(events("override")) == 2
+
+
+@pytest.mark.parametrize("command", ["run", "continue"])
+@pytest.mark.parametrize("args, message", [
+    (["--model", "nope=m"], "has no node `nope`"),
+    (["--model", "step=m"], "is a step of the sub-workflow"),
+    (["--model", "sub/step=m"], "is a step in a sub-workflow"),
+    (["--model", "count=m"], "is a command node"),
+    (["--model", "sub=m"], "is a workflow node"),
+    (["--model", "plan[0]=m"], "isn't a for_each node"),
+    (["--model", "review[3]=m"], "has only items 0 to 2"),
+    (["--model", "both=m"], "picks its harness from a list"),
+    (["--harness", "review=gemini"], "unknown harness"),
+    (["--harness", "review=cursor"], "cursor needs a model"),
+    (["--harness", "review=cursor", "--model", "review=grok", "--effort", "review=max"], "cursor has no effort setting"),
+    (["--harness", "notes=claude-code"], "doesn't set `tools_with_shell: true`"),
+    (["--harness", "own=codex"], "add --model own=ID"),
+    (["--model", "review"], "expected NODE=VALUE"),
+    (["--model", "review[x]=m"], "isn't a node or an item"),
+    (["--model", "review=a", "--model", "review=b"], "names review twice"),
+])
+def test_run_and_continue_refuse_bad_overrides_without_changes(repo, no_real_harness, capsys, command, args, message):
+    write("mixed.yaml", MIXED.replace("nodes:\n", "follow_up: {to: plan}\nnodes:\n"))
+    write("inner.yaml", INNER)
+    steps = {"agents": {node: [{"summary": "done"}] for node in (
+        "plan", "review[0]", "review[1]", "review[2]", "later[0]", "both", "notes", "own", "sub/step")}}
+    base = ["run", "mixed.yaml", "--dry-run", script(steps)]
+    if command == "continue":
+        assert cli.main(base) == 0
+        before = record()
+        base = ["continue", only_run().name, "Do it again"]
+    else:
+        before = {str(p): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    capsys.readouterr()
+    assert cli.main([*base, *args]) == 1
+    assert message in capsys.readouterr().err
+    if command == "continue":
+        assert record() == before
+    else:
+        assert {str(p): p.read_bytes() for p in repo.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("command", ["run", "continue"])
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_run_and_continue_check_harnesses_before_changes(repo, monkeypatch, capsys, command, unavailable):
+    claude = Fake("claude-code", submit({"summary": "done"}))
+    codex = Fake("codex", models={"gpt-6"}, unavailable="out" if unavailable else None)
+    for fake in (claude, codex):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    write("one.yaml", ONE.replace("nodes:\n", "follow_up: {to: plan}\nnodes:\n"))
+    base = ["run", "one.yaml"]
+    if command == "continue":
+        assert cli.main(base) == 0
+        before = record()
+        base = ["continue", only_run().name, "Do it again"]
+    else:
+        before = {str(p): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+    capsys.readouterr()
+    assert cli.main([*base, "--harness", "plan=codex", "--model", "plan=unknown"]) == 1
+    assert ("can't run on this machine" if unavailable else "has no model `unknown`") in capsys.readouterr().err
+    if command == "continue":
+        assert record() == before
+    else:
+        assert {str(p): p.read_bytes() for p in repo.rglob("*") if p.is_file()} == before
+
+
+def test_continue_restores_overrides_when_it_cannot_store_the_request(repo, no_real_harness, monkeypatch):
+    write("one.yaml", ONE.replace("nodes:\n", "follow_up: {to: plan}\nnodes:\n"))
+    assert cli.main(["run", "one.yaml", "--dry-run", script({"agents": {"plan": [{"summary": "done"}]}})]) == 0
+    before = record()
+
+    async def fail(ctx, given):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(runner, "_give", fail)
+    assert cli.main(["continue", only_run().name, "Do it again", "--model", "plan=sonnet"]) == 1
+    after = record()
+    assert json.loads(after.pop("status.json"))["status"] == json.loads(before.pop("status.json"))["status"]
+    assert after == before

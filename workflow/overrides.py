@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import harnesses, templates, workspaces
+from . import harnesses, scheduler, state, templates, workspaces
 from .spec import HARNESSES, Workflow
 
 SETTINGS = ("harness", "model", "effort")
@@ -181,6 +181,26 @@ class Checked:
     problems: list[str] = field(default_factory=list)
     models: dict[str, set[str]] = field(default_factory=dict)  # by target: the models that available() checks
     access: dict[str, str] = field(default_factory=dict)  # by target: its node's access level, which can decide the runtime
+
+
+def check_start(given: dict[str, dict[str, str]], workflows: list[Workflow], inputs: dict) -> Checked:
+    """Check overrides before a run starts, with items that its start input can define."""
+    workflow = workflows[0]
+    progress = state.Progress({}, workflow, scheduler.Topology.of(workflow), lambda event: None)
+    progress.begin(inputs, {})
+    variables = progress.vars()
+    for key in given:
+        node_id, index = split(key)
+        node = workflow.nodes.get(node_id)
+        if index is None or node is None or node.kind != "agent" or node.for_each is None:
+            continue
+        try:
+            items = templates.evaluate(node.for_each, variables)
+        except templates.TemplateError:
+            continue
+        if isinstance(items, (list, tuple)):
+            progress.s["active"][node_id] = {"items": list(items), "vars": variables, "outputs": {}}
+    return check(given, workflows, progress.s)
 
 
 def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: dict) -> Checked:
