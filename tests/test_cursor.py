@@ -449,7 +449,7 @@ def test_a_host_that_does_not_answer_is_unavailable_not_a_node_timeout(repo, mon
     use(monkeypatch, repo, cursor_host, silent_create=True, timeout=2)
     assert run() == 1
     out = capsys.readouterr()
-    assert "cursor is unavailable: the Cursor host didn't start a session" in out.out
+    assert "cursor is unavailable: Cursor's request time limit has expired" in out.out
     assert "timed out after" not in out.out + out.err
 
 

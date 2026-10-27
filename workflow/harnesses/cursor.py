@@ -300,6 +300,11 @@ class Cursor(remote.RemoteHarness):
         else:
             await super().check_model(model, access)
 
+    async def start(self, spec: SessionSpec, args: dict, extra: dict | None = None) -> remote.RemoteSession:
+        args = {**args, "catalog_dir": str((config.home() / "cache" / "cursor-models").resolve()),
+                "timeout_ms": max(1, int(self.request_timeout * 900))}
+        return await super().start(spec, args, extra)
+
     async def session(self, spec: SessionSpec) -> remote.RemoteSession:
         why = self._why_acp(spec.access)
         if why:

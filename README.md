@@ -22,7 +22,15 @@ Agents can also read Slack, Granola, Linear, Notion and Gmail through tools that
 
 Needs Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code, Codex or Cursor set up.
 Cursor runs through Cursor's SDK, so it needs Node.js 22.18 or later and a Cursor API key (`wf runtimes cursor signin`).
-Its `edit` steps run through `cursor-agent`, logged in.
+Cursor model names include `grok-4.7-xhigh-fast` and the explicit form `grok-4.7[reasoning_effort=xhigh,fast=true]`.
+Cursor's model catalog is the account's model list.
+wf shares this list for 15 minutes per API key, across sessions and runs on the machine.
+`wf runtimes cursor doctor --model <id>` fetches the current catalog for its model check.
+`wf validate` checks workflow settings locally.
+Cursor catalog and session-open rate limits use bounded retries.
+Codex skips the model list when the workflow pins its model and effort.
+cursor-agent skips the model list when the workflow pins its model.
+Cursor's `edit` steps run through `cursor-agent`, logged in.
 Until a key is set, all its steps run through `cursor-agent`, and each run warns once.
 
 ```sh

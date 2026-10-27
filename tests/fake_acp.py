@@ -201,7 +201,10 @@ async def main() -> None:
             write({"id": request_id, "result": {"protocolVersion": 1, "authMethods": [{"id": "cursor_login", "name": "Cursor Login"}],
                                                 "agentCapabilities": {"loadSession": True, "mcpCapabilities": {"http": True, "sse": True}}}})
         elif method == "authenticate":
-            write({"id": request_id, "result": {}})
+            if scenario.get("logged_out"):
+                write({"id": request_id, "error": {"code": -32000, "message": "Authentication required"}})
+            else:
+                write({"id": request_id, "result": {}})
         elif method in ("session/new", "session/load"):
             session = params.get("sessionId") or str(uuid.uuid4())
             if method == "session/load" and not (sessions / session).exists():
