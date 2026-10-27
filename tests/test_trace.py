@@ -802,3 +802,84 @@ def test_attempt_clocks_separate_sleep_from_wall_clock_steps(tmp_path, monkeypat
         assert (datetime.fromisoformat(sleeps[0]["ended"]) - datetime.fromisoformat(sleeps[0]["started"])).total_seconds() == asleep
     written.check_clock()
     assert len(events) == bool(asleep)
+
+
+def test_a_run_writes_host_sleep_to_its_trace_and_its_events_and_samples_the_clock_while_the_graph_runs(repo, monkeypatch):
+    flag = repo / "slept"
+    monkeypatch.setattr(trace, "_continuous_clock", lambda: lambda: time.monotonic() + (120 if flag.exists() else 0))
+    watched = []
+    watching = trace.Trace.watching
+
+    def spy(self):
+        watched.append(self)
+        return watching(self)
+
+    monkeypatch.setattr(trace.Trace, "watching", spy)
+    write(f"""
+        version: 1
+        name: asleep
+        start: {{input: {{}}}}
+        nodes:
+          nap: {{needs: [start], command: "touch '{flag}'"}}
+        end: {{output: {{}}}}
+    """)
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert len(watched) == 1
+    (slept,) = of("host_slept")
+    events = [json.loads(line) for line in (run_dir() / "events.jsonl").read_text().splitlines()]
+    (event,) = [event for event in events if event["event"] == "host_slept"]
+    assert slept["asleep_s"] == event["asleep_s"] == pytest.approx(120, abs=0.01)
+    assert (slept["started"], slept["ended"]) == (event["started"], event["ended"])
+    assert of("attempt_end", node="nap")[0]["asleep_s"] == pytest.approx(120, abs=0.01)
+
+
+def test_watching_samples_the_clock_while_nothing_writes(tmp_path, monkeypatch):
+    asleep = [0]
+    monkeypatch.setattr(trace, "_continuous_clock", lambda: lambda: time.monotonic() + asleep[0])
+    monkeypatch.setattr(trace, "SLEEP_POLL", 0.01)
+    events = []
+    written = trace.Trace(tmp_path, events.append)
+
+    async def idle():
+        async with written.watching():
+            asleep[0] = 120
+            for _ in range(500):
+                if events:
+                    break
+                await asyncio.sleep(0.01)
+            return [event["event"] for event in events]
+
+    assert asyncio.run(idle()) == ["host_slept"]
+    assert [json.loads(line)["kind"] for line in (tmp_path / "trace.jsonl").read_text().splitlines()] == ["host_slept"]
+
+
+@pytest.mark.parametrize("failing", ["trace", "events"])
+def test_a_host_sleep_that_one_file_cant_take_still_goes_to_the_other_with_the_record_that_found_it(
+        tmp_path, monkeypatch, capsys, failing):
+    asleep = [0]
+    monkeypatch.setattr(trace, "_continuous_clock", lambda: lambda: time.monotonic() + asleep[0])
+    events = []
+
+    def add_event(event):
+        if failing == "events":
+            raise OSError(28, "No space left on device")
+        events.append(event)
+
+    written = trace.Trace(tmp_path, add_event)
+    append = written._append
+
+    def refuse_sleep(record):
+        if failing == "trace" and record["kind"] == "host_slept":
+            raise OSError(28, "No space left on device")
+        append(record)
+
+    monkeypatch.setattr(written, "_append", refuse_sleep)
+    asleep[0] = 120
+    written.write({"kind": "tool_result", "id": "nap#1.a1.t1.c1"})
+    kinds = [json.loads(line)["kind"] for line in (tmp_path / "trace.jsonl").read_text().splitlines()]
+    assert kinds == (["tool_result"] if failing == "trace" else ["host_slept", "tool_result"])
+    assert [event["event"] for event in events] == ([] if failing == "events" else ["host_slept"])
+    assert written.asleep_s == pytest.approx(120, abs=0.01)
+    told = capsys.readouterr().err
+    assert ("can't write the run's trace" in told) == (failing == "trace")
+    assert ("can't add the host_slept event to the run's events" in told) == (failing == "events")

@@ -76,8 +76,6 @@ and the run continues.
 """
 
 import asyncio
-import ctypes
-import functools
 import hashlib
 import json
 import os
@@ -98,6 +96,7 @@ from .schemas import EACH
 FILE = "trace.jsonl"
 BLOBS = "blobs"
 CAP = 1000  # characters a value may have in a record. A longer one goes to blobs/
+SLEEP_POLL = 30  # seconds between clock samples while the graph runs
 PREVIEW = 80  # characters of a blob shown in its reference
 HIDDEN = "[secret]"
 _LONGEST = 32  # steps of a secret path. A longer one, from lists that read each other's results, is cut: that hides more
@@ -116,19 +115,9 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
-@functools.cache
 def _continuous_clock() -> Callable[[], float]:
-    if sys.platform == "darwin":
-        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
-
-        class Timebase(ctypes.Structure):
-            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
-
-        base = Timebase()
-        library.mach_timebase_info(ctypes.byref(base))
-        library.mach_continuous_time.restype = ctypes.c_uint64
-        scale = base.numer / base.denom / 1_000_000_000
-        return lambda: library.mach_continuous_time() * scale
+    if sys.platform == "darwin":  # there it is mach_continuous_time, which counts sleep
+        return lambda: time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
     if hasattr(time, "CLOCK_BOOTTIME"):
         return lambda: time.clock_gettime(time.CLOCK_BOOTTIME)
     return time.monotonic
@@ -159,10 +148,13 @@ class Trace:
             self.hidden.add(str(value))
 
     def write(self, record: dict) -> None:
+        with self._lock:
+            self._check_clock()
+            self._safely_append(record)
+
+    def _safely_append(self, record: dict) -> None:
         try:
-            with self._lock:
-                self._check_clock()
-                self._append(record)
+            self._append(record)
         except (OSError, ValueError, TypeError) as error:
             self._write_error(error)
 
@@ -181,11 +173,8 @@ class Trace:
             print(f"wf: can't write the run's trace ({error}). The run continues without it.", file=sys.stderr)
 
     def check_clock(self) -> None:
-        try:
-            with self._lock:
-                self._check_clock()
-        except (OSError, ValueError, TypeError) as error:
-            self._write_error(error)
+        with self._lock:
+            self._check_clock()
 
     def _check_clock(self) -> None:
         current = (time.time(), time.monotonic(), self._continuous())
@@ -197,15 +186,18 @@ class Trace:
             end = datetime.fromtimestamp(current[0]).astimezone()
             event = {"started": (end - timedelta(seconds=slept)).isoformat(timespec="milliseconds"),
                      "ended": end.isoformat(timespec="milliseconds"), "asleep_s": round(slept, 3)}
-            self._append({"kind": "host_slept", "id": f"run.sleep.{current[1]}", "parent": "run", **event})
+            self._safely_append({"kind": "host_slept", "id": f"run.sleep.{current[1]}", "parent": "run", **event})
             if self.on_sleep is not None:
-                self.on_sleep({"event": "host_slept", **event})
+                try:
+                    self.on_sleep({"event": "host_slept", **event})
+                except (OSError, ValueError, TypeError) as error:
+                    print(f"wf: can't add the host_slept event to the run's events ({error}).", file=sys.stderr)
 
     @asynccontextmanager
     async def watching(self):
         async def poll():
             while True:
-                await asyncio.sleep(30)
+                await asyncio.sleep(SLEEP_POLL)
                 self.check_clock()
 
         task = asyncio.create_task(poll())
