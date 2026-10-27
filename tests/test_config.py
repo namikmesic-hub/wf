@@ -47,6 +47,9 @@ def problems(**load) -> list[str]:
 SAMPLES = {
     "runs_dir": ('"~/from-file"', Path.home() / "from-file", "/tmp/from-env", Path("/tmp/from-env"), Path("/tmp/from-flag")),
     "max_agents": ("3", 3, "5", 5, None),
+    "capacity.claude-code": ("12", 12, "24", 24, None),
+    "capacity.codex": ("16", 16, "32", 32, None),
+    "capacity.cursor": ("20", 20, "40", 40, None),
     "claude.auth": ('"api-key"', "api-key", "subscription", "subscription", None),
     "cursor.runtime": ('"acp"', "acp", "sdk", "sdk", None),
     "cursor.api_key_file": ('"~/.config/cursor-key"', Path.home() / ".config" / "cursor-key", None, None, None),
@@ -87,6 +90,8 @@ def test_every_key_has_a_sample_and_the_sources_of_today_stay():
     assert list(SAMPLES) == list(config.KEYS)
     assert {name: key.variable for name, key in config.KEYS.items() if key.variable} == {
         "runs_dir": "WF_RUNS_DIR", "max_agents": "WF_MAX_AGENTS", "claude.auth": "WF_CLAUDE_AUTH",
+        "capacity.claude-code": "WF_MAX_AGENTS_CLAUDE_CODE", "capacity.codex": "WF_MAX_AGENTS_CODEX",
+        "capacity.cursor": "WF_MAX_AGENTS_CURSOR",
         "cursor.runtime": "WF_CURSOR_RUNTIME"}
     assert {name: key.flag for name, key in config.KEYS.items() if key.flag} == {
         "runs_dir": "--runs-dir", "ui.port": "wf ui --port", "tools.signin_port": "wf tools <name> setup --port"}
@@ -199,7 +204,8 @@ def test_only_the_config_package_reads_config_toml_or_the_variables_of_its_keys(
 # ---------- unknown keys and wrong kinds ----------
 
 
-TOP = "The top of the file takes runs_dir and max_agents, and the tables [claude], [cursor], [ui], [tools], [git], [paths] and [metrics]"
+TOP = ("The top of the file takes runs_dir and max_agents, and the tables [capacity], [claude], [cursor], [ui], "
+       "[tools], [git], [paths] and [metrics]")
 PATH = "a path that starts with / or with the ~ of a user"
 
 
@@ -574,6 +580,9 @@ def test_wf_config_show_gives_each_key_its_value_and_where_it_comes_from(wf_home
     assert found == {
         "runs_dir": (str(tmp_path / "runs"), "flag (--runs-dir)"),
         "max_agents": ("4", "file"),
+        "capacity.claude-code": ("none (no cap)", "default"),
+        "capacity.codex": ("none (no cap)", "default"),
+        "capacity.cursor": ("none (no cap)", "default"),
         "claude.auth": ("subscription", "default"),
         "cursor.runtime": ("sdk", "environment (WF_CURSOR_RUNTIME)"),
         "cursor.api_key_file": ("none (the macOS Keychain)", "default"),
