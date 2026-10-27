@@ -797,8 +797,8 @@ def _metrics_command(commands, runs_dir: dict) -> None:
         "export", help="write what runs did since their last export into ClickHouse's tables of wf runs",
         description="Write what runs did since their last export into ClickHouse's tables of wf runs: the runs named, "
                     "or each run of this repo. The ClickHouse is the one of url under [metrics] in ~/.wf/config.toml, "
-                    "with enabled = true. Each run folder keeps where its export stopped, in export.json, so exporting "
-                    "twice changes nothing.")
+                    "with enabled = true. Run folders keep offsets in export.json, so unchanged runs add no run rows. "
+                    "Each command writes an export_runs row when ClickHouse accepts it.")
     exporting.add_argument("run_ids", nargs="*", metavar="run-id")
     exporting.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
     exporting.add_argument("--runs-dir", **runs_dir)
