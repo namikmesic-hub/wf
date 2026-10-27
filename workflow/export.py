@@ -2,7 +2,8 @@
 
     wf metrics export [<run-id>...] [--all-repos] [--runs-dir DIR]
 
-ClickHouse keeps the tables in the database of metrics.url in config.toml, as clickhouse.sql makes them:
+ClickHouse keeps these tables and the view in the database of metrics.url in config.toml.
+clickhouse.sql makes the tables, and migrations/001_attempt_times.sql makes the view attempt_times:
 
     runs           a row per run: workflow, status, start and end, and what its attempts used
     attempts       a row per attempt of a pass or an item: harness, model, how it ended, its error

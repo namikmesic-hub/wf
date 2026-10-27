@@ -841,7 +841,7 @@
           "sort": "desc"
         }
       },
-      "description": "Awake time and host sleep of completed agent and command attempts. Old trace rows give a lower bound for sleep."
+      "description": "Awake time and host sleep of completed agent and command attempts. For old trace rows, sleep is an estimate, which a step of the wall clock can change."
     },
     {
       "id": 11,
