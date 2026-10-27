@@ -181,7 +181,10 @@ class RunContext:
         else:
             root._agents_waiting[key] = entry
         waiting = list(root._agents_waiting.values())
-        root.run.set_status("running", **({"agents_waiting": waiting} if waiting else {}))
+        current = root.run.status()
+        stalls = {"stalls": current["stalls"]} if current.get("status") == "stall_detected" else {}
+        root.run.set_status("stall_detected" if stalls else "running", **stalls,
+                            **({"agents_waiting": waiting} if waiting else {}))
 
     # ---------- wf steer ----------
 

@@ -15,7 +15,7 @@ from textwrap import dedent
 
 import pytest
 
-from workflow import cli, firstmate, runner, runs
+from workflow import cli, firstmate, operate, runner, runs
 
 
 @pytest.fixture
@@ -82,6 +82,120 @@ def test_poll_returns_a_runs_new_state_once(repo, monkeypatch, capsys):
     assert again["result"] == {"status": "no-result", "output": ""}  # nothing new since the last poll
 
 
+def test_poll_reports_each_resolved_stall_before_the_terminal_state(repo, monkeypatch, capsys):
+    folder = waiting_run(capsys)
+    run = runs.Run.at(folder)
+    for attempt, action in ((1, "retry"), (2, "fallback")):
+        run.add_event({"event": "stall_detected", "node": "work", "pass": 1, "attempt": attempt, "action": action})
+        run.add_event({"event": "stall_resolved", "node": "work", "pass": 1, "attempt": attempt})
+    run.set_status("succeeded")
+    request = invoke("source.poll", source_id="ended", config_ref=f"wf-run:{folder}")
+    for attempt in (1, 2):
+        reply = call(monkeypatch, capsys, "invoke", request)
+        state = json.loads(reply["result"]["output"])
+        assert state["status"] == "stall_detected" and state["current_status"] == "succeeded"
+        assert state["stall"]["attempt"] == attempt and "stall_actions" not in state
+        assert firstmate._status({"content": reply["result"]["output"]}) not in firstmate.TERMINAL
+    reply = call(monkeypatch, capsys, "invoke", request)
+    assert json.loads(reply["result"]["output"])["status"] == "succeeded"
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+    other = call(monkeypatch, capsys, "invoke", invoke("source.poll", source_id="other", config_ref=f"wf-run:{folder}"))
+    assert json.loads(other["result"]["output"])["stall"]["attempt"] == 1
+
+
+def test_a_terminal_write_between_state_and_event_reads_keeps_the_stall(repo, monkeypatch, capsys):
+    folder = waiting_run(capsys)
+    run = runs.Run.at(folder)
+    original = operate.state
+
+    def ending(found):
+        found.add_event({"event": "stall_detected", "node": "work", "attempt": 1, "action": "retry"})
+        found.set_status("succeeded")
+        monkeypatch.setattr(operate, "state", original)
+        return original(found)
+
+    monkeypatch.setattr(operate, "state", ending)
+    result = firstmate._poll({"source_id": "ending", "config_ref": f"wf-run:{folder}"})
+    assert json.loads(result["output"])["stall"]["attempt"] == 1
+    assert json.loads(firstmate._poll({"source_id": "ending", "config_ref": f"wf-run:{folder}"})["output"])[
+        "status"] == "succeeded"
+
+
+def test_a_follow_up_between_state_and_event_reads_keeps_its_first_stall(repo, monkeypatch, capsys):
+    folder = waiting_run(capsys)
+    run = runs.Run.at(folder)
+    monkeypatch.setattr(firstmate, "POLL_SECONDS", 0)
+    original = operate.state
+
+    def continuing(found):
+        current = original(found)
+        found.set_status("succeeded", follow_up=1)
+        found.add_event({"event": "follow_up", "number": 1, "to": ["work"]})
+        found.add_event({"event": "stall_detected", "node": "work", "pass": 2, "attempt": 1})
+        monkeypatch.setattr(operate, "state", original)
+        return current
+
+    monkeypatch.setattr(operate, "state", continuing)
+    request = {"source_id": "continuing", "config_ref": f"wf-run:{folder}"}
+    result = json.loads(firstmate._poll(request)["output"])
+    assert (result["status"], result["follow_up"], result["stall"]["pass"]) == ("stall_detected", 1, 2)
+    assert json.loads(firstmate._poll(request)["output"])["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("notice", [False, True])
+def test_poll_reports_a_driver_stop_after_an_attention_stall(repo, monkeypatch, capsys, notice):
+    folder = waiting_run(capsys)
+    run = runs.Run.at(folder)
+    monkeypatch.setattr(firstmate, "POLL_SECONDS", 0)
+    monkeypatch.setattr(operate, "GRACE_SECONDS", 0)
+    monkeypatch.setattr(runs.Run, "driven", lambda self: True)
+    if notice:
+        run.add_event({"event": "stall_detected", "node": "work", "pass": 1, "attempt": 1})
+    run.set_status("stall_detected", stalls=[{"node": "work", "attempt": 1}])
+    request = invoke("source.poll", source_id="stalled", config_ref=f"wf-run:{folder}")
+    reply = call(monkeypatch, capsys, "invoke", request)
+    stalled = json.loads(reply["result"]["output"])
+    assert stalled["status"] == "stall_detected"
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+    monkeypatch.setattr(runs.Run, "driven", lambda self: False)
+    reply = call(monkeypatch, capsys, "invoke", request)
+    stopped = json.loads(reply["result"]["output"])
+    assert stopped["status"] == "stopped" and stopped["seq"] == stalled["seq"]
+    assert stopped["retry"] == run.command("retry")
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+
+
+def test_poll_keeps_a_reported_stop_from_an_old_cursor(repo, monkeypatch, capsys):
+    folder = waiting_run(capsys)
+    run = runs.Run.at(folder)
+    monkeypatch.setattr(firstmate, "POLL_SECONDS", 0)
+    monkeypatch.setattr(operate, "GRACE_SECONDS", 0)
+    monkeypatch.setattr(runs.Run, "driven", lambda self: False)
+    run.set_status("running")
+    before = run.status()["seq"]
+    cursor = folder / "consumers" / "firstmate-stopped.json"
+    cursor.parent.mkdir(exist_ok=True)
+    cursor.write_text(json.dumps({"seq": before}))
+    request = invoke("source.poll", source_id="stopped", config_ref=f"wf-run:{folder}")
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+    run.set_status("running")
+    reply = call(monkeypatch, capsys, "invoke", request)
+    stopped = json.loads(reply["result"]["output"])
+    assert stopped["status"] == "stopped" and stopped["seq"] > before
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+
+
+def test_bounded_output_keeps_the_stall_notice():
+    state = {"run": "r", "status": "stall_detected", "current_status": "waiting", "dir": "/run",
+             "stall": {"node": "work", "attempt": 1, "action": "retry"},
+             "questions": [{"message": "x" * 40000, "schema": {}} for _ in range(20)]}
+    result = firstmate._bounded(state, "wf status r --json")
+    assert len(result.encode()) <= firstmate.MAX_OUTPUT
+    assert json.loads(result)["stall"] == state["stall"]
+    assert json.loads(result)["current_status"] == "waiting"
+
+
 def test_poll_follows_a_run_kept_in_a_runs_folder_outside_the_repo(repo, monkeypatch, capsys, tmp_path_factory):
     folder = waiting_run(capsys, tmp_path_factory.mktemp("runs"))
     assert not folder.is_relative_to(repo.resolve()) and not (repo / ".wf").exists()
@@ -120,6 +234,7 @@ def test_poll_refuses_a_runs_folder_run_that_does_not_record_its_repo(repo, monk
 @pytest.mark.parametrize("status, kind, terminal", [
     ("waiting", "wf-waiting", False), ("failed", "wf-failed", False), ("stopped", "wf-stopped", False),
     ("succeeded", "wf-succeeded", True), ("limit", "wf-limit", False),
+    ("stall_detected", "wf-stall_detected", False),
 ])
 def test_results_are_classified_and_finished_runs_end_the_source(monkeypatch, capsys, status, kind, terminal):
     content = json.dumps({"run": "r", "status": status})

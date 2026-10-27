@@ -131,6 +131,7 @@ class SessionSpec:
     project_instructions: bool = True  # False: the repo's CLAUDE.md, AGENTS.md and rules stay out of the session
     read_roots: list[Path] = field(default_factory=list)  # the files and folders the instruction names, which the agent may read too
     trace: Recorder = field(default_factory=Recorder)  # the agent's text and tool calls, for the run's trace
+    watchdog: Any = None
 
 
 @dataclass

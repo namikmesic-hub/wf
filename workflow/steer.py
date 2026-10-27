@@ -225,14 +225,14 @@ def _load(path: Path) -> spec.Workflow:
         raise SteerError(f"can't read the run's copy of {Path(path).name}: {error}") from error
 
 
-def send(run: Run, path: str, text: str) -> dict:
+def send(run: Run, path: str, text: str = "", *, action: str | None = None) -> dict:
     """Hand a message for the session at `path` to the process that drives the run, and wait for its
     answer. The answer: {id, status: delivered | queued | unconfirmed | none, reason (for none and
     unconfirmed), attempt and harness (for all but none)}. Raises SteerError when the system doesn't
     name its boot, the run is full, or the driver took the message but never answered."""
     ident = str(uuid.uuid4())
     status = run.status().get("status")
-    if status != "running":
+    if status not in ("running", "stall_detected"):
         why = NOT_RUNNING.get(status, f"the run's status is `{status}`")
         return {"id": ident, "status": "none", "reason": f"{why}, so no agent works in it"}
     if not run.driven():
@@ -248,7 +248,8 @@ def send(run: Run, path: str, text: str) -> dict:
             if len(_names(folder, ".request")) + len(_names(folder, ".taken")) >= MAX_IN_MAILBOX:
                 raise SteerError(FULL.format(MAX_IN_MAILBOX))
             request = folder / f"{now():.6f}-{ident}.request"
-            write_json(request, {"path": path, "text": text, "boot": boot()})
+            write_json(request, {"path": path, "text": text, "boot": boot(),
+                                 **({"action": action} if action else {})})
         answer = _await_answer(reply)
     except BaseException:  # stopped (Ctrl-C) or failed: a request that nobody took yet goes with it
         if request is not None:
@@ -288,6 +289,7 @@ def _await_answer(reply: Path) -> dict | None:
 class Message:
     id: str
     text: str
+    action: str | None = None
 
 
 class Steering:
@@ -392,6 +394,11 @@ class Live:
                 self._idle.set()
 
     async def _hand_over(self, message: Message, answer: asyncio.Future) -> None:
+        if message.action:
+            accepted = self.spec.watchdog is not None and self.spec.watchdog.resolve(message.action)
+            answer.set_result(("delivered" if accepted else "none",
+                               None if accepted else "this session has no open stall"))
+            return
         try:
             status = await self.session.steer(message.text, message.id)
         except Exception:  # the session broke: its turn fails, and the message is dropped with it
@@ -489,7 +496,7 @@ class _Mailbox:
         answer = {"status": "none", "reason": problem or STOPPED}
         try:
             if problem is None:
-                answer = await self.steering.deliver(request["path"], Message(ident, request["text"]))
+                answer = await self.steering.deliver(request["path"], Message(ident, request["text"], request.get("action")))
         finally:
             self.reply(ident, answer)
             claimed.unlink(missing_ok=True)  # answered: it no longer counts toward MAX_IN_MAILBOX
@@ -578,6 +585,8 @@ def _problem(request, sent: float | None) -> str | None:
         return "the request isn't one that wf steer writes"
     if len(request["text"]) > MAX_CHARACTERS:
         return f"the message is longer than {MAX_CHARACTERS:,} characters"
+    if "action" in request and request["action"] not in ("end", "wait"):
+        return "the stall action must be end or wait"
     if _older(sent, request["boot"], ANSWER_SECONDS):
         return f"it waited more than {ANSWER_SECONDS:g} seconds, so its sender has given up"
     return None

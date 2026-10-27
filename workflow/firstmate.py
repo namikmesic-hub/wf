@@ -172,7 +172,8 @@ def _bounded(state: dict, more: str) -> str:
     text = json.dumps(slim, ensure_ascii=False, default=str)
     if len(text.encode("utf-8")) <= MAX_OUTPUT:
         return text
-    keep = ("run", "status", "seq", "dir", "workflow", "follow_up", "nodes", "answer", "retry")
+    keep = ("run", "status", "seq", "dir", "workflow", "follow_up", "nodes", "answer", "retry",
+            "stall", "current_status")
     return json.dumps({k: state[k] for k in keep if k in state} | {"more": more})
 
 
@@ -181,7 +182,7 @@ def _status(data: dict) -> str:
         status = json.loads(data.get("content") or "").get("status")
     except (json.JSONDecodeError, TypeError, AttributeError):  # TypeError: content isn't text
         return "unknown"
-    return status if isinstance(status, str) and re.fullmatch(r"[a-z]+", status) else "unknown"
+    return status if isinstance(status, str) and re.fullmatch(r"[a-z_]+", status) else "unknown"
 
 
 # ---------- the package ----------

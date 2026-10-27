@@ -17,7 +17,9 @@ lock any more (the process crashed or was killed). `wf retry` picks it up.
 
 `wait --consumer NAME` remembers which state it last reported to NAME (by the
 status sequence number, in the run folder), so a watcher that polls in a loop
-hears about each state once. Without a consumer it reports the current state
+hears about each state once.
+It also reads each stall notice from the event journal, even after the attempt ends.
+Without a consumer it reports the current state
 as soon as it needs attention.
 
 Questions are flattened to one list, each with a key: the interrupt id, or for a
@@ -32,13 +34,14 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
 from . import limits, schemas
 from .runs import LOCK_FD, Lock, Run, write_json
 
-ATTENTION = ("waiting", "failed", "limit", "succeeded", "stopped")
+ATTENTION = ("waiting", "failed", "limit", "succeeded", "stopped", "stall_detected")
 GRACE_SECONDS = 15  # a run just created may not hold its lock yet
 
 
@@ -54,7 +57,7 @@ def state(run: Run) -> dict:
     plus what an operator needs next: the output, or the command to continue."""
     current = run.status()
     current.setdefault("run", run.id)
-    if current.get("status") == "running" and not run.driven() and _age(current) > GRACE_SECONDS:
+    if current.get("status") in ("running", "stall_detected") and not run.driven() and _age(current) > GRACE_SECONDS:
         current = {**{k: v for k, v in current.items() if k != "agents_waiting"}, "status": "stopped",
                    "reason": "no wf process is driving this run (it crashed or was killed)"}
     status = current.get("status")
@@ -70,6 +73,9 @@ def state(run: Run) -> dict:
     if status == "limit":  # paused: a bigger limit continues it
         current["retry"] = run.command("retry", limits.hint(current.get("limit")))
     current["dir"] = str(run.dir)
+    if status == "stall_detected":
+        current["stall_actions"] = {"end": run.command("stall", "<node> end"),
+                                    "wait": run.command("stall", "<node> wait")}
     info = run.info()  # read once: wait() calls this five times a second
     current["workflow"] = info.get("workflow")
     current["dry_run"] = bool(info.get("dry_run"))
@@ -79,32 +85,106 @@ def state(run: Run) -> dict:
 CONSUMER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # consumer names become file names
 
 
+@dataclass
+class _Cursor:
+    seq: int = -1
+    event_offset: int = 0
+    status: str | None = None
+    follow_up: int = 0
+
+
 def wait(run: Run, timeout: float, consumer: str | None = None) -> dict | None:
     """The run's state once it needs attention (and is new to `consumer`), or None at the timeout."""
     if consumer is not None and not CONSUMER.fullmatch(consumer):
         raise ValueError("a consumer name is letters, digits, . _ and - (it names a file in the run folder)")
     cursor_file = run.dir / "consumers" / f"{consumer}.json" if consumer else None
-    seen = _seen(cursor_file)
+    cursor = _cursor(cursor_file)
     deadline = time.monotonic() + timeout
     while True:
+        # Read events after status so a terminal result cannot hide an earlier stall.
         current = state(run)
-        # A "stopped" run keeps the sequence number of its last "running" state, so it too is reported once
-        if current["status"] in ATTENTION and current.get("seq", 0) > seen:
-            if cursor_file:
-                cursor_file.parent.mkdir(exist_ok=True)
-                write_json(cursor_file, {"seq": current.get("seq", 0)})  # atomic: a killed poller leaves no half file
+        follow_up = current.get("follow_up", 0)
+        if cursor_file and follow_up != cursor.follow_up:
+            cursor.event_offset = max(cursor.event_offset, _follow_up_offset(run, follow_up))
+            cursor.follow_up = follow_up
+        notice, cursor.event_offset = _stall_notice(run, cursor.event_offset) if cursor_file else (None, cursor.event_offset)
+        if notice is not None:
+            current = state(run)
+            if current.get("follow_up", 0) != follow_up:
+                cursor.event_offset = 0
+                continue
+            if current["status"] == "stall_detected":
+                cursor.seq, cursor.status = current.get("seq", 0), current["status"]
+            _save_cursor(cursor_file, cursor)
+            return {**current, "status": "stall_detected", "current_status": current["status"], "stall": notice}
+        stopped = current["status"] == "stopped" and cursor.status == "stall_detected"
+        if current["status"] in ATTENTION and (current.get("seq", 0) > cursor.seq or stopped):
+            cursor.seq, cursor.status = current.get("seq", 0), current["status"]
+            _save_cursor(cursor_file, cursor)
             return current
         if time.monotonic() >= deadline:
+            _save_cursor(cursor_file, cursor)
             return None
         time.sleep(0.2)
 
 
-def _seen(cursor_file: Path | None) -> int:
-    """The sequence number last reported to a consumer (-1: nothing yet, or the cursor is damaged)."""
+def _cursor(cursor_file: Path | None) -> _Cursor:
+    """Read the last state and event position for a consumer."""
     try:
-        return int(json.loads(cursor_file.read_text(encoding="utf-8"))["seq"]) if cursor_file else -1
-    except (OSError, ValueError, KeyError, TypeError):
-        return -1
+        saved = json.loads(cursor_file.read_text(encoding="utf-8")) if cursor_file else {}
+        return _Cursor(int(saved.get("seq", -1)), max(0, int(saved.get("event_offset", 0))),
+                       saved.get("status"), int(saved.get("follow_up", 0)))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return _Cursor()
+
+
+def _save_cursor(cursor_file: Path | None, cursor: _Cursor) -> None:
+    if cursor_file:
+        cursor_file.parent.mkdir(exist_ok=True)
+        write_json(cursor_file, asdict(cursor))
+
+
+def _follow_up_offset(run: Run, number: int) -> int:
+    """Find the first event position of the current follow-up."""
+    offset = 0
+    try:
+        with (run.dir / "events.jsonl").open("rb") as file:
+            while line := file.readline():
+                if not line.endswith(b"\n"):
+                    break
+                offset = file.tell()
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(event, dict) and event.get("event") == "follow_up"
+                        and not event.get("node") and event.get("number") == number):
+                    break
+    except FileNotFoundError:
+        pass
+    return offset
+
+
+def _stall_notice(run: Run, offset: int) -> tuple[dict | None, int]:
+    try:
+        file = (run.dir / "events.jsonl").open("rb")
+    except FileNotFoundError:
+        return None, offset
+    with file:
+        if offset > os.fstat(file.fileno()).st_size:
+            offset = 0
+        file.seek(offset)
+        while line := file.readline():
+            if not line.endswith(b"\n"):
+                break
+            offset = file.tell()
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("event") == "stall_detected":
+                return event, offset
+    return None, offset
 
 
 def _age(status: dict) -> float:

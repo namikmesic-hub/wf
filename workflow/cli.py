@@ -212,6 +212,15 @@ def main(argv: list[str] | None = None) -> int:
     steering.add_argument("--runs-dir", **runs_dir)
     steering.set_defaults(handler=_steer)
 
+    stalled = commands.add_parser("stall", help="end a stalled attempt or give it more time")
+    stalled.add_argument("run_id", metavar="run-id")
+    stalled.add_argument("node")
+    stalled.add_argument("action", choices=("end", "wait"))
+    stalled.add_argument("--item", type=int)
+    stalled.add_argument("--json", action="store_true")
+    stalled.add_argument("--runs-dir", **runs_dir)
+    stalled.set_defaults(handler=_stall)
+
     examples = commands.add_parser("examples", help="copy wf's complete example workflows into a folder")
     examples.add_argument("dir", nargs="?", type=Path, default=Path("wf-examples"))
     examples.set_defaults(handler=_examples)
@@ -447,6 +456,21 @@ def _config_show(args) -> int:
     return 0
 
 
+def _stall(args) -> int:
+    run = _find(args.run_id, args.runs_dir)
+    if run is None:
+        return 1
+    try:
+        path = steer.target(run, args.node, args.item)
+        answer = steer.send(run, path, action=args.action)
+    except (steer.SteerError, OSError) as error:
+        print(f"wf stall: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps({"run": run.id, "node": path, **answer}) if args.json else
+          answer.get("reason") or f"Stall action {args.action} accepted for {path}.")
+    return int(answer["status"] == "none")
+
+
 def _steer(args) -> int:
     try:
         text = _message(args)
@@ -529,13 +553,15 @@ def _describe(current: dict) -> str:
         detail = f"stopped: {current.get('reason')} ({current.get('retry')})"
     elif status == "limit":
         detail = f"paused at a limit: {current.get('reason')} ({current.get('retry')})"
-    elif status == "running" and current.get("agents_waiting"):
-        detail = "running, waiting for an agent slot: " + ", ".join(
+    elif status == "stall_detected":
+        detail = "running, no progress: " + ", ".join(observe.where(stall) for stall in current.get("stalls", []))
+    else:
+        detail = status
+    if status in ("running", "stall_detected") and current.get("agents_waiting"):
+        detail += ", waiting for an agent slot: " + ", ".join(
             w["node"] + (f" ({w['harness']}, {'global' if w['capacity'] == 'global' else 'harness'} cap)"
                          if w.get("capacity") else "")
             for w in current["agents_waiting"])
-    else:
-        detail = status
     return f"{run_id} [{current.get('workflow')}]: {detail}" + (f" (follow-up {n})" if (n := current.get("follow_up")) else "")
 
 

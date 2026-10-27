@@ -90,7 +90,7 @@ def test_a_runs_trace_holds_each_kind_of_record_and_its_ids_nest(repo, monkeypat
     found = records()
     assert {r["kind"] for r in found} == {
         "run", "pass", "job", "render", "routes", "attempt", "turn", "message", "tool_call", "tool_result",
-        "submit_result", "turn_end", "attempt_end", "job_end", "run_stopped"}
+        "submit_result", "turn_end", "attempt_end", "job_end", "run_stopped", "progress", "tool_end"}
     ids = {r["id"] for r in found}
     for record in found:  # each parent is a record of its own, and each id starts with its parent's
         assert record["parent"] is None or (record["parent"] in ids and (record["parent"] == "run" or record["id"].startswith(record["parent"])))

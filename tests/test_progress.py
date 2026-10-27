@@ -663,3 +663,16 @@ def test_wf_status_still_says_where_a_run_stands_when_its_files_change_meanwhile
     assert (state["status"], state["progress"]) == ("failed", None)
     (failed / "events.jsonl").unlink()
     assert report.events(Run.at(failed)) == []
+
+
+def test_a_stall_keeps_the_live_node_and_its_estimate_moving(monkeypatch):
+    tracker = progress.Tracker(parse(LOOP))
+    tracker.add(started("explore"))
+    learned = progress.Earlier(1, {node: 100 for node in tracker.workflow.nodes}, {})
+    now = progress._seconds(T0)
+    monkeypatch.setattr(progress.time, "time", lambda: now + 10)
+    assert tracker.states("stall_detected")["explore"] == "running"
+    first = tracker.estimate("stall_detected", learned)
+    assert first == tracker.estimate("running", learned)
+    monkeypatch.setattr(progress.time, "time", lambda: now + 20)
+    assert tracker.estimate("stall_detected", learned)["left_s"] < first["left_s"]

@@ -367,6 +367,12 @@ EVENT_ROWS = {
 }
 
 
+for rows in (TRACE_ROWS, EVENT_ROWS):
+    for row in rows["attempts"]:
+        for name in export.PROGRESS_COLUMNS:
+            row.setdefault(name, None)
+
+
 # ---------- a trace ----------
 
 
@@ -1154,6 +1160,12 @@ def test_the_records_of_a_real_run_give_a_row_for_each_attempt_turn_tool_call_an
     assert [(c["call_id"], c["tool"], c["harness"], c["model"], c["is_error"]) for c in found["tool_calls"]] == [
         ("t2.c1", "Read", "claude-code", "opus", False)]
     assert [(r["node"], r["taken"], r["to"]) for r in found["routes"]] == [("each", 0, ["end"])]
+    for attempt in found["attempts"]:
+        if attempt["kind"] == "agent":
+            assert attempt["measure_version"] == 2
+            assert attempt["last_progress_at"] is not None
+            wall = export._seconds(attempt["started"], attempt["ended"])
+            assert sum(attempt[key] for key in ("startup_s", "asleep_s", "tool_s", "active_s", "idle_s")) == pytest.approx(wall)
     (row,) = found["runs"]
     assert (row["workflow"], row["status"], row["tokens"], row["cost_usd"], row["source"]) == ("flow", "succeeded", 100, 0.01, "trace")
     assert row["repo_key"] == runs.repo_key(repo.resolve())
@@ -1302,11 +1314,12 @@ def test_prepare_adds_version_one_to_the_old_schema_and_keeps_old_rows(empty):
     store = store_at(empty)
     query(empty, "CREATE DATABASE wf")
     old = export.SCHEMA.read_text().split("CREATE TABLE IF NOT EXISTS schema_version")[0]
-    old = old.replace("    duration_basis Nullable(String), awake_s Nullable(Float64), asleep_s Nullable(Float64),\n", "")
+    old = "\n".join(line for line in old.splitlines()
+                    if not any(f"{name} " in line for name in export.PROGRESS_COLUMNS))
     for statement in export._statements(old):
         query(empty, statement.replace("EXISTS ", "EXISTS wf.", 1))
     store.insert("runs", TRACE_ROWS["runs"])
-    rows = [{key: value for key, value in row.items() if key not in ("duration_basis", "awake_s", "asleep_s")}
+    rows = [{key: value for key, value in row.items() if key not in export.PROGRESS_COLUMNS}
             for row in TRACE_ROWS["attempts"]]
     store.insert("attempts", rows)
     before = query(empty, "SELECT count() FROM wf.attempts FINAL")

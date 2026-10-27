@@ -217,12 +217,14 @@ def test_each_step_has_a_state_and_a_step_that_runs_shows_its_numbers_so_far(rep
     assert found["metrics"]["nodes"]["implement"]["tokens"] == 10  # the turn's own numbers, at its end
 
 
-def test_a_run_that_moves_shows_its_progress_in_the_run_list(repo):
+@pytest.mark.parametrize("state", ["running", "stall_detected"])
+def test_a_run_that_moves_shows_its_progress_in_the_run_list(repo, state):
     Path("flow.yaml").write_text(FLOW.lstrip())
     run = runs.create(Path.cwd(), "flow", [Path("flow.yaml")], Path("flow.yaml"), {})  # running: just started
     run.add_event({"event": "node_started", "node": "think", "pass": 1})
+    run.set_status(state)
     (only,) = ui.run_list(ui.Source(Path.cwd()))["runs"]
-    assert (only["status"], only["progress"]) == ("running", {"step": 1, "steps": 2, "percent": 0, "left_s": None})
+    assert (only["status"], only["progress"]) == (state, {"step": 1, "steps": 2, "percent": 0, "left_s": None})
 
 
 def test_a_damaged_run_leaves_out_only_its_own_progress_from_the_run_list(repo, monkeypatch):
@@ -770,3 +772,21 @@ def test_a_port_in_use_gives_way_to_a_free_one(server, finished):
     assert said[0].startswith(f"Port {server.port} is in use, so wf ui uses port ")
     assert opened[0].startswith("http://127.0.0.1:") and "#token=" in opened[0] and opened[0] != server.url
     assert said[1] == f"wf ui: {opened[0]} shows the runs in {finished.dir.parent}. Ctrl-C stops it."
+
+
+def test_a_stall_keeps_the_live_nodes_and_their_clocks_moving(repo, monkeypatch):
+    Path("flow.yaml").write_text(FLOW.lstrip())
+    run = runs.create(Path.cwd(), "flow", [Path("flow.yaml")], Path("flow.yaml"), {})
+    started = "2026-10-27T12:00:00+00:00"
+    run.add_event({"event": "node_started", "node": "think", "pass": 1, "time": started})
+    run.set_status("stall_detected", stalls=[{"node": "think", "pass": 1, "attempt": 1}])
+    now = observe.timestamp(started)
+    with run.driving():
+        monkeypatch.setattr(ui.time, "time", lambda: now + 10)
+        first = ui.run_detail(run)
+        assert first["states"]["think"] == "running"
+        assert first["metrics"]["nodes"]["think"]["duration_s"] == 10
+        monkeypatch.setattr(ui.time, "time", lambda: now + 20)
+        later = ui.run_detail(run)
+        assert later["states"]["think"] == "running"
+        assert later["metrics"]["nodes"]["think"]["duration_s"] == 20

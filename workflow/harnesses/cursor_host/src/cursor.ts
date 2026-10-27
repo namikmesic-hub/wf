@@ -330,11 +330,14 @@ export class CursorSession {
       this.thinking(turn, message.text, message.thinking_duration_ms);
     } else if (message.type === "request") {
       this.request(turn, message.request_id);
+    } else if (message.type === "status" && /\bretry\b|\bretrying\b|\breconnect/i.test(message.message ?? "")) {
+      this.wire.event(this.id, turn, "turn.retry", {});
     }
   }
 
   // The SDK sends a block of thinking as pieces of text, then a message with the time the block took.
   private thinking(turn: string, text: string, durationMs: number | null | undefined): void {
+    if (text) this.wire.event(this.id, turn, "turn.progress", { source: "thinking" });
     this.thought += text ?? "";
     if (durationMs === undefined) return;
     const took = typeof durationMs === "number" && Number.isFinite(durationMs) ? Math.max(0, Math.round(durationMs)) : null;

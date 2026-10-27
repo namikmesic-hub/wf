@@ -288,10 +288,18 @@ class CodexSession:
             elif method == "item/completed":
                 self._record(params.get("item") or {})
             elif method == "thread/tokenUsage/updated":
+                before = self._total.tokens
                 self._count(params.get("tokenUsage") or {})
+                if self._total.tokens > before:
+                    self.spec.emit({"event": "progress", "source": "tokens"})
+            elif method in ("item/agentMessage/delta", "item/reasoning/textDelta", "item/reasoning/summaryTextDelta"):
+                if params.get("delta"):
+                    self.spec.emit({"event": "progress", "source": "text"})
             elif method == "error":
                 error = params.get("error") or {}
                 transcript(log, "error", error=error, will_retry=params.get("willRetry"))
+                if params.get("willRetry"):
+                    self.spec.emit({"event": "sdk_retry", "message": error.get("message", "")})
                 if not params.get("willRetry"):
                     kind = "unavailable" if _code(error) in UNAVAILABLE else "failed"
                     status, message = kind, error.get("message") or str(_code(error))

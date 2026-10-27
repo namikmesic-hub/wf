@@ -178,6 +178,14 @@ class _Node(_Model):
     description: str | None = None
 
 
+class Stall(_Model):
+    after: Duration = "15m"
+    retries_after: Duration = "5m"
+    tool_after: Duration = "45m"
+    then: Literal["attention", "retry", "fallback"] = "attention"
+    retries: int = Field(1, ge=0)
+
+
 class AgentNode(_Node):
     kind: ClassVar[str] = "agent"
     instruction: str
@@ -193,6 +201,7 @@ class AgentNode(_Node):
     tools: Tools | None = None
     tools_with_shell: StrictBool | None = None  # only here, not in defaults: each such node says so
     project_instructions: StrictBool | None = None
+    stall: Stall | None = None
 
 
 class CommandNode(_Node):

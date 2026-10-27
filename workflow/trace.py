@@ -619,6 +619,7 @@ class Attempt:
         self._turn = 0
         self._calls: dict[str, str] = {}  # the harness's call id -> the trace's
         self._counts: Counter = Counter()
+        self.progress = None
 
     def begin(self, **facts) -> None:
         """The attempt starts, with these facts (harness, model, ...), which its end repeats."""
@@ -628,11 +629,19 @@ class Attempt:
     def end(self, outcome: str, error: str | None = None) -> None:
         """outcome: succeeded, failed, timed_out, unavailable, limit, waiting or cancelled."""
         self.scope.trace.check_clock()
+        ended = _now()
         awake = round(time.monotonic() - self._clock, 3)
+        self.facts.update(duration_basis="monotonic", awake_s=awake,
+                          asleep_s=round(self.scope.trace.asleep_s - self._asleep_start, 3))
+        if self.progress is not None:
+            wall = (datetime.fromisoformat(ended) - datetime.fromisoformat(self.started)).total_seconds()
+            self.facts.update(self.progress.finish(wall))
         self.scope.write("attempt_end", self.id, self.parent, **self.place, **self.facts, started=self.started,
-                         ended=_now(), duration_s=round(awake, 1), duration_basis="monotonic", awake_s=awake,
-                         asleep_s=round(self.scope.trace.asleep_s - self._asleep_start, 3), outcome=outcome,
+                         ended=ended, duration_s=round(awake, 1), outcome=outcome,
                          **({"error": error} if error else {}))
+
+    def signal(self, kind: str, **data) -> None:
+        self.scope.write(kind, self.id, self.parent, **self.place, **data)
 
     async def turn(self, number: int, sends: str, text: str, sending) -> Any:
         """Await `sending`, the harness's turn with `text`, between a turn and a turn_end record.
