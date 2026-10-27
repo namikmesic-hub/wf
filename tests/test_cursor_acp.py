@@ -128,7 +128,8 @@ def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monk
     assert run() == 0
     assert output() == {"out": "hi"}
     (start,) = entries(log, "start")
-    assert start["args"] == ["--model", "composer-2.5", "--sandbox", "disabled", "--disable-project-configs", "acp"]
+    assert start["args"] == ["--model", "composer-2.5", "--sandbox", "disabled", "--disable-project-configs",
+                             "--disable-indexing", "acp"]
     assert (start["api_key"], start["auth_token"], start["no_browser"]) == (False, False, "1")  # the local login, never a key
     assert Path(start["cwd"]).resolve() == Path.cwd().resolve()
     config = Path(start["config"])

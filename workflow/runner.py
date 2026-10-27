@@ -46,6 +46,7 @@ import os
 import shutil
 import signal
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -72,11 +73,13 @@ class InputError(Exception):
 
 def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
           detach: bool = False, as_json: bool = False, dry_run: Path | None = None,
-          limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
+          limit_pairs: list[str] | None = None, runs_dir: Path | None = None,
+          override_pairs: dict[str, list[str]] | None = None) -> int:
     try:
-        overrides = limits.parse(limit_pairs or [])
-    except limits.LimitError as error:
-        print(f"wf run: --limit {error}", file=sys.stderr)
+        new_limits = limits.parse(limit_pairs or [])
+        new_models = overrides.parse(override_pairs or {})
+    except (limits.LimitError, overrides.OverrideError) as error:
+        print(f"wf run: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:
         max_agents = capacity.configured()  # a bad cap stops a run before it exists, a detached one too
@@ -109,12 +112,23 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
     except InputError as error:
         print(f"wf run: {error}", file=sys.stderr)
         return 1
+    checked = overrides.check_start(new_models, workflows, inputs) if new_models else overrides.Checked()
+    if checked.problems:
+        return _refused("wf run", checked.problems)
+    if checked.found and script is None and (problems := asyncio.run(overrides.available(checked))):
+        return _refused("wf run", problems)
     try:
         run = runs.create(repo, workflow.name, report.files, path, inputs, home=home, dry_run=script is not None,
-                          limits=overrides, runs_dir=runs_dir)
+                          limits=new_limits, runs_dir=runs_dir)
     except OSError as error:  # e.g. --runs-dir names a file
         print(f"wf run: can't make the run folder in {runs.runs_folder(repo, runs_dir)}: {error.strerror or error}",
               file=sys.stderr)
+        return 1
+    try:
+        _keep(run, {}, checked.found, {})
+    except OSError as error:
+        shutil.rmtree(run.dir)
+        print(f"wf run: can't keep the overrides: {error.strerror or error}", file=sys.stderr)
         return 1
     if script is not None:
         script.keep(run.dir / "dry-run")
@@ -131,8 +145,8 @@ def start(path: Path, pairs: list[str], input_file: Path | None, no_input: bool,
             print(f"Dry run: these commands aren't in the script, so they really run if they're reached: {', '.join(real)}")
     try:
         with run.driving():
-            ctx = RunContext(workflow, run, home, script=script, limits=limits.effective(workflow.limits, overrides),
-                             max_agents=max_agents)
+            ctx = RunContext(workflow, run, home, script=script, limits=limits.effective(workflow.limits, new_limits),
+                             max_agents=max_agents, overrides=run.overrides())
             ctx.trace.run("started", workflow=workflow.name, inputs=inputs, dry_run=script is not None)
             return _drive(ctx, {"input": inputs}, asking)
     except runs.RunBusy as error:
@@ -450,7 +464,7 @@ async def _stream(ctx: RunContext, command) -> StateSnapshot:
         ctx.trace.know(lambda: graph.variables(before.values, ctx))  # a job that reruns first may show them
         try:
             stalls = {}
-            async with steer.answering(ctx.run, ctx.steering):
+            async with ctx.trace.trace.watching(), steer.answering(ctx.run, ctx.steering):
                 async for event in compiled.astream(command, config, context=ctx, stream_mode="custom", durability="sync"):
                     ctx.run.add_event(event)
                     key = (event.get("node"), event.get("pass"), event.get("index"), event.get("attempt"))
@@ -613,7 +627,9 @@ def describe(event: dict) -> str | None:
         model = f" {event['model']}" if event.get("model") else ""
         return f"  {where}: attempt {event['attempt']} runs on {event['harness']}{model}, as the override for {event['override']} says"
     if kind == "slot_waiting":
-        return f"  {where}: attempt {event['attempt']} waits for an agent slot ({event['max_agents']} of {event['max_agents']} in use)"
+        scope = f" for {event['capacity']}" if event.get("capacity") not in (None, "global") else ""
+        return (f"  {where}: attempt {event['attempt']} waits for an agent slot{scope} "
+                f"({event['max_agents']} of {event['max_agents']} in use)")
     if kind == "slot_taken":
         return f"  {where}: attempt {event['attempt']} got an agent slot after {event['waited_s']:g}s"
     if kind == "warning":
@@ -687,7 +703,8 @@ def _parse(raw: str, field: dict):
 
 
 def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, as_json: bool = False,
-              limit_pairs: list[str] | None = None, runs_dir: Path | None = None) -> int:
+              limit_pairs: list[str] | None = None, runs_dir: Path | None = None,
+              override_pairs: dict[str, list[str]] | None = None) -> int:
     """`wf continue`: give a run that succeeded a follow-up request. Then drive it again from the nodes that take
     the request (scheduler.follow_up_targets). `limit_pairs` (--limit) give the follow-up a budget of its own.
     With `detach`, check and prepare everything here, then let a background `wf retry` drive it.
@@ -701,13 +718,15 @@ def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, a
         run = runs.find(Path.cwd(), run_id, runs_dir)
         workflows = [spec.load(f) for f in validate.check(run.workflow_file).files]
         new_limits = limits.parse(limit_pairs or [])
+        new_models = overrides.parse(override_pairs or {})
         max_agents = capacity.configured()
-    except (OSError, spec.SpecError, ValueError, limits.LimitError, config.ConfigError) as error:
+    except (OSError, spec.SpecError, ValueError, limits.LimitError, overrides.OverrideError, config.ConfigError) as error:
         print(f"{name}: {'--limit ' if isinstance(error, limits.LimitError) else ''}{error}", file=sys.stderr)
         return 1
     try:
         with run.driving() as lock:
-            return _checked_follow_up(run, workflows, request, no_input, detach, as_json, lock, new_limits, max_agents)
+            return _checked_follow_up(run, workflows, request, no_input, detach, as_json, lock, new_limits, max_agents,
+                                      new_models)
     except runs.RunBusy as error:
         print(f"{name}: {error}, and only a run that succeeded takes a follow-up. Follow it with: {run.command('wait')}",
               file=sys.stderr)
@@ -715,7 +734,8 @@ def follow_up(run_id: str, request: str, no_input: bool, detach: bool = False, a
 
 
 def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: str, no_input: bool, detach: bool,
-                       as_json: bool, lock: runs.Lock, new_limits: dict, max_agents: int | None) -> int:
+                       as_json: bool, lock: runs.Lock, new_limits: dict, max_agents: int | None,
+                       new_models: dict) -> int:
     name, workflow = "wf continue", workflows[0]
     ctx = RunContext(workflow, run, home={}, max_agents=max_agents)
     dry = bool(run.info().get("dry_run"))
@@ -729,10 +749,15 @@ def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: s
     if problem := _not_continuable(run, workflow, state):
         print(f"{name}: {problem}", file=sys.stderr)
         return 1
+    checked = overrides.check(new_models, workflows, state.values or {})
+    if checked.problems:
+        return _refused(name, checked.problems)
     home = _run_home(run, state)
     if problem := _repo_problem(run, workflow, home) or _signing_problem(workflows, home):
         print(f"{name}: {problem}", file=sys.stderr)
         return 1
+    if checked.found and not dry and (problems := asyncio.run(overrides.available(checked))):
+        return _refused(name, problems)
     try:
         _restore_worktrees(run, state.values, home, remake=dry)
     except workspaces.WorkspaceError as error:
@@ -740,12 +765,14 @@ def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: s
         return 1
     number, before = _number(state.values) + 1, run.status()
     try:
-        with _holding_signals():  # status.json says the follow-up runs before the checkpoints hold it
+        with _holding_signals(), _follow_up_settings(run, bool(checked.found)):
+            _keep(run, state.values, checked.found, {})
             run.set_status("running", follow_up=number)
             try:
                 asyncio.run(_give(ctx, {"request": request, "number": number, "limits": new_limits, "pending": True}))
             except BaseException:
-                run.set_status(before.get("status", "unknown"), **_details(before), follow_up=before.get("follow_up"))
+                if not checked.found:
+                    run.set_status(before.get("status", "unknown"), **_details(before), follow_up=before.get("follow_up"))
                 raise
     except BaseException as error:  # OSError, or the checkpoint store failing: the run stays as it was
         workspaces.remove_run(home["path"], run.id)
@@ -763,6 +790,34 @@ def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: s
              f"Run {run.id} takes follow-up {number} in the background. Follow it with: {run.command('wait')}", as_json)
         return 0
     return _retry(ctx, asyncio.run(_snapshot(ctx)), interactive() and not no_input, None)
+
+
+@contextlib.contextmanager
+def _follow_up_settings(run: runs.Run, enabled: bool) -> Iterator[None]:
+    """Save settings and status before overrides change them, and restore failed writes without new data blocks."""
+    if not enabled:
+        yield
+        return
+    with tempfile.TemporaryDirectory(prefix=".follow-up-", dir=run.dir) as folder:
+        saved = Path(folder)
+        for name in ("run.json", "status.json"):
+            os.link(run.dir / name, saved / name)
+        events = run.dir / "events.jsonl"
+        size = events.stat().st_size if events.exists() else None
+        try:
+            yield
+        except BaseException:
+            try:
+                (saved / "run.json").replace(run.dir / "run.json")
+            finally:
+                try:
+                    (saved / "status.json").replace(run.dir / "status.json")
+                finally:
+                    if size is None:
+                        events.unlink(missing_ok=True)
+                    else:
+                        run.take_back_events(size)
+            raise
 
 
 def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapshot) -> str | None:

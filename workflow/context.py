@@ -102,7 +102,7 @@ class RunContext:
         if self._trace is None:
             root = self.root
             if root._trace_file is None:
-                root._trace_file = Trace(root.run.dir)
+                root._trace_file = Trace(root.run.dir, root.run.add_event)
             self._trace = Scope(root._trace_file, self.workflow, self.load, self.trace_parent, self.where, self.secret_outputs)
         return self._trace
 

@@ -17,7 +17,7 @@ import pytest
 
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, harnesses, runner
-from workflow.harnesses.codex import Codex, _tokens
+from workflow.harnesses.codex import APP_SERVER, Codex, _tokens, program
 from workflow.output_tool import FINISH, REMINDER
 
 FAKE = Path(__file__).parent / "fake_codex.py"
@@ -86,7 +86,7 @@ def test_paths_codex_names_the_codex_that_wf_runs(repo, monkeypatch, wf_home, ca
     monkeypatch.setitem(harnesses.FACTORIES, "codex", lambda: Codex(request_timeout=5))
     assert run() == 0
     assert output() == {"out": "hi"}
-    assert said.read_text() == "app-server --disable hooks --disable apps\n"
+    assert said.read_text() == "app-server --disable hooks --disable apps --disable plugins\n"
     assert "codex 0.1.0 is installed; wf is tested with" in capsys.readouterr().out  # the version of that codex
 
 
@@ -280,6 +280,15 @@ def test_progress_shows_commands_and_file_changes(repo, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "ask: command git status" in out
     assert "ask: edit a.py" in out
+
+
+@pytest.mark.harness
+def test_the_installed_codex_disables_plugins_and_has_removed_remote_models():
+    result = subprocess.run([program(), *APP_SERVER[1:], "--disable", "remote_models", "features", "list"],
+                            capture_output=True, text=True, check=True, timeout=10)
+    features = {parts[0]: parts[1:] for line in result.stdout.splitlines() if (parts := line.split())}
+    assert features["plugins"][-1] == "false"
+    assert features["remote_models"] == ["removed", "false"]
 
 
 @pytest.mark.harness

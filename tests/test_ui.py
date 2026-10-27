@@ -4,6 +4,7 @@ import errno
 import http.client
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,6 +33,7 @@ def repo(tmp_path, monkeypatch):
 FLOW = """
 version: 1
 name: flow
+description: Run a thought and check its result.
 defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
 start: {input: {}}
 nodes:
@@ -532,6 +534,211 @@ def test_the_server_serves_the_page_and_its_json_on_this_machine_only(server, fi
     assert status == 200 and json.loads(body)["events"][0]["text"] == "▶ think"
     status, _, body = get(server, f"/api/file?id={finished.id}&path=nodes/check/1/attempt-1.log")
     assert status == 200 and json.loads(body)["text"] == "checked\n"
+
+
+def test_the_run_api_has_the_task_inputs_description_and_end_output(server, finished):
+    inputs = {"task": "Fix https://linear.app/team/issue/DENG-860/task.\nKeep this line.\n\nAdd the flag.",
+              "branch": "fm/task", "pr": "https://github.com/owner/repo/pull/12", "delivery_mode": "branch", "count": 2}
+    output = {"pr_url": "https://github.com/owner/repo/pull/12", "head": "abc123", "not_ready": "Tests failed."}
+    runs.write_json(finished.dir / "input.json", inputs)
+    finished.set_output(output)
+    status, _, body = get(server, f"/api/run?id={finished.id}")
+    assert status == 200
+    assert json.loads(body)["brief"] == {"workflow": "flow", "description": "Run a thought and check its result.",
+                                       "inputs": inputs, "main_input": "task", "follow_ups": [], "output": output}
+
+
+def test_the_run_api_has_each_follow_up_request_with_its_number_and_time(server):
+    Path("follow.yaml").write_text(dedent("""
+        version: 1
+        name: follow
+        start: {input: {}}
+        follow_up: {to: work}
+        nodes:
+          work: {needs: [start], command: "true"}
+        end: {output: {}}
+    """).lstrip())
+    assert cli.main(["run", "follow.yaml"]) == 0
+    run = next(run for run in runs.all_runs(Path.cwd()) if run.info()["workflow"] == "follow")
+    first = "Fix https://linear.app/team/issue/DENG-861/task.\n\n" + "Keep the task text. " * 500
+    assert cli.main(["continue", run.id, first]) == 0
+    status, _, body = get(server, f"/api/run?id={run.id}")
+    assert status == 200
+    assert json.loads(body)["brief"]["follow_ups"][0]["request"] == first
+    second = "Use https://github.com/owner/repo/pull/15."
+    assert cli.main(["continue", run.id, second]) == 0
+    status, _, body = get(server, f"/api/run?id={run.id}")
+    assert status == 200
+    follows = json.loads(body)["brief"]["follow_ups"]
+    assert [(follow["number"], follow["request"]) for follow in follows] == [(2, second), (1, first)]
+    assert all(observe.timestamp(follow["time"]) > 0 for follow in follows)
+
+
+@pytest.mark.parametrize("content", [None, "", "{}", "null", "[]", "{", '{"task": ""}'])
+def test_the_run_api_allows_missing_empty_or_incomplete_inputs(server, finished, content):
+    path = finished.dir / "input.json"
+    if content is None:
+        path.unlink()
+    else:
+        path.write_text(content)
+    status, _, body = get(server, f"/api/run?id={finished.id}")
+    assert status == 200
+    brief = json.loads(body)["brief"]
+    assert brief["inputs"] == ({"task": ""} if content == '{"task": ""}' else {})
+    assert brief["main_input"] is None
+    assert get(server, "/api/runs")[0] == 200
+
+
+@pytest.mark.parametrize(("inputs", "summary"), [
+    ({"task": "Fix the flag.\nThen add a check.", "branch": "fm/a-long-branch-name"}, "Fix the flag."),
+    ({"note": "Short", "request": "Add the flag\nand check it. Next task."}, "Add the flag and check it."),
+    ({"pr": "https://github.com/owner/repo/pull/12"}, "https://github.com/owner/repo/pull/12"),
+    ({"repository": "owner/repo", "login": "a-long-account-name"}, "owner/repo"),
+    ({"task": "", "pr": "owner/repo#12"}, "owner/repo#12"),
+    ({}, ""),
+])
+def test_the_runs_api_has_a_one_line_task_summary(server, finished, inputs, summary):
+    runs.write_json(finished.dir / "input.json", inputs)
+    status, _, body = get(server, "/api/runs")
+    assert status == 200
+    assert json.loads(body)["runs"][0]["summary"] == summary
+
+
+@pytest.mark.parametrize("kind", ["direct", "sub", "all", "missing_workflow", "missing_sub"])
+def test_the_ui_hides_secret_start_inputs_before_the_run_starts(server, kind):
+    secret = "private-token-https://secret.example/token"
+    inputs = {"task": "Add the public flag.", "token": secret}
+    child = Path("child.yaml")
+    child.write_text(dedent("""
+        version: 1
+        name: child
+        start: {input: {token: {type: string}}}
+        nodes:
+          use:
+            needs: [start]
+            command: "true"
+            env: {TOKEN: "{{ start.token }}"}
+            secret_env: [TOKEN]
+        end: {output: {}}
+    """).lstrip())
+    source = child.read_text().replace("name: child", "name: private").replace(
+        "start: {input: {token: {type: string}}}", "start: {input: {task: {type: string}, token: {type: string}}}")
+    if kind == "all":
+        source = source.replace("{{ start.token }}", "{{ start | tojson }}")
+    elif kind in ("sub", "missing_sub"):
+        source = source[:source.index("nodes:")] + dedent("""
+            nodes:
+              use:
+                needs: [start]
+                workflow: child.yaml
+                with: {token: "{{ start.token }}"}
+            end: {output: {}}
+        """).lstrip()
+    path = Path("private.yaml")
+    path.write_text(source)
+    run = runs.create(Path.cwd(), "private", [path, child], path, inputs)
+    if kind == "missing_workflow":
+        run.workflow_file.unlink()
+    elif kind == "missing_sub":
+        (run.workflow_file.parent / child).unlink()
+    assert secret in (run.dir / "input.json").read_text()
+    assert not (run.dir / "trace.jsonl").exists()
+    status, _, body = get(server, f"/api/run?id={run.id}")
+    assert status == 200 and secret.encode() not in body
+    expected = {} if kind.startswith("missing_") else {"task": "[secret]" if kind == "all" else inputs["task"], "token": "[secret]"}
+    assert json.loads(body)["brief"]["inputs"] == expected
+    status, _, body = get(server, "/api/runs")
+    assert status == 200 and secret.encode() not in body
+    item = next(item for item in json.loads(body)["runs"] if item["id"] == run.id)
+    assert item["summary"] == (inputs["task"] if kind in ("direct", "sub") else "")
+
+
+@pytest.fixture
+def secret_run(repo):
+    Path("secret.yaml").write_text(dedent("""
+        version: 1
+        name: secret
+        start: {input: {task: {type: string}, token: {type: string}}}
+        nodes:
+          a: {needs: [start], workflow: child.yaml, with: {token: "{{ start.token }}"}}
+          b: {needs: [a], workflow: child.yaml, with: {token: "{{ start.token }}"}}
+        end: {output: {}}
+    """).lstrip())
+    Path("child.yaml").write_text(dedent("""
+        version: 1
+        name: child
+        start: {input: {token: {type: string}}}
+        nodes:
+          use:
+            needs: [start]
+            command: "true"
+            env: {TOKEN: "{{ start.token }}"}
+            secret_env: [TOKEN]
+        end: {output: {}}
+    """).lstrip())
+    return runs.create(Path.cwd(), "secret", [Path("secret.yaml"), Path("child.yaml")], Path("secret.yaml"),
+                       {"task": "Add the flag.", "token": "private-token"})
+
+
+@pytest.mark.parametrize("first", ["/api/runs", "/api/run"])
+def test_the_run_list_and_brief_share_cached_secret_input_names(server, secret_run, monkeypatch, first):
+    run = secret_run
+    loaded, real = [], spec.load
+
+    def load(path):
+        if path.is_relative_to(run.dir):
+            loaded.append(path)
+        return real(path)
+
+    monkeypatch.setattr(spec, "load", load)
+    path = f"/api/run?id={run.id}"
+    assert get(server, path if first == "/api/run" else first)[0] == 200
+    if first == "/api/run":
+        assert loaded.count(run.workflow_file) <= 2
+    for refresh in range(2):
+        status, _, body = get(server, path)
+        assert status == 200
+        assert json.loads(body)["brief"]["inputs"] == {"task": "Add the flag.", "token": "[secret]"}
+        status, _, body = get(server, "/api/runs")
+        assert status == 200 and b"private-token" not in body
+        item = next(item for item in json.loads(body)["runs"] if item["id"] == run.id)
+        assert item["summary"] == "Add the flag."
+        if refresh == 0:
+            initial = loaded.copy()
+    assert loaded == initial
+
+
+@pytest.mark.parametrize("missing", ["secret.yaml", "child.yaml"])
+def test_secret_input_names_are_cached_only_after_all_workflow_files_can_be_read(secret_run, monkeypatch, missing):
+    run = secret_run
+    loaded, real = [], spec.load
+    target = run.workflow_file.parent / missing
+    failed = False
+
+    def load(path):
+        nonlocal failed
+        loaded.append(path)
+        if path == target and not failed:
+            failed = True
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return real(path)
+
+    monkeypatch.setattr(spec, "load", load)
+    assert ui._inputs(run) == {}
+    loaded.clear()
+    assert ui._inputs(run) == {"task": "Add the flag.", "token": "[secret]"}
+    assert loaded.count(run.workflow_file) == 1
+    assert loaded.count(run.workflow_file.parent / "child.yaml") == 1
+    loaded.clear()
+    assert ui._inputs(run) == {"task": "Add the flag.", "token": "[secret]"}
+    assert loaded == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_the_task_card_with_node():
+    done = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_ui_page.cjs"))],
+                          capture_output=True, text=True, timeout=10)
+    assert done.returncode == 0, done.stdout + done.stderr
 
 
 def test_the_server_gives_data_only_to_the_page_that_has_its_key(server, finished):

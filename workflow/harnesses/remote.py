@@ -34,8 +34,7 @@ How the operations map onto base.py's interfaces:
   steer.status event brings it. A message the runtime then declines goes back to the runner
   (given_back()), which sends it as the next turn, as it sends the ones that steer() returned None
   for. One that the runtime never answers for is unconfirmed when the session closes.
-- Session.close() is turn.cancel when a turn still runs, usage.read for the transcript, and
-  session.close.
+- Session.close() sends turn.cancel when a turn still runs, then session.close.
 
 Error classes, in an answer or in turn.ended: unavailable, auth and usage_limit make the harness
 unavailable for the attempt, so the runner goes to the node's next harness. An auth error's text
@@ -60,11 +59,10 @@ late_usage().
 A turn's kind, for turn.started: the first is the instruction. The runner sends only reminders
 (output_tool.REMINDER) and messages from `wf steer` after it, so the others are told apart by text.
 
-What the agent does goes where each adapter puts it (base.py): an agent_tool progress event when
-a tool call starts, the attempt's transcript (sent, text, tool, tool_result, turn, usage lines),
-and the trace (spec.trace). For a wf tool the peer sends only the size of the answer, and so the
-transcript and the trace keep only that. A block of the model's thinking (turn.thinking: its text
-and the milliseconds it took) and the runtime's id for a request (turn.request) go to the trace only.
+What the agent does goes where each adapter puts it (base.py).
+These records include agent_tool progress, the attempt's transcript (sent, text, tool, tool_result, and turn lines), and the trace (spec.trace).
+The peer sends only the size of a wf tool's answer, and the transcript and trace keep only that size.
+A block of the model's thinking, with its duration, and each runtime request id go to the trace only.
 """
 
 import asyncio
@@ -84,7 +82,6 @@ PROTOCOL = "wf-session/0"
 MAX_FRAME = 1024 * 1024
 STEER_TIMEOUT = 10  # seconds: inside the time `wf steer` waits for an answer (steer.py)
 CLOSE_TIMEOUT = 5  # seconds for each step of closing a session
-USAGE_TIMEOUT = 6  # seconds: the Cursor host gives Cursor 3 to answer, then answers without it
 RETRY_AFTER = 30  # seconds before the retry after a `transient` error that names no wait
 UNAVAILABLE = ("unavailable", "auth", "usage_limit", "not_found")
 CLOSED = {"kind": "peer.closed"}  # in a session's events: the peer is gone
@@ -624,9 +621,6 @@ class RemoteSession:
                     with contextlib.suppress(Exception):
                         await self.peer.request("turn.cancel", {"session": self.session}, timeout=CLOSE_TIMEOUT)
                         await asyncio.wait_for(self._turn_end(), CLOSE_TIMEOUT)
-                with contextlib.suppress(Exception):
-                    read = await self.peer.request("usage.read", {"session": self.session}, timeout=USAGE_TIMEOUT)
-                    transcript(self.spec.log, "usage", **read)
                 with contextlib.suppress(Exception):
                     await self.peer.request("session.close", {"session": self.session, "reason": "the attempt ended"},
                                             timeout=CLOSE_TIMEOUT)

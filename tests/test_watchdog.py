@@ -8,7 +8,7 @@ import pytest
 
 from fakes import Fake, ends, hang, submit
 from test_agents import flow, install, repo, run_dir
-from workflow import cli, export, firstmate, runs, spec, steer, validate, watchdog
+from workflow import cli, export, firstmate, runs, spec, steer, trace, validate, watchdog
 from workflow.harnesses.base import Recorder
 
 
@@ -304,17 +304,18 @@ def test_the_export_adds_progress_columns_to_an_existing_store(monkeypatch):
     wanted = export.schema()
     store = export.Store.__new__(export.Store)
     store.database, store.where = "wf", "test"
+    new_columns = set(export.PROGRESS_COLUMNS) - {"duration_basis", "awake_s", "asleep_s"}
     old_columns = [{"table": table, "name": name, "type": kind}
                    for table, definition in wanted.items() for name, kind in definition["columns"].items()
-                   if table != "attempts" or name not in export.PROGRESS_COLUMNS]
+                   if table != "attempts" or name not in new_columns]
     tables = {table: {"uuid": table, "engine": definition["engine"], "sorting_key": definition["key"]}
               for table, definition in wanted.items()}
     statements = []
     monkeypatch.setattr(store, "_tables", lambda: tables)
-    monkeypatch.setattr(store, "_select", lambda *args: old_columns)
+    monkeypatch.setattr(store, "_select", lambda query, *names: [{"version": 1}] if names == ("version",) else old_columns)
     monkeypatch.setattr(store, "_post", lambda statement, **kwargs: statements.append(statement))
     store.prepare()
-    assert len(statements) == len(export.PROGRESS_COLUMNS)
+    assert len(statements) == len(new_columns)
     assert all(statement.startswith("ALTER TABLE attempts ADD COLUMN IF NOT EXISTS ") for statement in statements)
     assert store.identity
 
@@ -469,7 +470,8 @@ def test_the_driver_removes_an_ended_attempt_from_its_stall_state(repo, monkeypa
         pass
 
     ctx = SimpleNamespace(run=run, _agents_waiting={}, new_event_loop=lambda: None, resume=lambda values: None,
-                          trace=SimpleNamespace(know=lambda callback: None), steering=steer.Steering(), close_harnesses=close)
+                          trace=SimpleNamespace(know=lambda callback: None, trace=trace.Trace(run.dir, run.add_event)),
+                          steering=steer.Steering(), close_harnesses=close)
     monkeypatch.setattr(runner.graph, "build", lambda saver: Compiled())
     with run.driving():
         asyncio.run(runner._stream(ctx, None))
@@ -503,7 +505,8 @@ def test_one_attempt_cannot_clear_a_siblings_stall(repo, monkeypatch):
         pass
 
     ctx = SimpleNamespace(run=run, _agents_waiting={}, new_event_loop=lambda: None, resume=lambda values: None,
-                          trace=SimpleNamespace(know=lambda callback: None), steering=steer.Steering(), close_harnesses=close)
+                          trace=SimpleNamespace(know=lambda callback: None, trace=trace.Trace(run.dir, run.add_event)),
+                          steering=steer.Steering(), close_harnesses=close)
     monkeypatch.setattr(runner.graph, "build", lambda saver: Compiled())
     with run.driving():
         asyncio.run(runner._stream(ctx, None))
@@ -534,7 +537,8 @@ def test_an_active_firstmate_poll_keeps_a_stall_between_reads(repo, monkeypatch,
         pass
 
     ctx = SimpleNamespace(run=run, _agents_waiting={}, new_event_loop=lambda: None, resume=lambda values: None,
-                          trace=SimpleNamespace(know=lambda callback: None), steering=steer.Steering(), close_harnesses=close)
+                          trace=SimpleNamespace(know=lambda callback: None, trace=trace.Trace(run.dir, run.add_event)),
+                          steering=steer.Steering(), close_harnesses=close)
     monkeypatch.setattr(runner.graph, "build", lambda saver: Compiled())
 
     def between_reads(seconds):

@@ -115,7 +115,7 @@ end: {output: {out: "{{ ask.summary }}"}}
     kinds = {(way, frame["t"]) for way, frame in frames}
     assert kinds == {("out", "hello"), ("in", "welcome"), ("out", "req"), ("in", "res"), ("in", "ev"), ("in", "call"), ("out", "ret")}
     assert {frame["op"] for way, frame in frames if frame["t"] == "req"} == {
-        "session.open", "turn.start", "usage.read", "session.close"}
+        "session.open", "turn.start", "session.close"}
     events = [frame for way, frame in frames if frame["t"] == "ev"]
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))  # numbered, in order
     assert {"turn.thinking", "turn.request"} <= {e["kind"] for e in events}
@@ -205,9 +205,11 @@ def test_a_relative_wf_home_shares_one_cache_across_runs(tmp_path, monkeypatch, 
 
 
 @needs_node
-def test_a_rate_limit_before_open_returns_a_retry_before_the_client_timeout(tmp_path, monkeypatch, cursor_host):
-    error = {"name": "ConfigurationError", "message": "rate limit"}
-    use(monkeypatch, tmp_path, cursor_host, timeout=1, create_errors=[error])
+@pytest.mark.parametrize("source", ["catalog_errors", "create_errors"])
+def test_a_rate_limit_before_open_returns_a_retry_before_the_client_timeout(tmp_path, monkeypatch, cursor_host, source):
+    message = "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint"
+    error = {"name": "ConfigurationError", "message": message}
+    log = use(monkeypatch, tmp_path, cursor_host, timeout=1, **{source: [error]})
 
     async def main():
         harness = harnesses.create("cursor")
@@ -216,17 +218,40 @@ def test_a_rate_limit_before_open_returns_a_retry_before_the_client_timeout(tmp_
         spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="composer-2.5", effort=None,
                            tool=tool, log=tmp_path / "attempt.log", emit=lambda event: None)
         try:
-            with pytest.raises(harnesses.StartFailed, match="request time limit has expired"):
+            with pytest.raises(harnesses.StartFailed) as failed:
                 await harness.session(spec)
+            assert str(failed.value) == f"cursor: {message}"
+            assert 60 <= failed.value.retry_after <= 75
         finally:
             await harness.close()
 
     asyncio.run(main())
+    assert len(entries(log, "models.list" if source == "catalog_errors" else "create")) == 1
+
+
+@needs_node
+def test_a_model_check_keeps_cursor_rate_limit_text(tmp_path, monkeypatch, cursor_host):
+    message = "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint"
+    error = {"name": "ConfigurationError", "message": message}
+    log = use(monkeypatch, tmp_path, cursor_host, timeout=1, catalog_errors=[error])
+
+    async def main():
+        harness = harnesses.create("cursor")
+        await harness.open(tmp_path / "run")
+        try:
+            with pytest.raises(Unavailable) as failed:
+                await harness.check_model("composer-2.5")
+            assert str(failed.value) == message
+        finally:
+            await harness.close()
+
+    asyncio.run(main())
+    assert len(entries(log, "models.list")) == 1
 
 
 @needs_node
 @pytest.mark.parametrize("source", ["catalog_errors", "create_errors"])
-def test_cursor_rate_limits_retry_before_the_session_opens(repo, monkeypatch, cursor_host, source):
+def test_cursor_rate_limits_defer_to_the_attempt_retry(repo, monkeypatch, cursor_host, source):
     error = {"name": "ConfigurationError", "code": "resource_exhausted",
              "message": "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint"}
     log = use(monkeypatch, repo, cursor_host,
@@ -240,8 +265,8 @@ nodes:
   ask: {needs: [start], instruction: Say hi, retry: 0}
 end: {output: {out: "{{ ask.summary }}"}}
 """)
-    assert cli.main(["run", "flow.yaml"]) == 0
-    assert len(entries(log, "models.list" if source == "catalog_errors" else "create")) == 2
+    assert cli.main(["run", "flow.yaml"]) == 1
+    assert len(entries(log, "models.list" if source == "catalog_errors" else "create")) == 1
 
 
 @needs_node
@@ -525,7 +550,7 @@ def test_doctor_without_a_key_says_how_to_add_one(monkeypatch, cursor_host, tmp_
 
 @needs_node
 def test_closing_a_session_ends_its_host(tmp_path, monkeypatch, cursor_host):
-    use(monkeypatch, tmp_path, cursor_host)
+    log = use(monkeypatch, tmp_path, cursor_host)
 
     async def main():
         harness = harnesses.create("cursor")
@@ -535,8 +560,11 @@ def test_closing_a_session_ends_its_host(tmp_path, monkeypatch, cursor_host):
                            log=tmp_path / "attempt-1.log", emit=lambda event: None)
         session = await harness.session(spec)
         process = session.peer.process
+        usage = await session.peer.request("usage.read", {"session": session.session}, timeout=6)
+        assert usage["billed"]["usage"]["total_tokens"] == 1200
         await session.close()
         await harness.close()
         return process.returncode
 
     assert asyncio.run(main()) == 0  # it stopped by itself when wf closed its end
+    assert len(entries(log, "getUsage")) == 1

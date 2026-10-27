@@ -131,8 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--dry-run", type=Path, metavar="SCRIPT", help="run with scripted agent results, answers and command results instead of real agents")
     run.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
     run.add_argument("--runs-dir", **runs_dir)
+    _override_arguments(run)
     run.set_defaults(handler=lambda a: runner.start(a.file, a.inputs, a.input_file, a.no_input, a.detach, a.json,
-                                                    a.dry_run, a.limits, a.runs_dir))
+                                                    a.dry_run, a.limits, a.runs_dir, _override_pairs(a)))
 
     retry = commands.add_parser("retry", help="continue a failed or paused run from its last checkpoint")
     retry.add_argument("run_id", metavar="run-id")
@@ -141,17 +142,11 @@ def main(argv: list[str] | None = None) -> int:
     retry.add_argument("--detach", action="store_true", help="continue in the background")
     retry.add_argument("--json", action="store_true", help="with --detach: print the run id as JSON")
     retry.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
-    retry.add_argument("--model", action="append", dest="models", metavar="NODE=MODEL",
-                       help="another model for an agent node, or for one item with NODE[INDEX]=MODEL, for the rest "
-                            "of the run (repeat for several)")
-    retry.add_argument("--harness", action="append", dest="harnesses", metavar="NODE=HARNESS",
-                       help="the harness for that node or item: needed when the node names a list or a template")
-    retry.add_argument("--effort", action="append", dest="efforts", metavar="NODE=EFFORT",
-                       help="the effort for that node or item (not for cursor, whose model id carries it)")
+    _override_arguments(retry)
     retry.add_argument("--runs-dir", **runs_dir)
     retry.set_defaults(handler=lambda a: runner.retry(
         a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits, a.runs_dir,
-        {"model": a.models or [], "harness": a.harnesses or [], "effort": a.efforts or []}))
+        _override_pairs(a)))
 
     answer = commands.add_parser("answer", help="answer the questions a run waits on, and continue it")
     answer.add_argument("run_id", metavar="run-id")
@@ -563,7 +558,10 @@ def _describe(current: dict) -> str:
     else:
         detail = status
     if status in ("running", "stall_detected") and current.get("agents_waiting"):
-        detail += ", waiting for an agent slot: " + ", ".join(w["node"] for w in current["agents_waiting"])
+        detail += ", waiting for an agent slot: " + ", ".join(
+            w["node"] + (f" ({w['harness']}, {'global' if w['capacity'] == 'global' else 'harness'} cap)"
+                         if w.get("capacity") else "")
+            for w in current["agents_waiting"])
     return f"{run_id} [{current.get('workflow')}]: {detail}" + (f" (follow-up {n})" if (n := current.get("follow_up")) else "")
 
 
@@ -777,6 +775,20 @@ def _graph(args) -> int:
     return 0
 
 
+def _override_arguments(parser) -> None:
+    parser.add_argument("--model", action="append", dest="models", metavar="NODE=MODEL",
+                        help="another model for an agent node, or for one item with NODE[INDEX]=MODEL, for the rest "
+                             "of the run (repeat for several)")
+    parser.add_argument("--harness", action="append", dest="harnesses", metavar="NODE=HARNESS",
+                        help="the harness for that node or item: needed when the node names a list or a template")
+    parser.add_argument("--effort", action="append", dest="efforts", metavar="NODE=EFFORT",
+                        help="the effort for that node or item (not for cursor, whose model id carries it)")
+
+
+def _override_pairs(args) -> dict[str, list[str]]:
+    return {"harness": args.harnesses or [], "model": args.models or [], "effort": args.efforts or []}
+
+
 # ---------- wf continue ----------
 
 
@@ -798,6 +810,7 @@ def _continue_command(commands, no_input: dict, runs_dir: dict) -> None:
                            help="a limit for this follow-up instead of the file's, counted from its start: cost_usd=20, "
                                 "tokens=5000000, duration=2h, or NAME=none for no limit (repeat for several)")
     following.add_argument("--runs-dir", **runs_dir)
+    _override_arguments(following)
     following.set_defaults(handler=_continue)
 
 
@@ -807,7 +820,8 @@ def _continue(args) -> int:
     except ValueError as error:
         print(f"wf continue: {error}", file=sys.stderr)
         return 1
-    return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir)
+    return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir,
+                            _override_pairs(args))
 
 
 # ---------- wf metrics ----------
@@ -823,8 +837,8 @@ def _metrics_command(commands, runs_dir: dict) -> None:
         "export", help="write what runs did since their last export into ClickHouse's tables of wf runs",
         description="Write what runs did since their last export into ClickHouse's tables of wf runs: the runs named, "
                     "or each run of this repo. The ClickHouse is the one of url under [metrics] in ~/.wf/config.toml, "
-                    "with enabled = true. Each run folder keeps where its export stopped, in export.json, so exporting "
-                    "twice changes nothing.")
+                    "with enabled = true. Run folders keep offsets in export.json, so unchanged runs add no run rows. "
+                    "Each command writes an export_runs row when ClickHouse accepts it.")
     exporting.add_argument("run_ids", nargs="*", metavar="run-id")
     exporting.add_argument("--all-repos", action="store_true", help="the runs of every repo in the runs folder, not only this repo's")
     exporting.add_argument("--runs-dir", **runs_dir)
@@ -849,42 +863,50 @@ def _metrics_export(args) -> int:
     folder = runs.runs_folder(Path.cwd(), args.runs_dir)
     if args.all_repos:
         folder = folder.parent
-    chosen = _runs_to_export(args, folder)
+    started = export.export_time()
+    failure = ""
+    try:
+        chosen = _runs_to_export(args, folder)
+    except OSError as error:
+        print(f"wf metrics export: can't list the runs in {error.filename or folder}: {error.strerror or error}",
+              file=sys.stderr)
+        chosen, failure = [], "UnreadableFolder"
     if chosen is None:
-        return 1
-    if not chosen:
-        print(f"wf metrics export: no runs in {folder}")
-        return 0
+        chosen, failure = [], "UnreadableFolder"
     store = export.Store(chosen_config.metrics.url)
+    runs_read, rows_written = 0, 0
     try:
         store.prepare()
     except export.ExportError as error:
         print(f"wf metrics export: {error}", file=sys.stderr)
+        export.record_export(store, started, runs_read, rows_written, type(error).__name__)
         return 1
-    failed = False
+    before = store.rows_written
+    if not chosen and not failure:
+        print(f"wf metrics export: no runs in {folder}")
     for run in chosen:
+        runs_read += 1
         try:
             written = export.export(run, store)
         except export.UnreadableFolder as error:
             print(f"wf metrics export: run {run.id}: {error}", file=sys.stderr)
-            failed = True
+            failure = type(error).__name__
             continue
         except export.ExportError as error:  # ClickHouse: the runs after this one would fail the same way
             print(f"wf metrics export: run {run.id}: {error}", file=sys.stderr)
-            return 1
+            failure = type(error).__name__
+            break
         print(f"{run.id}: " + (", ".join(_count(count, ROWS[table]) for table, count in written.items()) or "nothing new"))
-    return 1 if failed else 0
+    recorded = export.record_export(store, started, runs_read, store.rows_written - before, failure)
+    return 1 if failure or not recorded else 0
 
 
 def _runs_to_export(args, folder: Path) -> list[runs.Run] | None:
-    """The runs named, once each and in their order, or else each run in `folder` (export.runs_in). None, after
-    it said why, when wf can't list `folder` or a run named isn't in it."""
-    try:
-        listed = export.runs_in(folder, every_repo=args.all_repos)
-    except OSError as error:
-        print(f"wf metrics export: can't list the runs in {error.filename or folder}: {error.strerror or error}",
-              file=sys.stderr)
-        return None
+    """The runs named, once each and in their order, or else each run in `folder` (export.runs_in).
+    Return None after a message when a named run is absent.
+    Raise OSError when the folder cannot be read.
+    """
+    listed = export.runs_in(folder, every_repo=args.all_repos)
     named = {run.id: run for run in listed}
     for run_id in args.run_ids:
         if run_id not in named:
