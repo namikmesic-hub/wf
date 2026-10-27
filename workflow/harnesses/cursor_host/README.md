@@ -3,6 +3,7 @@
 The Cursor host is the program that runs wf's Cursor sessions on Cursor's SDK (`@cursor/sdk`).
 wf starts one host for each session, as `node wf-cursor-host.js`, and speaks the wf-session/0 protocol to it over stdin and stdout.
 `workflow/harnesses/remote.py` is the other end, and `workflow/harnesses/cursor.py` configures it.
+The Python adapter gives the host an absolute catalog cache folder and a time limit below the client request timeout.
 
 ## How it is built and shipped
 
@@ -24,6 +25,9 @@ wf starts one host for each session, as `node wf-cursor-host.js`, and speaks the
 - `src/cursor.ts`: one session on the SDK.
   It maps the access levels, the tools, the SDK's messages and its errors.
 - `src/models.ts`: how a cursor-agent model id maps to the SDK's catalog.
+- `src/catalog.ts`: the shared model cache, with a separate lock for each API key.
+  The next caller removes a stopped process's lock.
+- `src/budget.ts`: one time limit for the cache wait, catalog call, and session open.
 - `src/main.ts`: hello and welcome, the operations, and the end of the process.
 - `protocol/`: the protocol as JSON Schema, and an example of each frame.
   Both test suites read them.

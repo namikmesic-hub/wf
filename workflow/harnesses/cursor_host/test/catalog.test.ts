@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { mock, test } from "node:test";
+import { setTimeout as pause } from "node:timers/promises";
 import { promisify } from "node:util";
 import { cachedCatalog, CATALOG_TTL_MS } from "../src/catalog.ts";
 import { retryRateLimit } from "../src/cursor.ts";
+import { RequestBudget } from "../src/budget.ts";
+import { HostError } from "../src/protocol.ts";
 
 const MODELS = [{ id: "composer-2.5", displayName: "Composer" }];
 const exec = promisify(execFile);
@@ -52,6 +56,77 @@ test("expired or damaged data is fetched again and a failed fetch releases the l
     assert.equal(calls, 3);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a dead process leaves a lock that the next fetch reclaims at once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wf-dead-catalog-"));
+  const script = `
+    import { writeFile } from 'node:fs/promises';
+    import { cachedCatalog } from ${JSON.stringify(new URL("../src/catalog.ts", import.meta.url).href)};
+    await cachedCatalog('key', async () => {
+      await writeFile(${JSON.stringify(join(root, "fetching"))}, 'started');
+      await new Promise(() => setInterval(() => {}, 1000));
+      return [];
+    }, ${JSON.stringify(root)});
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: "ignore" });
+  try {
+    for (let tries = 0; ; tries += 1) {
+      if ((await readdir(root)).includes("fetching")) break;
+      assert.ok(tries < 200, "the child did not take the lock");
+      await pause(10);
+    }
+    const ended = once(child, "exit");
+    child.kill("SIGKILL");
+    await ended;
+    let calls = 0;
+    const fetch = async () => { calls += 1; return MODELS; };
+    const found = await Promise.all(Array.from({ length: 4 }, () => cachedCatalog("key", fetch, root, new RequestBudget(2_000))));
+    assert.equal(calls, 1);
+    assert.ok(found.every(models => models[0].id === MODELS[0].id));
+    assert.equal((await readdir(root)).filter(name => name.includes(".lock")).length, 0);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const ended = once(child, "exit");
+      child.kill("SIGKILL");
+      await ended;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cache waits and both retry loops share one request budget", async () => {
+  const rate = Object.assign(new Error("rate limit"), { name: "RateLimitError" });
+  for (const cacheWait of [0, 10_000, 50_000]) {
+    let elapsed = 0;
+    const budget = new RequestBudget(54_000, () => elapsed);
+    const wait = async (ms: number) => { elapsed += ms; };
+    let catalogCalls = 0;
+    let sessionCalls = 0;
+    const open = async () => {
+      await budget.wait(cacheWait, wait);
+      await retryRateLimit(async () => { if (++catalogCalls < 4) throw rate; return []; }, wait, budget);
+      await retryRateLimit(async () => { if (++sessionCalls < 4) throw rate; return "open"; }, wait, budget);
+    };
+    await assert.rejects(open(), error => error instanceof HostError
+      && error.info.code === "cursor.request_timeout" && error.info.retryable);
+    assert.ok(elapsed < 54_000);
+    assert.ok(sessionCalls < 4);
+  }
+});
+
+test("a pending SDK call cannot hold the request past its budget", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const budget = new RequestBudget(100);
+    budget.retrying();
+    const pending = budget.run(() => new Promise(() => {}));
+    const refused = assert.rejects(pending, error => error instanceof HostError && error.info.retryable);
+    mock.timers.tick(100);
+    await refused;
+  } finally {
+    mock.timers.reset();
   }
 });
 

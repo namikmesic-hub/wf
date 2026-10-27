@@ -17,7 +17,7 @@ import keyring
 import pytest
 
 from cursor_sdk import KEY, entries, needs_node, use
-from workflow import cli, harnesses, runner, schemas
+from workflow import cli, config, harnesses, runner, schemas
 from workflow.harnesses import Unavailable, cursor, remote
 from workflow.harnesses.base import SessionSpec
 from workflow.harnesses.cursor_acp import CursorAcp
@@ -143,6 +143,50 @@ def test_pinned_and_bracket_sessions_share_the_catalog_but_checks_fetch_it(tmp_p
             assert all(catalog[0]["id"] == "composer-2.5" for catalog in entries(log, "local.catalog"))
             await harness.check_model("composer-2.5")
             assert len(entries(log, "models.list")) == 2
+        finally:
+            await harness.close()
+
+    asyncio.run(main())
+
+
+@needs_node
+def test_a_relative_wf_home_shares_one_cache_across_runs(tmp_path, monkeypatch, cursor_host):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WF_HOME", "relative-home")
+    log = use(monkeypatch, tmp_path, cursor_host)
+
+    async def main():
+        tool = ResultTool(schemas.object_schema({"summary": {"type": "string"}}))
+        for number in range(2):
+            harness = harnesses.create("cursor")
+            await harness.open(tmp_path / f"run-{number}")
+            try:
+                spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="composer-2.5", effort=None,
+                                   tool=tool, log=tmp_path / "attempt.log", emit=lambda event: None)
+                session = await harness.session(spec)
+                await session.close()
+            finally:
+                await harness.close()
+
+    asyncio.run(main())
+    assert len(entries(log, "models.list")) == 1
+    assert len(list((config.home() / "cache" / "cursor-models").glob("*.json"))) == 1
+
+
+@needs_node
+def test_a_rate_limit_before_open_returns_a_retry_before_the_client_timeout(tmp_path, monkeypatch, cursor_host):
+    error = {"name": "ConfigurationError", "message": "rate limit"}
+    use(monkeypatch, tmp_path, cursor_host, timeout=1, create_errors=[error])
+
+    async def main():
+        harness = harnesses.create("cursor")
+        await harness.open(tmp_path / "run")
+        tool = ResultTool(schemas.object_schema({"summary": {"type": "string"}}))
+        spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="composer-2.5", effort=None,
+                           tool=tool, log=tmp_path / "attempt.log", emit=lambda event: None)
+        try:
+            with pytest.raises(harnesses.StartFailed, match="request time limit has expired"):
+                await harness.session(spec)
         finally:
             await harness.close()
 

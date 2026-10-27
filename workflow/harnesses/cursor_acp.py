@@ -312,7 +312,10 @@ class CursorSession:
                 "protocolVersion": 1, "clientInfo": {"name": "wf", "version": "0.1.0"},
                 "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False,
                                        "_meta": {"parameterizedModelPicker": True}}})
-            await self.rpc.request("authenticate", {"methodId": "cursor_login"})
+            try:
+                await self.rpc.request("authenticate", {"methodId": "cursor_login"})
+            except (_RpcError, TimeoutError) as error:
+                raise Unavailable(f"Cursor could not sign in. Run `cursor-agent login`, then try again: {error or 'no answer'}") from error
             if saved is not None:
                 result = await self.rpc.request("session/load", {"sessionId": self.id, "cwd": str(spec.cwd),
                                                                   "mcpServers": servers})

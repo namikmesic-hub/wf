@@ -385,6 +385,15 @@ def test_a_cursor_agent_that_is_not_logged_in_is_unavailable(repo, monkeypatch):
     asyncio.run(check())
 
 
+def test_a_logged_out_session_keeps_the_login_hint_without_a_model_list(repo, monkeypatch, capsys):
+    log = cursor(monkeypatch, repo, logged_out=True)
+    assert run() == 1
+    assert "Run `cursor-agent login`, then try again" in capsys.readouterr().out
+    assert entries(log, "list-models") == []
+    assert sent(log, "authenticate") == [{"methodId": "cursor_login"}]
+    assert entries(log, "start")[0]["no_browser"] == "1"
+
+
 @pytest.mark.parametrize("notice", [
     "Upgrade your plan to continue",
     "Please sign in to continue",

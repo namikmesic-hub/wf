@@ -1,50 +1,83 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdir, readFile, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import type { ModelListItem } from "@cursor/sdk";
-import { fail } from "./protocol.ts";
+import { RequestBudget } from "./budget.ts";
 
 export const CATALOG_TTL_MS = 15 * 60_000;
-const LOCK_MS = 120_000;
 
 export async function cachedCatalog(
   apiKey: string, fetch: () => Promise<ModelListItem[]>,
-  root = join(process.env.WF_HOME || join(homedir(), ".wf"), "cache", "cursor-models"),
+  root: string, budget = new RequestBudget(),
 ): Promise<ModelListItem[]> {
   const file = join(root, createHash("sha256").update(apiKey).digest("hex") + ".json");
   const lock = file + ".lock";
   await mkdir(root, { recursive: true, mode: 0o700 });
-  const until = Date.now() + 55_000;
-  for (;;) {
-    const cached = await readCatalog(file);
-    if (cached !== null) return cached;
-    try {
-      await mkdir(lock, { mode: 0o700 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - (await stat(lock)).mtimeMs > LOCK_MS) await rm(lock, { recursive: true, force: true });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      if (Date.now() >= until) throw fail("transient", "cursor.catalog_busy", "Cursor's model cache is busy. Try again.", { retryable: true });
-      await pause(50);
-      continue;
-    }
-    const temp = file + "." + randomUUID();
-    try {
+  const cached = await readCatalog(file);
+  if (cached !== null) return cached;
+  const owner = `owner-${process.pid}-${randomUUID()}`;
+  const candidate = lock + "." + owner;
+  const temp = file + "." + randomUUID();
+  let held = false;
+  try {
+    await mkdir(candidate, { mode: 0o700 });
+    await writeFile(join(candidate, owner), "", { mode: 0o600 });
+    for (;;) {
       const cached = await readCatalog(file);
       if (cached !== null) return cached;
-      const models = await fetch();
-      await writeFile(temp, JSON.stringify({ fetched_at: Date.now(), models }), { mode: 0o600 });
-      await rename(temp, file);
-      return models;
-    } finally {
-      await rm(temp, { force: true });
-      await rm(lock, { recursive: true, force: true });
+      try {
+        await rename(candidate, lock);
+        held = true;
+        break;
+      } catch (error) {
+        if (!["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+        await clearDeadLock(lock);
+        budget.retrying();
+        await budget.wait(50, pause);
+      }
     }
+    const cached = await readCatalog(file);
+    if (cached !== null) return cached;
+    const models = await budget.run(fetch);
+    await writeFile(temp, JSON.stringify({ fetched_at: Date.now(), models }), { mode: 0o600 });
+    await rename(temp, file);
+    return models;
+  } finally {
+    await rm(temp, { force: true });
+    if (held) {
+      await rm(join(lock, owner), { force: true });
+      await removeEmptyLock(lock);
+    }
+    await rm(candidate, { recursive: true, force: true });
+  }
+}
+
+async function clearDeadLock(lock: string): Promise<void> {
+  let owners: string[];
+  try {
+    owners = await readdir(lock);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const owner of owners) {
+    const pid = /^owner-([1-9]\d*)-/.exec(owner)?.[1];
+    if (!pid) continue;
+    try {
+      process.kill(Number(pid), 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") await rm(join(lock, owner), { force: true });
+    }
+  }
+  await removeEmptyLock(lock);
+}
+
+async function removeEmptyLock(lock: string): Promise<void> {
+  try {
+    await rmdir(lock);
+  } catch (error) {
+    if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
   }
 }
 

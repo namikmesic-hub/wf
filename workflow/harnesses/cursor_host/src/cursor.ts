@@ -19,6 +19,7 @@
 // differs between code paths in 1.0.38, so it is never left to the default.
 
 import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelListItem, Run, SDKAgent, SDKCustomTool, SDKMessage, TokenUsage } from "@cursor/sdk";
 import {
@@ -27,6 +28,7 @@ import {
 } from "./protocol.ts";
 import { effective, resolveModel, type Resolved } from "./models.ts";
 import { cachedCatalog } from "./catalog.ts";
+import { RequestBudget } from "./budget.ts";
 
 type Sdk = typeof import("@cursor/sdk");
 
@@ -69,23 +71,24 @@ function needKey(apiKey: string | null): string {
   return apiKey;
 }
 
-async function catalog(sdk: Sdk, apiKey: string): Promise<ModelListItem[]> {
+async function catalog(sdk: Sdk, apiKey: string, budget = new RequestBudget()): Promise<ModelListItem[]> {
   try {
-    return await retryRateLimit(() => sdk.Cursor.models.list({ apiKey }));
+    return await retryRateLimit(() => sdk.Cursor.models.list({ apiKey }), sleep, budget);
   } catch (error) {
     throw new HostError(classify(error));
   }
 }
 
-export async function retryRateLimit<T>(action: () => Promise<T>, wait = sleep): Promise<T> {
+export async function retryRateLimit<T>(action: () => Promise<T>, wait = sleep, budget = new RequestBudget()): Promise<T> {
   const delays = [5_000, 10_000, 20_000];
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await action();
+      return await budget.run(action);
     } catch (error) {
       if (classify(error).code !== "cursor.rate_limit" || attempt === delays.length) throw error;
+      budget.retrying();
       log(`Cursor rate limit. Try again in ${delays[attempt] / 1000} seconds.`);
-      await wait(delays[attempt]);
+      await budget.wait(delays[attempt], wait);
     }
   }
 }
@@ -157,15 +160,25 @@ export class CursorSession {
   }
 
   async open(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const ms = typeof args.timeout_ms === "number" && Number.isFinite(args.timeout_ms) && args.timeout_ms > 0
+      ? Math.min(args.timeout_ms, 54_000) : 54_000;
+    const budget = new RequestBudget(ms);
+    return budget.run(() => this.openWithBudget(args, budget));
+  }
+
+  private async openWithBudget(args: Record<string, unknown>, budget: RequestBudget): Promise<Record<string, unknown>> {
     const sdk = await loadSdk();
     const apiKey = needKey(this.apiKey);
     const access = accessOptions(String(args.access), args.web === true);
     if (typeof args.cwd !== "string" || !args.cwd) throw fail("invalid", "protocol.cwd", "session.open needs a cwd");
     if (typeof args.model !== "string" || !args.model) throw fail("unavailable", "cursor.no_model", "Cursor needs a model");
+    if (typeof args.catalog_dir !== "string" || !isAbsolute(args.catalog_dir)) {
+      throw fail("invalid", "cursor.catalog_dir", "Cursor needs an absolute catalog cache folder");
+    }
     this.allowed = access.tools ? new Set(access.tools) : null;
     this.ownMcpOnly = args.only_given_tools === true || args.access !== "full";
     this.tools(Array.isArray(args.tools) ? args.tools : []);
-    const models = await cachedCatalog(apiKey, () => catalog(sdk, apiKey));
+    const models = await cachedCatalog(apiKey, () => catalog(sdk, apiKey, budget), args.catalog_dir, budget);
     this.resolved = resolveModel(args.model, models);
     // SDK 1.0.38 reads this catalog for its own model check.
     process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON = JSON.stringify(models);
@@ -190,10 +203,10 @@ export class CursorSession {
     try {
       if (start.kind === "load") {
         if (typeof start.from !== "string") throw fail("invalid", "protocol.start", "start: load needs `from`");
-        this.agent = await retryRateLimit(() => sdk.Agent.resume(start.from as string, options));
+        this.agent = await retryRateLimit(() => sdk.Agent.resume(start.from as string, options), sleep, budget);
         this.force = true; // a host that died mid-turn leaves that run active in the store
       } else {
-        this.agent = await retryRateLimit(() => sdk.Agent.create(options));
+        this.agent = await retryRateLimit(() => sdk.Agent.create(options), sleep, budget);
       }
     } catch (error) {
       throw new HostError(classify(error));
