@@ -651,6 +651,87 @@ def test_the_ui_hides_secret_start_inputs_before_the_run_starts(server, kind):
     assert item["summary"] == (inputs["task"] if kind in ("direct", "sub") else "")
 
 
+@pytest.fixture
+def secret_run(repo):
+    Path("secret.yaml").write_text(dedent("""
+        version: 1
+        name: secret
+        start: {input: {task: {type: string}, token: {type: string}}}
+        nodes:
+          a: {needs: [start], workflow: child.yaml, with: {token: "{{ start.token }}"}}
+          b: {needs: [a], workflow: child.yaml, with: {token: "{{ start.token }}"}}
+        end: {output: {}}
+    """).lstrip())
+    Path("child.yaml").write_text(dedent("""
+        version: 1
+        name: child
+        start: {input: {token: {type: string}}}
+        nodes:
+          use:
+            needs: [start]
+            command: "true"
+            env: {TOKEN: "{{ start.token }}"}
+            secret_env: [TOKEN]
+        end: {output: {}}
+    """).lstrip())
+    return runs.create(Path.cwd(), "secret", [Path("secret.yaml"), Path("child.yaml")], Path("secret.yaml"),
+                       {"task": "Add the flag.", "token": "private-token"})
+
+
+@pytest.mark.parametrize("first", ["/api/runs", "/api/run"])
+def test_the_run_list_and_brief_share_cached_secret_input_names(server, secret_run, monkeypatch, first):
+    run = secret_run
+    loaded, real = [], spec.load
+
+    def load(path):
+        if path.is_relative_to(run.dir):
+            loaded.append(path)
+        return real(path)
+
+    monkeypatch.setattr(spec, "load", load)
+    path = f"/api/run?id={run.id}"
+    assert get(server, path if first == "/api/run" else first)[0] == 200
+    if first == "/api/run":
+        assert loaded.count(run.workflow_file) <= 2
+    for refresh in range(2):
+        status, _, body = get(server, path)
+        assert status == 200
+        assert json.loads(body)["brief"]["inputs"] == {"task": "Add the flag.", "token": "[secret]"}
+        status, _, body = get(server, "/api/runs")
+        assert status == 200 and b"private-token" not in body
+        item = next(item for item in json.loads(body)["runs"] if item["id"] == run.id)
+        assert item["summary"] == "Add the flag."
+        if refresh == 0:
+            initial = loaded.copy()
+    assert loaded == initial
+
+
+@pytest.mark.parametrize("missing", ["secret.yaml", "child.yaml"])
+def test_secret_input_names_are_cached_only_after_all_workflow_files_can_be_read(secret_run, monkeypatch, missing):
+    run = secret_run
+    loaded, real = [], spec.load
+    target = run.workflow_file.parent / missing
+    failed = False
+
+    def load(path):
+        nonlocal failed
+        loaded.append(path)
+        if path == target and not failed:
+            failed = True
+            raise OSError(errno.EIO, "Input/output error", str(path))
+        return real(path)
+
+    monkeypatch.setattr(spec, "load", load)
+    assert ui._inputs(run) == {}
+    loaded.clear()
+    assert ui._inputs(run) == {"task": "Add the flag.", "token": "[secret]"}
+    assert loaded.count(run.workflow_file) == 1
+    assert loaded.count(run.workflow_file.parent / "child.yaml") == 1
+    loaded.clear()
+    assert ui._inputs(run) == {"task": "Add the flag.", "token": "[secret]"}
+    assert loaded == []
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
 def test_the_task_card_with_node():
     done = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_ui_page.cjs"))],

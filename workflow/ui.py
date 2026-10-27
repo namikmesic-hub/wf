@@ -170,7 +170,7 @@ class _View:
         self.follow_ups = _FollowUps(run)
 
     def brief(self, state: dict) -> dict:
-        inputs = _inputs(self.run)
+        inputs = _inputs(self.run, self.workflow)
         return {"workflow": self.workflow.name if self.workflow else state.get("workflow"),
                 "description": self.workflow.description if self.workflow else "", "inputs": inputs,
                 "main_input": _main_input(inputs), "follow_ups": self.follow_ups.read(), "output": self.run.output()}
@@ -499,12 +499,32 @@ def serve(source: Source, port: int, say: Callable[[str], None] = lambda text: p
     return 0
 
 
-def _inputs(run: Run) -> dict:
+_INPUT_SECRETS: dict[Path, frozenset[str]] = {}
+_INPUT_SECRETS_LOCK = threading.Lock()
+
+
+def _hidden_inputs(run: Run, workflow: spec.Workflow | None) -> frozenset[str]:
+    """Keep secret input names from each run's workflow copies after a successful read."""
+    with _INPUT_SECRETS_LOCK:
+        if run.dir not in _INPUT_SECRETS:
+            loaded = {workflow.path: workflow} if workflow is not None else {}
+
+            def load(path: Path) -> spec.Workflow:
+                if path not in loaded:
+                    loaded[path] = spec.load(path)
+                return loaded[path]
+
+            root = workflow if workflow is not None else load(run.workflow_file)
+            _INPUT_SECRETS[run.dir] = frozenset(trace.secret_inputs(root, load))
+        return _INPUT_SECRETS[run.dir]
+
+
+def _inputs(run: Run, workflow: spec.Workflow | None = None) -> dict:
     try:
         value = json.loads((run.dir / "input.json").read_text(encoding="utf-8"))
         if not isinstance(value, dict) or not value:
             return {}
-        hidden = trace.secret_inputs(spec.load(run.workflow_file), spec.load)
+        hidden = _hidden_inputs(run, workflow)
         return {key: trace.HIDDEN if key in hidden else item for key, item in value.items()}
     except (OSError, ValueError, KeyError, spec.SpecError):
         return {}
