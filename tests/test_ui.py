@@ -4,6 +4,7 @@ import errno
 import http.client
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -536,7 +537,7 @@ def test_the_server_serves_the_page_and_its_json_on_this_machine_only(server, fi
 def test_the_run_api_has_the_task_inputs_description_and_end_output(server, finished):
     inputs = {"task": "Fix https://linear.app/team/issue/DENG-860/task.\nKeep this line.\n\nAdd the flag.",
               "branch": "fm/task", "pr": "https://github.com/owner/repo/pull/12", "delivery_mode": "branch", "count": 2}
-    output = {"pr_url": "https://github.com/owner/repo/pull/12", "head": "abc123", "not_ready_reason": "Tests failed."}
+    output = {"pr_url": "https://github.com/owner/repo/pull/12", "head": "abc123", "not_ready": "Tests failed."}
     runs.write_json(finished.dir / "input.json", inputs)
     finished.set_output(output)
     status, _, body = get(server, f"/api/run?id={finished.id}")
@@ -599,6 +600,62 @@ def test_the_runs_api_has_a_one_line_task_summary(server, finished, inputs, summ
     status, _, body = get(server, "/api/runs")
     assert status == 200
     assert json.loads(body)["runs"][0]["summary"] == summary
+
+
+@pytest.mark.parametrize("kind", ["direct", "sub", "all", "missing_workflow", "missing_sub"])
+def test_the_ui_hides_secret_start_inputs_before_the_run_starts(server, kind):
+    secret = "private-token-https://secret.example/token"
+    inputs = {"task": "Add the public flag.", "token": secret}
+    child = Path("child.yaml")
+    child.write_text(dedent("""
+        version: 1
+        name: child
+        start: {input: {token: {type: string}}}
+        nodes:
+          use:
+            needs: [start]
+            command: "true"
+            env: {TOKEN: "{{ start.token }}"}
+            secret_env: [TOKEN]
+        end: {output: {}}
+    """).lstrip())
+    source = child.read_text().replace("name: child", "name: private").replace(
+        "start: {input: {token: {type: string}}}", "start: {input: {task: {type: string}, token: {type: string}}}")
+    if kind == "all":
+        source = source.replace("{{ start.token }}", "{{ start | tojson }}")
+    elif kind in ("sub", "missing_sub"):
+        source = source[:source.index("nodes:")] + dedent("""
+            nodes:
+              use:
+                needs: [start]
+                workflow: child.yaml
+                with: {token: "{{ start.token }}"}
+            end: {output: {}}
+        """).lstrip()
+    path = Path("private.yaml")
+    path.write_text(source)
+    run = runs.create(Path.cwd(), "private", [path, child], path, inputs)
+    if kind == "missing_workflow":
+        run.workflow_file.unlink()
+    elif kind == "missing_sub":
+        (run.workflow_file.parent / child).unlink()
+    assert secret in (run.dir / "input.json").read_text()
+    assert not (run.dir / "trace.jsonl").exists()
+    status, _, body = get(server, f"/api/run?id={run.id}")
+    assert status == 200 and secret.encode() not in body
+    expected = {} if kind.startswith("missing_") else {"task": "[secret]" if kind == "all" else inputs["task"], "token": "[secret]"}
+    assert json.loads(body)["brief"]["inputs"] == expected
+    status, _, body = get(server, "/api/runs")
+    assert status == 200 and secret.encode() not in body
+    item = next(item for item in json.loads(body)["runs"] if item["id"] == run.id)
+    assert item["summary"] == (inputs["task"] if kind in ("direct", "sub") else "")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is not installed")
+def test_the_task_card_with_node():
+    done = subprocess.run(["node", "--test", str(Path(__file__).with_name("test_ui_page.cjs"))],
+                          capture_output=True, text=True, timeout=10)
+    assert done.returncode == 0, done.stdout + done.stderr
 
 
 def test_the_server_gives_data_only_to_the_page_that_has_its_key(server, finished):

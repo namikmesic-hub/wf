@@ -17,8 +17,8 @@ each run, the server reads only the events that came since it last read them.
 It looks only at the files of attempts that can still change (_View).
 
     GET /                          the page
-    GET /api/runs                  the runs, newest first, with their state and progress
-    GET /api/run?id=ID             one run: state, progress, graph, states, metrics, sessions, attempts
+    GET /api/runs                  the runs, newest first, with their summary, state and progress
+    GET /api/run?id=ID             one run: brief, state, progress, graph, states, metrics, sessions, attempts
     GET /api/events?id=ID&after=N  the events after byte N of events.jsonl (the last EVENTS_BACK without N)
     GET /api/file?id=ID&path=P     a transcript, instruction, output or session file of the run
 
@@ -48,7 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from . import diagram, observe, operate, progress, report, runs, spec, trace_view
+from . import diagram, observe, operate, progress, report, runs, spec, trace, trace_view
 from .runs import Run
 
 HOST = "127.0.0.1"
@@ -502,14 +502,18 @@ def serve(source: Source, port: int, say: Callable[[str], None] = lambda text: p
 def _inputs(run: Run) -> dict:
     try:
         value = json.loads((run.dir / "input.json").read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
+        if not isinstance(value, dict) or not value:
+            return {}
+        hidden = trace.secret_inputs(spec.load(run.workflow_file), spec.load)
+        return {key: trace.HIDDEN if key in hidden else item for key, item in value.items()}
+    except (OSError, ValueError, KeyError, spec.SpecError):
         return {}
 
 
 def _main_input(inputs: dict) -> str | None:
     short = {"branch", "pr", "repository", "login", "delivery", "delivery_mode"}
-    text = {key: value for key, value in inputs.items() if key not in short and isinstance(value, str) and value.strip()}
+    text = {key: value for key, value in inputs.items()
+            if key not in short and isinstance(value, str) and value.strip() and value != trace.HIDDEN}
     return max(text, key=lambda key: len(text[key]), default=None)
 
 

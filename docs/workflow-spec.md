@@ -1558,8 +1558,11 @@ The Links line collects URLs from the inputs, the follow-up requests, and the en
 Ticket links show their key, and pull request links show `owner/repo#number`.
 The Deliverables line shows the branch, pull request, and delivery mode from the inputs.
 It also shows the pull request URL, head, and not-ready reason from the end output when present.
+The not-ready reason comes from the end output's `not_ready` field.
 Each follow-up shows its number, time, and request, newest first.
 Other short inputs appear as key and value pairs.
+The Task section and run list replace inputs that feed `secret_env` values with `[secret]`.
+If wf cannot read the workflow files, the brief omits start inputs.
 Missing or empty input files leave out those parts without an error.
 The run API returns these data in `brief`, with the workflow name, description, inputs, follow-ups, and end output.
 Follow-up requests come from `trace.jsonl`, with long text read from `blobs/`.
@@ -1626,9 +1629,11 @@ It is three plain files in `workflow/ui/`, with no build step and nothing from a
 | A process that no longer drives the run left a session open | `wf sessions` doesn't list it. | `workflow/observe.py:88` | `test_a_session_left_open_by_a_process_that_no_longer_drives_the_run_is_not_listed` |
 | `wf watch` follows a run | It prints each new event, and the run's state each time that the run needs attention. It stops once the run succeeds or is discarded. | `workflow/observe.py:196`, `workflow/observe.py:192`, `workflow/observe.py:186` | `test_wf_watch_prints_the_steps_and_tool_calls_as_they_come_until_the_run_ends`, `test_wf_watch_goes_on_through_a_question_until_the_run_succeeds`, `test_wf_watch_stops_when_the_run_is_discarded`, `test_wf_watch_on_a_run_that_ended_prints_the_last_events_and_how_it_ended` |
 | The page asks for a run | The response includes `brief` with the workflow name, description, start inputs, follow-ups, and end output. | `workflow/ui.py:172` | `test_the_run_api_has_the_task_inputs_description_and_end_output` in `tests/test_ui.py` |
-| A run has follow-up requests | The brief lists each request with its number and time, newest first, including long text from blobs. | `workflow/ui.py:532` | `test_the_run_api_has_each_follow_up_request_with_its_number_and_time` in `tests/test_ui.py` |
+| The Task section shows deliver-change output | The Deliverables line shows the `not_ready` reason. | `workflow/ui/page.js:227` | `test_the_task_card_with_node` in `tests/test_ui.py` and `tests/test_ui_page.cjs` |
+| A start input feeds `secret_env` | The brief and run summary hide that input, including through sub-workflows. Unreadable workflow files leave out inputs. | `workflow/ui.py:507` | `test_the_ui_hides_secret_start_inputs_before_the_run_starts` in `tests/test_ui.py` |
+| A run has follow-up requests | The brief lists each request with its number and time, newest first, including long text from blobs. | `workflow/ui.py:536` | `test_the_run_api_has_each_follow_up_request_with_its_number_and_time` in `tests/test_ui.py` |
 | The input file is missing, empty, or incomplete | The brief leaves out missing inputs without an error. | `workflow/ui.py:502` | `test_the_run_api_allows_missing_empty_or_incomplete_inputs` in `tests/test_ui.py` |
-| The page asks for the run list | Each run has a one-line summary from its main text, pull request, or repository input. | `workflow/ui.py:516` | `test_the_runs_api_has_a_one_line_task_summary` in `tests/test_ui.py` |
+| The page asks for the run list | Each run has a one-line summary from its main text, pull request, or repository input. | `workflow/ui.py:520` | `test_the_runs_api_has_a_one_line_task_summary` in `tests/test_ui.py` |
 | A request to `wf ui` for data has no key, or another key | The server refuses it with 401. | `workflow/ui.py:447` | `test_the_server_gives_data_only_to_the_page_that_has_its_key` |
 | A request to `wf ui` names another host in its `Host` header | The server refuses it with 403. So a web page can't read it through a DNS name that points to `127.0.0.1`. | `workflow/ui.py:439` | `test_the_server_refuses_other_hosts_unknown_runs_and_files_outside_the_passes` |
 | The page asks for a file of a run | Only `instruction.md`, `output.json`, `session.json` and `attempt-<n>.log` under `nodes/` come back, and no link out of `nodes/` is followed. | `workflow/ui.py:397` | `test_the_page_shows_files_of_the_passes_and_nothing_else` |

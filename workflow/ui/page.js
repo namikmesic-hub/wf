@@ -224,7 +224,7 @@ function showBrief(brief) {
     [inputs, "delivery_mode", "Delivery mode"], [inputs, "delivery", "Delivery mode"],
     [brief.output, "pr_url", "Pull request"], [brief.output, "pr", "Pull request"],
     [brief.output, "pull_request_url", "Pull request"], [brief.output, "head", "Head"],
-    [brief.output, "not_ready_reason", "Not ready"],
+    [brief.output, "not_ready", "Not ready"],
   ];
   const deliverables = el("p", {}, el("strong", { text: "Deliverables: " }));
   let count = 0;
