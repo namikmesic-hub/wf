@@ -17,7 +17,7 @@ import keyring
 import pytest
 
 from cursor_sdk import KEY, entries, needs_node, use
-from workflow import cli, harnesses, runner, schemas
+from workflow import cli, config, harnesses, runner, schemas
 from workflow.harnesses import Unavailable, cursor, remote
 from workflow.harnesses.base import SessionSpec
 from workflow.harnesses.cursor_acp import CursorAcp
@@ -49,6 +49,37 @@ def test_the_schema_is_valid_and_every_example_frame_meets_it():
     assert {frame["t"] for frame in examples} == {"hello", "welcome", "req", "res", "ev", "call", "ret"}
     for frame in examples:
         assert problems(frame) == [], frame
+
+
+@pytest.mark.parametrize("folder", [None, "", ".", "cache", "../cache"])
+def test_the_cursor_open_schema_requires_an_absolute_catalog_folder(folder):
+    frame = next(json.loads(line) for line in (PROTOCOL / "examples.jsonl").read_text().splitlines()
+                 if json.loads(line).get("op") == "session.open")
+    if folder is None:
+        del frame["args"]["catalog_dir"]
+    else:
+        frame["args"]["catalog_dir"] = folder
+    assert problems(frame)
+
+
+@pytest.mark.parametrize("timeout,valid", [(None, True), (1, True), (54000, True),
+                                          (0, False), (-1, False), ("1000", False), (True, False)])
+def test_the_cursor_open_schema_checks_the_optional_timeout(timeout, valid):
+    frame = next(json.loads(line) for line in (PROTOCOL / "examples.jsonl").read_text().splitlines()
+                 if json.loads(line).get("op") == "session.open")
+    if timeout is None:
+        del frame["args"]["timeout_ms"]
+    else:
+        frame["args"]["timeout_ms"] = timeout
+    assert (problems(frame) == []) is valid
+
+
+def test_other_runtimes_need_no_cursor_catalog_folder_in_the_schema():
+    frame = next(json.loads(line) for line in (PROTOCOL / "examples.jsonl").read_text().splitlines()
+                 if json.loads(line).get("op") == "session.open")
+    frame["args"]["runtime"] = "other"
+    del frame["args"]["catalog_dir"]
+    assert problems(frame) == []
 
 
 @pytest.mark.parametrize("frame", [
@@ -123,6 +154,94 @@ def test_the_hosts_own_tests_pass():
 
 
 # ---------- checking a model ----------
+
+
+@needs_node
+def test_pinned_and_bracket_sessions_share_the_catalog_but_checks_fetch_it(tmp_path, monkeypatch, cursor_host):
+    log = use(monkeypatch, tmp_path, cursor_host)
+
+    async def main():
+        harness = harnesses.create("cursor")
+        await harness.open(tmp_path / "run")
+        tool = ResultTool(schemas.object_schema({"summary": {"type": "string"}}))
+        try:
+            for model in ("composer-2.5", "composer-2.5[fast=true]"):
+                spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model=model, effort=None,
+                                   tool=tool, log=tmp_path / "attempt.log", emit=lambda event: None)
+                session = await harness.session(spec)
+                await session.close()
+            assert len(entries(log, "models.list")) == 1
+            assert all(catalog[0]["id"] == "composer-2.5" for catalog in entries(log, "local.catalog"))
+            await harness.check_model("composer-2.5")
+            assert len(entries(log, "models.list")) == 2
+        finally:
+            await harness.close()
+
+    asyncio.run(main())
+
+
+@needs_node
+def test_a_relative_wf_home_shares_one_cache_across_runs(tmp_path, monkeypatch, cursor_host):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WF_HOME", "relative-home")
+    log = use(monkeypatch, tmp_path, cursor_host)
+
+    async def main():
+        tool = ResultTool(schemas.object_schema({"summary": {"type": "string"}}))
+        for number in range(2):
+            harness = harnesses.create("cursor")
+            await harness.open(tmp_path / f"run-{number}")
+            try:
+                spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="composer-2.5", effort=None,
+                                   tool=tool, log=tmp_path / "attempt.log", emit=lambda event: None)
+                session = await harness.session(spec)
+                await session.close()
+            finally:
+                await harness.close()
+
+    asyncio.run(main())
+    assert len(entries(log, "models.list")) == 1
+    assert len(list((config.home() / "cache" / "cursor-models").glob("*.json"))) == 1
+
+
+@needs_node
+def test_a_rate_limit_before_open_returns_a_retry_before_the_client_timeout(tmp_path, monkeypatch, cursor_host):
+    error = {"name": "ConfigurationError", "message": "rate limit"}
+    use(monkeypatch, tmp_path, cursor_host, timeout=1, create_errors=[error])
+
+    async def main():
+        harness = harnesses.create("cursor")
+        await harness.open(tmp_path / "run")
+        tool = ResultTool(schemas.object_schema({"summary": {"type": "string"}}))
+        spec = SessionSpec(cwd=tmp_path, access="read-only", web=False, model="composer-2.5", effort=None,
+                           tool=tool, log=tmp_path / "attempt.log", emit=lambda event: None)
+        try:
+            with pytest.raises(harnesses.StartFailed, match="request time limit has expired"):
+                await harness.session(spec)
+        finally:
+            await harness.close()
+
+    asyncio.run(main())
+
+
+@needs_node
+@pytest.mark.parametrize("source", ["catalog_errors", "create_errors"])
+def test_cursor_rate_limits_retry_before_the_session_opens(repo, monkeypatch, cursor_host, source):
+    error = {"name": "ConfigurationError", "code": "resource_exhausted",
+             "message": "You have exceeded the rate limit of 30 requests per minute for the get_models endpoint"}
+    log = use(monkeypatch, repo, cursor_host,
+              [{"tool": {"name": "submit_result", "arguments": {"summary": "hi"}}}], **{source: [error]})
+    Path("flow.yaml").write_text("""
+version: 1
+name: rate-limit
+defaults: {harness: cursor, harnesses: {cursor: {model: composer-2.5}}}
+start: {input: {}}
+nodes:
+  ask: {needs: [start], instruction: Say hi, retry: 0}
+end: {output: {out: "{{ ask.summary }}"}}
+""")
+    assert cli.main(["run", "flow.yaml"]) == 0
+    assert len(entries(log, "models.list" if source == "catalog_errors" else "create")) == 2
 
 
 @needs_node

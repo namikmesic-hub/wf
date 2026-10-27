@@ -395,8 +395,38 @@
         },
         "state_dir": {
           "type": "string"
+        },
+        "catalog_dir": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?:[/\\\\]|[A-Za-z]:[/\\\\])",
+          "description": "An absolute folder for the Cursor model catalog cache."
+        },
+        "timeout_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "The time limit for a session open, in milliseconds."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "runtime": {
+                "const": "cursor"
+              }
+            },
+            "required": [
+              "runtime"
+            ]
+          },
+          "then": {
+            "required": [
+              "catalog_dir"
+            ]
+          }
+        }
+      ]
     },
     "tool": {
       "type": "object",

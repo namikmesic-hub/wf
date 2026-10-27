@@ -113,7 +113,8 @@ class Codex:
         self.command = command or [program(), *APP_SERVER]
         self.request_timeout = request_timeout  # a wedged app server counts as unavailable after this
         self.rpc: _Connection | None = None
-        self.models: list[dict] = []
+        self.models: list[dict] | None = None
+        self._models_lock = asyncio.Lock()
         self.warning: str | None = None  # shown once, with the first session
 
     async def open(self, run_dir: Path) -> None:
@@ -122,7 +123,6 @@ class Codex:
             await self.rpc.request("initialize", {"clientInfo": {"name": "wf", "version": "0.1.0"},
                                                   "capabilities": {"experimentalApi": True}})
             await self.rpc.notify("initialized")
-            self.models = (await self.rpc.request("model/list", {})).get("data", [])
         except BaseException as error:  # failed or cancelled (Ctrl-C): don't leave the app server running
             await self.close()
             if isinstance(error, (OSError, _RpcError, TimeoutError)):
@@ -134,7 +134,15 @@ class Codex:
                 self.warning = f"codex {installed} is installed; wf is tested with {TESTED}, and the app server is experimental"
 
     async def check_model(self, model: str | None, access: str = "read-only") -> None:
-        pass  # model/list gives defaults, and wf doesn't take it as the list of every model the account can use
+        await self._load_models()
+
+    async def _load_models(self) -> None:
+        async with self._models_lock:
+            if self.models is None:
+                try:
+                    self.models = (await self.rpc.request("model/list", {})).get("data", [])
+                except (_RpcError, TimeoutError) as error:
+                    raise Unavailable(f"Codex could not list its models: {error}") from error
 
     async def session(self, spec: SessionSpec) -> "CodexSession":
         if self.rpc is None or self.rpc.dead:
@@ -154,8 +162,8 @@ class Codex:
     def defaults(self, model: str | None) -> tuple[str | None, str | None]:
         """The model to use, and its default effort, from the app server's model list."""
         if model is None:
-            model = next((m.get("id") for m in self.models if isinstance(m, dict) and m.get("isDefault")), None)
-        effort = next((m.get("defaultReasoningEffort") for m in self.models if isinstance(m, dict) and m.get("id") == model), None)
+            model = next((m.get("id") for m in self.models or [] if isinstance(m, dict) and m.get("isDefault")), None)
+        effort = next((m.get("defaultReasoningEffort") for m in self.models or [] if isinstance(m, dict) and m.get("id") == model), None)
         return model, effort
 
 
@@ -172,6 +180,8 @@ class CodexSession:
 
     async def start(self) -> None:
         spec = self.spec
+        if not spec.model or not spec.effort:
+            await self.harness._load_models()
         model, default_effort = self.harness.defaults(spec.model)
         effort = spec.effort or default_effort
         config = {"web_search": "live" if spec.web else "disabled"}
