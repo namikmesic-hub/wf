@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import fields
+from datetime import datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
 
@@ -1336,6 +1337,14 @@ def test_empty_exports_and_three_failures_keep_the_last_success(empty, runs_dir,
     assert len(audits) == 2
     assert (audits[-1]["runs_read"], audits[-1]["rows_written"], audits[-1]["error_class"]) == (1, 0, "")
     successful = query(empty, "SELECT maxIfOrNull(finished_at, error_class = '') FROM wf.export_runs FINAL")
+    success = datetime.fromisoformat(successful.strip())
+    stamps = []
+
+    def later():  # each failure starts and ends a minute after the one before
+        stamps.append(success + timedelta(minutes=len(stamps) + 1))
+        return stamps[-1].strftime("%Y-%m-%d %H:%M:%S.%f")
+
+    monkeypatch.setattr(export, "export_time", later)
     for error in (export.StoreDown, export.SchemaMismatch, export.UnreadableFolder):
         def fail(*args, error=error):
             raise error("test failure")
@@ -1345,15 +1354,20 @@ def test_empty_exports_and_three_failures_keep_the_last_success(empty, runs_dir,
     assert [row["error_class"] for row in audits] == ["", "", "StoreDown", "SchemaMismatch", "UnreadableFolder"]
     assert query(empty, "SELECT maxIfOrNull(finished_at, error_class = '') FROM wf.export_runs FINAL") == successful
     dashboard = json.loads((Path(__file__).parent.parent / "docs/metrics/grafana/wf-runs.json").read_text())
+    now = (success + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    ages = {"Exporter heartbeat": 3600 - 60 * len(stamps), "Last successful export": 3600}
     for panel in dashboard["panels"]:
         if panel["title"] not in {"Time per node", "Data age", "Exporter heartbeat", "Last successful export", "Failed exports"}:
             continue
         sql = panel["targets"][0]["rawSql"].replace("$__timeFilter(started)", "1")
         sql = re.sub(r"\$__conditionalAll\([^\n]+, \$(?:workflow|run|node)\)", "1", sql)
+        sql = sql.replace("now64(6)", f"toDateTime64('{now}', 6, 'UTC')")
         values = [json.loads(line) for line in query(empty, f"{sql} FORMAT JSONEachRow").splitlines()]
         assert values, panel["title"]
         if panel["title"] == "Failed exports":
             assert values == [{"failed": 3}]
+        if panel["title"] in ages:
+            assert values == [{"age_s": ages[panel["title"]]}], panel["title"]
 
 
 def test_export_keeps_the_clock_basis_and_sleep_of_a_new_attempt(runs_dir):
@@ -1382,6 +1396,27 @@ def test_an_unreadable_runs_folder_records_a_failed_export(repo, stores, monkeyp
     (audit,) = stores[0].final()["export_runs"]
     assert (audit["runs_read"], audit["rows_written"], audit["error_class"]) == (0, 0, "UnreadableFolder")
     assert "can't list the runs" in capsys.readouterr().err
+
+
+def test_a_store_that_cant_be_prepared_records_a_failed_export(repo, wf_home, monkeypatch, capsys):
+    opened = []
+
+    class Mismatched(Memory):
+        def __init__(self, url):
+            super().__init__()
+            opened.append(self)
+
+        def prepare(self):
+            raise export.SchemaMismatch("wf.attempts has no column reasoning_tokens")
+
+    monkeypatch.setattr(export, "Store", Mismatched)
+    metrics_on(wf_home, metrics_url("127.0.0.1:8123"))
+    path = traced_folder(runs.runs_folder(repo))
+    assert cli.main(["metrics", "export"]) == 1
+    (audit,) = opened[0].final()["export_runs"]
+    assert (audit["runs_read"], audit["rows_written"], audit["error_class"]) == (0, 0, "SchemaMismatch")
+    assert not (path / "export.json").exists()
+    assert "wf.attempts has no column reasoning_tokens" in capsys.readouterr().err
 
 
 def test_a_failed_export_counts_the_rows_that_clickhouse_took(repo, wf_home, monkeypatch, capsys):
