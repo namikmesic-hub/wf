@@ -218,7 +218,7 @@ def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: d
         jobs = _jobs(values, node_id, index) if problem is None else {}
         harness = None
         if problem is None:
-            harness, problem = _harness(key, node_id, index, settings, workflow, jobs)
+            harness, problem = _harness(key, node_id, index, settings, workflow, jobs, before_start=before_start)
         override = {"harness": harness, "model": settings.get("model"), "effort": settings.get("effort")}
         models = None
         if problem is None:
@@ -278,9 +278,9 @@ def _jobs(values: dict, node_id: str, index: int | None) -> dict[str, dict]:
 
 
 def _harness(key: str, node_id: str, index: int | None, settings: dict[str, str], workflow: Workflow,
-             jobs: dict[str, dict]) -> tuple[str | None, str | None]:
+             jobs: dict[str, dict], *, before_start: bool = False) -> tuple[str | None, str | None]:
     """(the harness the override runs its target on, None), or (None, why it can't)."""
-    own = _own_harness(workflow, node_id, index, jobs)
+    own = _own_harness(workflow, node_id, index, jobs, before_start=before_start)
     harness = settings.get("harness") or own
     if harness is None:
         how = "from a list" if isinstance(workflow.setting(node_id, "harness"), list) else "with a template"
@@ -303,7 +303,8 @@ def _harness(key: str, node_id: str, index: int | None, settings: dict[str, str]
     return harness, None
 
 
-def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict[str, dict]) -> str | None:
+def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict[str, dict],
+                 *, before_start: bool = False) -> str | None:
     """The one harness that the node names. When the target is one job still to run in the pass in progress, also
     the harness that the node's template gives that job, as nodes._agent renders it. None for a list, or when wf
     can't tell."""
@@ -316,7 +317,11 @@ def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict
     if not one_job or len(jobs) != 1:
         return None
     try:
-        return job_harnesses(workflow, node_id, {}, next(iter(jobs.values())))[0]
+        harness, reads = templates.watched(templates.render, own, next(iter(jobs.values())))
+        later = set(workflow.nodes) | {"run", "workspace", "history", "results", "errors"}
+        if before_start and any(read.path[0] in later for read in reads):
+            return None
+        return harness.strip()
     except templates.TemplateError:
         return None
 

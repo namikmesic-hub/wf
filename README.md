@@ -67,6 +67,7 @@ Each flag can repeat, and `NODE[INDEX]` names one item of a `for_each` node.
 Only named nodes or items change, and all other nodes keep the workflow file's values.
 Run overrides apply to every pass, and continue overrides apply from that follow-up onward.
 wf checks each override before the run or follow-up starts and records it in `events.jsonl`.
+`wf run` needs `--harness` for an override when the node's harness template reads earlier node output.
 An item on `wf run` must have a list that wf can compute from the start input.
 
 ```sh

@@ -1135,6 +1135,63 @@ def test_run_refuses_known_invalid_settings_even_when_another_setting_needs_prio
     assert {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()} == before
 
 
+@pytest.mark.parametrize("setting, value", [("model", "gpt-6"), ("effort", "low")])
+@pytest.mark.parametrize("target", ["review", "review[0]"])
+def test_run_refuses_a_harness_template_that_reads_prior_output_without_changes(
+        repo, no_real_harness, monkeypatch, capsys, setting, value, target):
+    flow = yaml.safe_load("""
+        version: 1
+        name: guard
+        defaults: {harness: claude-code}
+        start: {input: {}}
+        nodes:
+          prepare:
+            needs: [start]
+            instruction: Prepare the harness
+            output: {harness: {type: string}}
+          review:
+            needs: [prepare]
+            harness: "{{ prepare.harness if prepare else 'claude-code' }}"
+            instruction: Review the change
+        end: {output: {}}
+    """)
+    if "[" in target:
+        flow["nodes"]["review"]["for_each"] = "[1, 2]"
+    Path("guard.yaml").write_text(yaml.safe_dump(flow))
+    dry = script({"agents": {"prepare": [{"harness": "codex"}], target: [{"summary": "done"}]}})
+    before = {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()}
+    monkeypatch.setattr(runs, "create", lambda *args, **kwargs: pytest.fail("A refused override created a run."))
+    assert cli.main(["run", "guard.yaml", "--dry-run", dry, f"--{setting}", f"{target}={value}"]) == 1
+    assert f"picks its harness with a template, so name one: --harness {target}=NAME" in capsys.readouterr().err
+    assert {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("source", ["{{ start.harness }}", "{{ start.harness if true else prepare.harness }}"])
+def test_run_keeps_a_harness_template_that_reads_only_start_input(repo, no_real_harness, source):
+    flow = yaml.safe_load("""
+        version: 1
+        name: known
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
+        start: {input: {harness: {type: string, default: codex}}}
+        nodes:
+          prepare:
+            needs: [start]
+            instruction: Prepare the harness
+            output: {harness: {type: string}}
+          review:
+            needs: [prepare]
+            instruction: Review the change
+        end: {output: {}}
+    """)
+    flow["nodes"]["review"]["harness"] = source
+    Path("known.yaml").write_text(yaml.safe_dump(flow))
+    dry = script({"agents": {"prepare": [{"harness": "claude-code"}], "review": [{"summary": "done"}]}})
+    assert cli.main(["run", "known.yaml", "--dry-run", dry, "--model", "review=gpt-6"]) == 0
+    folder = only_run() / "nodes"
+    assert given(folder / "prepare" / "1" / "attempt-1.log") == ("claude-code", "opus", None)
+    assert given(folder / "review" / "1" / "attempt-1.log") == ("codex", "gpt-6", None)
+
+
 def test_run_defers_a_model_whose_guard_reads_prior_output(repo, monkeypatch):
     write("guard.yaml", """
         version: 1
