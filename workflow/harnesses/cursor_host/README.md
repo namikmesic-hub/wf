@@ -26,11 +26,13 @@ The Python adapter gives the host an absolute catalog cache folder and a time li
   It maps the access levels, the tools, the SDK's messages and its errors.
 - `src/models.ts`: how a cursor-agent model id maps to the SDK's catalog.
 - `src/catalog.ts`: the shared model cache, with a separate lock for each API key.
-  The next caller removes a stopped process's lock.
+  The next caller removes a stopped process's lock, or one older than 60 seconds.
 - `src/budget.ts`: one time limit for the cache wait, catalog call, and session open.
 - `src/main.ts`: hello and welcome, the operations, and the end of the process.
 - `protocol/`: the protocol as JSON Schema, and an example of each frame.
   Both test suites read them.
+  A Cursor `session.open` needs an absolute `catalog_dir`.
+  The optional `timeout_ms` gives a positive time limit in milliseconds, with a default of 54000.
 
 ## Checks
 

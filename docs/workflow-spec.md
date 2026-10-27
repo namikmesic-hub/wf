@@ -581,7 +581,7 @@ The `wf validate` command checks workflow settings locally.
 Each attempt's transcript records the model and parameters of its session.
 A catalog or session-open rate limit waits 5, 10, then 20 seconds before each retry, with at most four attempts.
 The cache wait, catalog call, and session open share one time limit below the client's request timeout.
-wf reclaims the catalog lock when its owner process stops.
+wf reclaims the catalog lock when its owner process stops or the lock is more than 60 seconds old.
 The Python adapter uses `workflow/config/` to set an absolute cache folder for the host.
 With a pinned model and effort, Codex makes no `model/list` call.
 Codex lists models only for missing defaults or an explicit check.

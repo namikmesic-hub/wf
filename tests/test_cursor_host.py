@@ -51,6 +51,37 @@ def test_the_schema_is_valid_and_every_example_frame_meets_it():
         assert problems(frame) == [], frame
 
 
+@pytest.mark.parametrize("folder", [None, "", ".", "cache", "../cache"])
+def test_the_cursor_open_schema_requires_an_absolute_catalog_folder(folder):
+    frame = next(json.loads(line) for line in (PROTOCOL / "examples.jsonl").read_text().splitlines()
+                 if json.loads(line).get("op") == "session.open")
+    if folder is None:
+        del frame["args"]["catalog_dir"]
+    else:
+        frame["args"]["catalog_dir"] = folder
+    assert problems(frame)
+
+
+@pytest.mark.parametrize("timeout,valid", [(None, True), (1, True), (54000, True),
+                                          (0, False), (-1, False), ("1000", False), (True, False)])
+def test_the_cursor_open_schema_checks_the_optional_timeout(timeout, valid):
+    frame = next(json.loads(line) for line in (PROTOCOL / "examples.jsonl").read_text().splitlines()
+                 if json.loads(line).get("op") == "session.open")
+    if timeout is None:
+        del frame["args"]["timeout_ms"]
+    else:
+        frame["args"]["timeout_ms"] = timeout
+    assert (problems(frame) == []) is valid
+
+
+def test_other_runtimes_need_no_cursor_catalog_folder_in_the_schema():
+    frame = next(json.loads(line) for line in (PROTOCOL / "examples.jsonl").read_text().splitlines()
+                 if json.loads(line).get("op") == "session.open")
+    frame["args"]["runtime"] = "other"
+    del frame["args"]["catalog_dir"]
+    assert problems(frame) == []
+
+
 @pytest.mark.parametrize("frame", [
     {"t": "ev", "seq": 1, "at": "x", "session": "ses_a", "kind": "turn.text", "data": {"text": "hi"}},  # no turn
     {"t": "res", "id": "r1", "ok": True},

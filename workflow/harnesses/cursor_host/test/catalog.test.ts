@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
 import { promisify } from "node:util";
-import { cachedCatalog, CATALOG_TTL_MS } from "../src/catalog.ts";
+import { cachedCatalog, CATALOG_TTL_MS, LOCK_MAX_AGE_MS } from "../src/catalog.ts";
 import { retryRateLimit } from "../src/cursor.ts";
 import { RequestBudget } from "../src/budget.ts";
 import { HostError } from "../src/protocol.ts";
@@ -92,6 +92,28 @@ test("a dead process leaves a lock that the next fetch reclaims at once", async 
       child.kill("SIGKILL");
       await ended;
     }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an old lock cannot block the cache when its process id is in use", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wf-old-catalog-"));
+  try {
+    await cachedCatalog("key", async () => MODELS, root);
+    const [name] = await readdir(root);
+    await rm(join(root, name));
+    const lock = join(root, name + ".lock");
+    await mkdir(lock);
+    await writeFile(join(lock, `owner-${process.pid}-old`), "");
+    const old = new Date(Date.now() - LOCK_MAX_AGE_MS - 1_000);
+    await utimes(lock, old, old);
+    let calls = 0;
+    const fetch = async () => { calls += 1; return MODELS; };
+    const found = await Promise.all(Array.from({ length: 4 }, () => cachedCatalog("key", fetch, root, new RequestBudget(2_000))));
+    assert.equal(calls, 1);
+    assert.ok(found.every(models => models[0].id === MODELS[0].id));
+    assert.equal((await readdir(root)).filter(name => name.includes(".lock")).length, 0);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

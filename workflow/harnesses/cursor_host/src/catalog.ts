@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import type { ModelListItem } from "@cursor/sdk";
 import { RequestBudget } from "./budget.ts";
 
 export const CATALOG_TTL_MS = 15 * 60_000;
+export const LOCK_MAX_AGE_MS = 60_000;
 
 export async function cachedCatalog(
   apiKey: string, fetch: () => Promise<ModelListItem[]>,
@@ -55,8 +56,10 @@ export async function cachedCatalog(
 
 async function clearDeadLock(lock: string): Promise<void> {
   let owners: string[];
+  let expired: boolean;
   try {
     owners = await readdir(lock);
+    expired = Date.now() - (await stat(lock)).mtimeMs > LOCK_MAX_AGE_MS;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
@@ -64,6 +67,10 @@ async function clearDeadLock(lock: string): Promise<void> {
   for (const owner of owners) {
     const pid = /^owner-([1-9]\d*)-/.exec(owner)?.[1];
     if (!pid) continue;
+    if (expired) {
+      await rm(join(lock, owner), { force: true });
+      continue;
+    }
     try {
       process.kill(Number(pid), 0);
     } catch (error) {
