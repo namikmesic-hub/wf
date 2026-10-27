@@ -467,6 +467,8 @@ class RemoteSession:
                     return TurnEnd("failed", f"{name}: {self.peer.dead}", self.pending)
                 kind, data = event.get("kind"), event.get("data") or {}
                 if kind == "turn.text":
+                    if data.get("text"):
+                        self.spec.emit({"event": "progress", "source": "text"})
                     self.text += str(data.get("text") or "")
                 elif kind == "turn.tool":
                     self._flush()
@@ -474,7 +476,14 @@ class RemoteSession:
                 elif kind in ("turn.thinking", "turn.request"):
                     self._note(kind, data)
                 elif kind == "turn.usage":
+                    before = self.pending.tokens
                     self.pending = usage(data.get("usage"))
+                    if self.pending.tokens > before:
+                        self.spec.emit({"event": "progress", "source": "tokens"})
+                elif kind == "turn.retry":
+                    self.spec.emit({"event": "sdk_retry"})
+                elif kind == "turn.progress":
+                    self.spec.emit({"event": "progress", "source": data.get("source", "harness")})
                 elif kind == "steer.status":
                     self._steer_status(data)
                 elif kind == "turn.ended" and event.get("turn") == self.turn:

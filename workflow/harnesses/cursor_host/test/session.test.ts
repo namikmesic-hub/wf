@@ -13,6 +13,7 @@ interface Inside {
   outside: string | null;
   tools(given: unknown[]): void;
   tool(turn: string, message: Record<string, unknown>): void;
+  message(turn: string, message: Record<string, unknown>): void;
 }
 
 function session(): { inside: Inside; frames: Array<Record<string, unknown>>; cancels: () => number } {
@@ -30,6 +31,14 @@ function session(): { inside: Inside; frames: Array<Record<string, unknown>>; ca
 }
 
 const mcp = (status: string, args: Record<string, unknown>) => ({ type: "tool_call", call_id: "c1", name: "mcp", status, args });
+
+test("thinking counts as progress and a retry status stays separate", () => {
+  const { inside, frames } = session();
+  inside.message("trn_1", { type: "thinking", text: "Check the file" });
+  inside.message("trn_1", { type: "status", status: "RUNNING", message: "Retrying the request" });
+  inside.message("trn_1", { type: "status", status: "RUNNING" });
+  assert.deepEqual(frames.map((frame) => frame.kind), ["turn.progress", "turn.retry"]);
+});
 
 test("a call whose MCP server isn't known yet waits for a later message, and a session tool then passes", () => {
   const { inside, cancels } = session();
@@ -94,8 +103,11 @@ test("the pieces of a block of thinking become one event, with the time that the
     { type: "thinking", text: "Cut off" },
   ]);
   assert.deepEqual(events, [
+    ["turn.progress", { source: "thinking" }],
+    ["turn.progress", { source: "thinking" }],
     ["turn.thinking", { text: "Let me look.", duration_ms: 1234 }],
     ["turn.text", { text: "Done." }],
+    ["turn.progress", { source: "thinking" }],
     ["turn.thinking", { text: "Cut off", duration_ms: null }], // the turn ended before the block did
   ]);
 });

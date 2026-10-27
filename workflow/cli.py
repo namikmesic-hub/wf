@@ -217,6 +217,15 @@ def main(argv: list[str] | None = None) -> int:
     steering.add_argument("--runs-dir", **runs_dir)
     steering.set_defaults(handler=_steer)
 
+    stalled = commands.add_parser("stall", help="end a stalled attempt or give it more time")
+    stalled.add_argument("run_id", metavar="run-id")
+    stalled.add_argument("node")
+    stalled.add_argument("action", choices=("end", "wait"))
+    stalled.add_argument("--item", type=int)
+    stalled.add_argument("--json", action="store_true")
+    stalled.add_argument("--runs-dir", **runs_dir)
+    stalled.set_defaults(handler=_stall)
+
     examples = commands.add_parser("examples", help="copy wf's complete example workflows into a folder")
     examples.add_argument("dir", nargs="?", type=Path, default=Path("wf-examples"))
     examples.set_defaults(handler=_examples)
@@ -450,6 +459,21 @@ def _ui(args) -> int:
 def _config_show(args) -> int:
     print("\n".join(config.show.lines(config.get({"runs_dir": args.runs_dir}))))
     return 0
+
+
+def _stall(args) -> int:
+    run = _find(args.run_id, args.runs_dir)
+    if run is None:
+        return 1
+    try:
+        path = steer.target(run, args.node, args.item)
+        answer = steer.send(run, path, action=args.action)
+    except (steer.SteerError, OSError) as error:
+        print(f"wf stall: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps({"run": run.id, "node": path, **answer}) if args.json else
+          answer.get("reason") or f"Stall action {args.action} accepted for {path}.")
+    return int(answer["status"] == "none")
 
 
 def _steer(args) -> int:

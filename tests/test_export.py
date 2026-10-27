@@ -363,6 +363,11 @@ EVENT_ROWS = {
 }
 
 
+for rows in (TRACE_ROWS, EVENT_ROWS):
+    for row in rows["attempts"]:
+        row.update(dict.fromkeys(export.PROGRESS_COLUMNS))
+
+
 # ---------- a trace ----------
 
 
@@ -1141,6 +1146,12 @@ def test_the_records_of_a_real_run_give_a_row_for_each_attempt_turn_tool_call_an
     assert [(c["call_id"], c["tool"], c["harness"], c["model"], c["is_error"]) for c in found["tool_calls"]] == [
         ("t2.c1", "Read", "claude-code", "opus", False)]
     assert [(r["node"], r["taken"], r["to"]) for r in found["routes"]] == [("each", 0, ["end"])]
+    for attempt in found["attempts"]:
+        if attempt["kind"] == "agent":
+            assert attempt["measure_version"] == 2
+            assert attempt["last_progress_at"] is not None
+            wall = export._seconds(attempt["started"], attempt["ended"])
+            assert sum(attempt[key] for key in ("startup_s", "asleep_s", "tool_s", "active_s", "idle_s")) == pytest.approx(wall)
     (row,) = found["runs"]
     assert (row["workflow"], row["status"], row["tokens"], row["cost_usd"], row["source"]) == ("flow", "succeeded", 100, 0.01, "trace")
     assert row["repo_key"] == runs.repo_key(repo.resolve())

@@ -381,7 +381,11 @@ class CursorSession:
         if not self.turn:
             return
         if kind == "agent_message_chunk":
+            if (update.get("content") or {}).get("text"):
+                self.spec.emit({"event": "progress", "source": "text"})
             self.text += (update.get("content") or {}).get("text") or ""
+        elif kind == "agent_thought_chunk":
+            self.spec.trace.thinking((update.get("content") or {}).get("text") or "", None)
         elif kind in ("tool_call", "tool_call_update"):
             self._flush()
             self._tool_call(update)

@@ -254,6 +254,9 @@ def test_a_usage_limit_makes_codex_unavailable(repo, monkeypatch, capsys):
 def test_a_retried_rate_limit_is_ignored(repo, monkeypatch):
     codex(monkeypatch, repo, [{"error": {"codexErrorInfo": "rateLimitExceeded", "message": "slow down", "willRetry": True}}, GOOD])
     assert run() == 0
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
+    assert sum(event["event"] == "sdk_retry" for event in events) == 1
 
 
 def test_a_failed_turn_fails_the_attempt(repo, monkeypatch, capsys):

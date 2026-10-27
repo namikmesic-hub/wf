@@ -120,6 +120,7 @@ def test_poll_refuses_a_runs_folder_run_that_does_not_record_its_repo(repo, monk
 @pytest.mark.parametrize("status, kind, terminal", [
     ("waiting", "wf-waiting", False), ("failed", "wf-failed", False), ("stopped", "wf-stopped", False),
     ("succeeded", "wf-succeeded", True), ("limit", "wf-limit", False),
+    ("stall_detected", "wf-stall_detected", False),
 ])
 def test_results_are_classified_and_finished_runs_end_the_source(monkeypatch, capsys, status, kind, terminal):
     content = json.dumps({"run": "r", "status": status})

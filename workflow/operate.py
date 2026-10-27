@@ -38,7 +38,7 @@ from pathlib import Path
 from . import limits, schemas
 from .runs import LOCK_FD, Lock, Run, write_json
 
-ATTENTION = ("waiting", "failed", "limit", "succeeded", "stopped")
+ATTENTION = ("waiting", "failed", "limit", "succeeded", "stopped", "stall_detected")
 GRACE_SECONDS = 15  # a run just created may not hold its lock yet
 
 
@@ -54,7 +54,7 @@ def state(run: Run) -> dict:
     plus what an operator needs next: the output, or the command to continue."""
     current = run.status()
     current.setdefault("run", run.id)
-    if current.get("status") == "running" and not run.driven() and _age(current) > GRACE_SECONDS:
+    if current.get("status") in ("running", "stall_detected") and not run.driven() and _age(current) > GRACE_SECONDS:
         current = {**{k: v for k, v in current.items() if k != "agents_waiting"}, "status": "stopped",
                    "reason": "no wf process is driving this run (it crashed or was killed)"}
     status = current.get("status")
@@ -70,6 +70,9 @@ def state(run: Run) -> dict:
     if status == "limit":  # paused: a bigger limit continues it
         current["retry"] = run.command("retry", limits.hint(current.get("limit")))
     current["dir"] = str(run.dir)
+    if status == "stall_detected":
+        current["stall_actions"] = {"end": run.command("stall", "<node> end"),
+                                    "wait": run.command("stall", "<node> wait")}
     info = run.info()  # read once: wait() calls this five times a second
     current["workflow"] = info.get("workflow")
     current["dry_run"] = bool(info.get("dry_run"))

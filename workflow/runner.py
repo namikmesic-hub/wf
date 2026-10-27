@@ -449,9 +449,20 @@ async def _stream(ctx: RunContext, command) -> StateSnapshot:
         ctx.resume(before.values or {})  # the clock, the usage and a follow-up's start, for the jobs that run again
         ctx.trace.know(lambda: graph.variables(before.values, ctx))  # a job that reruns first may show them
         try:
+            stalls = {}
             async with steer.answering(ctx.run, ctx.steering):
                 async for event in compiled.astream(command, config, context=ctx, stream_mode="custom", durability="sync"):
                     ctx.run.add_event(event)
+                    key = (event.get("node"), event.get("pass"), event.get("index"), event.get("attempt"))
+                    if event.get("event") == "stall_detected":
+                        stalls[key] = event
+                        run_stalls = list(stalls.values())
+                        ctx.run.set_status("stall_detected", stalls=run_stalls,
+                                           agents_waiting=list(ctx._agents_waiting.values()))
+                    elif event.get("event") == "stall_resolved":
+                        stalls.pop(key, None)
+                        ctx.run.set_status("stall_detected" if stalls else "running", stalls=list(stalls.values()),
+                                           agents_waiting=list(ctx._agents_waiting.values()))
                     if (line := describe(event)) is not None:
                         print(line, flush=True)
         finally:

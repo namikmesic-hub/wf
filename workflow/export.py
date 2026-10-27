@@ -102,6 +102,7 @@ AFTER_SUCCESS = ("routes: ", "can't write output.json: ", "workspace: git status
 # that doesn't fit its column. ClickHouse answers them with HTTP 400, 404 or 500.
 SCHEMA_CODES = {"6", "8", "16", "27", "47", "53", "60", "81", "117"}
 ERROR_CLASSES = (  # the first class whose pattern the error matches, else "other"
+    ("stalled", r"^stalled:"),
     ("rate_limit", r"resource_exhausted|\b429\b|usage.?limit|rate.?limit|quota"),
     ("dropped_connection", r"stream closed|econnreset|\[canceled\]|\[aborted\]|connection (stalled|failed|reset|closed|lost)"
                            r"|enotfound|can't reach"),
@@ -109,6 +110,18 @@ ERROR_CLASSES = (  # the first class whose pattern the error matches, else "othe
     ("auth", r"unauthori[sz]ed|unauthenticated|authenticat|log ?in\b|logged in|api key"),
     ("no_result", r"never made a valid submit_result call"),
 )
+
+PROGRESS_COLUMNS = {
+    "duration_basis": "Nullable(String)", "awake_s": "Nullable(Float64)", "measure_version": "Nullable(UInt8)",
+    **dict.fromkeys(("startup_s", "asleep_s", "tool_s", "active_s", "idle_s", "slot_wait_s", "longest_gap_s"),
+                    "Nullable(Float64)"),
+    **dict.fromkeys(("longest_gap_at", "last_progress_at", "stall_detected_at"), "Nullable(DateTime64(3, 'UTC'))"),
+    "stall_action": "Nullable(String)", "sdk_retries": "Nullable(UInt32)",
+}
+
+
+def _progress_columns(record):
+    return {key: _utc(record.get(key)) if key.endswith("_at") else record.get(key) for key in PROGRESS_COLUMNS}
 
 
 class ExportError(Exception):
@@ -160,6 +173,10 @@ class Store:
         query = "SELECT table, name, type FROM system.columns WHERE database = {database:String}"
         for row in self._select(query, "table", "name", "type"):
             columns.setdefault(row["table"], {})[row["name"]] = row["type"]
+        for name, kind in PROGRESS_COLUMNS.items():
+            if name not in columns.get("attempts", {}):
+                self._post(f"ALTER TABLE attempts ADD COLUMN IF NOT EXISTS {name} {kind}", inside=True)
+                columns.setdefault("attempts", {})[name] = kind
         problems = differences(wanted, tables, columns, self.database)
         if problems:
             raise SchemaMismatch(f"the tables in ClickHouse at {self.where} differ from {SCHEMA.name}: {'; '.join(problems)}. "
@@ -612,6 +629,7 @@ class _Trace:
             "started": _utc(record.get("started")) or _utc(record["time"]),
             "ended": _utc(record.get("ended")) if ended else None,
             "duration_s": _number(record.get("duration_s")) if ended else None,
+            **_progress_columns(record),
             "outcome": _word(record.get("outcome")) if ended else "running", "error": error, "error_class": error_class(error),
             **_usage(record.get("usage")), "exit_code": exit_code if isinstance(exit_code, int) else None}
 
@@ -788,7 +806,7 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
             "session_start": "load" if session == "fork" and harness == "cursor" else session,
             "started": _utc(seen["started"]), "ended": _utc(ended), "duration_s": _seconds(seen["started"], ended),
             "outcome": seen.get("outcome") or ("succeeded" if ended_pass else ""), "error": error,
-            "error_class": error_class(error), **used, "exit_code": None})
+            "error_class": error_class(error), **used, "exit_code": None, **_progress_columns({})})
         for count, (time, tool) in enumerate(seen["tools"], 1):
             rows["tool_calls"].append({
                 "run_id": run.id, "workflow": workflow, "node": node, "pass": pass_no, "item": item, "attempt": number,

@@ -181,7 +181,7 @@ def _status(data: dict) -> str:
         status = json.loads(data.get("content") or "").get("status")
     except (json.JSONDecodeError, TypeError, AttributeError):  # TypeError: content isn't text
         return "unknown"
-    return status if isinstance(status, str) and re.fullmatch(r"[a-z]+", status) else "unknown"
+    return status if isinstance(status, str) and re.fullmatch(r"[a-z_]+", status) else "unknown"
 
 
 # ---------- the package ----------

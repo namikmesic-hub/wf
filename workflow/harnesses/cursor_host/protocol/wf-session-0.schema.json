@@ -724,6 +724,8 @@
             "turn.text",
             "turn.tool",
             "turn.thinking",
+            "turn.progress",
+            "turn.retry",
             "turn.request",
             "turn.usage",
             "turn.ended",
@@ -792,6 +794,8 @@
                   "turn.text",
                   "turn.tool",
                   "turn.thinking",
+                  "turn.progress",
+                  "turn.retry",
                   "turn.request",
                   "turn.usage",
                   "turn.ended"

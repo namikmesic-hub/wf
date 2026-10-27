@@ -94,6 +94,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
@@ -311,6 +312,8 @@ class ClaudeSession:
             if isinstance(item, SystemMessage):
                 if item.subtype == "init":
                     self.id = item.data.get("session_id", self.id)
+                elif item.subtype == "api_retry":
+                    emit({"event": "sdk_retry"})
             elif isinstance(item, UserMessage) and item.uuid == prompt:
                 self._repeats = True
             elif isinstance(item, UserMessage) and item.uuid in self._held:
@@ -320,11 +323,16 @@ class ClaudeSession:
             elif isinstance(item, AssistantMessage):
                 if item.usage and item.message_id not in self._seen:  # several messages can share one response
                     self._seen.add(item.message_id)
+                    before = self._turn.tokens
                     self._turn.add(_tokens(item.usage))  # output is a placeholder here
+                    if self._turn.tokens > before:
+                        emit({"event": "progress", "source": "tokens"})
                 for block in item.content:
                     if isinstance(block, TextBlock) and block.text.strip():
                         transcript(log, "text", text=block.text)
                         self.spec.trace.text(block.text)
+                    elif isinstance(block, ThinkingBlock):
+                        self.spec.trace.thinking(block.thinking, None)
                     elif isinstance(block, ToolUseBlock):
                         if block.name.startswith(self._tool_prefixes):
                             self._relayed.add(block.id)
