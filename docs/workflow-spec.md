@@ -383,7 +383,7 @@ Fields every kind accepts:
 | `needs` | none | Nodes that must finish first. `start` is allowed. See [When a node runs](#when-a-node-runs). |
 | `routes` | none | Where to go next, by condition. See [Routes](#routes). |
 | `for_each` | none | Run once per item of a list. See [for_each](#for_each). |
-| `max_parallel` | 4 | How many items run at the same time. One cap on agent sessions across runs is separate: see [Agent slots](#agent-slots). |
+| `max_parallel` | 4 | How many items run at the same time. Optional global and harness caps apply across runs: see [Agent slots](#agent-slots). |
 | `max_items` | 20 | A longer list fails the node. |
 | `on_item_error` | `fail` | `fail` or `continue`. |
 | `workspace` | `repo` | Where the node runs. See [Workspaces](#workspaces). |

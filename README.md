@@ -15,7 +15,7 @@ wf runs the graph on LangGraph:
 - any run can pause for a person and be answered later, from a terminal or by
   an autonomous operator.
 
-One cap on live agent sessions holds across all your runs that share a `~/.wf`.
+Optional global and harness caps limit live agent sessions across all runs that share a `~/.wf`.
 Agents can also read Slack, Granola, Linear, Notion and Gmail through tools that wf brings itself.
 
 ## Install

@@ -61,7 +61,7 @@ The variables `WF_MAX_AGENTS_CLAUDE_CODE`, `WF_MAX_AGENTS_CODEX` and `WF_MAX_AGE
 Each cap is optional, and no cap applies by default.
 Each `agents_waiting` entry names the `harness` and the `capacity` that the attempt waits for.
 The `capacity` value is the harness name or `global`.
-That is not a stall.
+A wait for a slot is not a stall.
 The attempt starts, with its timeout and retries intact, once a slot comes free
 and it is the first to take it.
 The order among waiting attempts is not defined.

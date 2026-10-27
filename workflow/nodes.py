@@ -59,12 +59,12 @@ an `agent_model` event. An override from `wf retry --model` (overrides.py)
 runs the job on the override's harness only, with the model and effort that it
 gives. Then the event also names the override.
 
-With a cap on live agent sessions (capacity.py), each agent attempt first takes
-one of the agent slots, and holds it until the attempt ends. An
-attempt that waits for one isn't failing: the wait uses no retry, the node's
-timeout starts once the attempt has its slot, and the wait shows in
-events.jsonl (slot_waiting, slot_taken) and in status.json (agents_waiting).
-A limit reached while it waits ends the wait, and the attempt doesn't start.
+Optional global and harness caps limit live agent sessions across runs (capacity.py).
+An attempt takes its harness slot before its global slot, when those caps are set.
+The attempt holds both slots until it ends.
+A wait uses no retry, and the node's timeout starts once the attempt has all required slots.
+The wait appears in events.jsonl (slot_waiting, slot_taken) and status.json (agents_waiting).
+A run limit ends the wait, and the attempt does not start.
 
 A node with `tools` doesn't run on a harness whose commands could reach the
 Keychain at its access level (harnesses.KEYCHAIN_SHELL) unless it sets
