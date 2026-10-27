@@ -32,6 +32,7 @@ def repo(tmp_path, monkeypatch):
 FLOW = """
 version: 1
 name: flow
+description: Run a thought and check its result.
 defaults: {harness: claude-code, harnesses: {claude-code: {model: opus}}}
 start: {input: {}}
 nodes:
@@ -530,6 +531,74 @@ def test_the_server_serves_the_page_and_its_json_on_this_machine_only(server, fi
     assert status == 200 and json.loads(body)["events"][0]["text"] == "▶ think"
     status, _, body = get(server, f"/api/file?id={finished.id}&path=nodes/check/1/attempt-1.log")
     assert status == 200 and json.loads(body)["text"] == "checked\n"
+
+
+def test_the_run_api_has_the_task_inputs_description_and_end_output(server, finished):
+    inputs = {"task": "Fix https://linear.app/team/issue/DENG-860/task.\nKeep this line.\n\nAdd the flag.",
+              "branch": "fm/task", "pr": "https://github.com/owner/repo/pull/12", "delivery_mode": "branch", "count": 2}
+    output = {"pr_url": "https://github.com/owner/repo/pull/12", "head": "abc123", "not_ready_reason": "Tests failed."}
+    runs.write_json(finished.dir / "input.json", inputs)
+    finished.set_output(output)
+    status, _, body = get(server, f"/api/run?id={finished.id}")
+    assert status == 200
+    assert json.loads(body)["brief"] == {"workflow": "flow", "description": "Run a thought and check its result.",
+                                       "inputs": inputs, "main_input": "task", "follow_ups": [], "output": output}
+
+
+def test_the_run_api_has_each_follow_up_request_with_its_number_and_time(server):
+    Path("follow.yaml").write_text(dedent("""
+        version: 1
+        name: follow
+        start: {input: {}}
+        follow_up: {to: work}
+        nodes:
+          work: {needs: [start], command: "true"}
+        end: {output: {}}
+    """).lstrip())
+    assert cli.main(["run", "follow.yaml"]) == 0
+    run = next(run for run in runs.all_runs(Path.cwd()) if run.info()["workflow"] == "follow")
+    first = "Fix https://linear.app/team/issue/DENG-861/task.\n\n" + "Keep the task text. " * 500
+    assert cli.main(["continue", run.id, first]) == 0
+    status, _, body = get(server, f"/api/run?id={run.id}")
+    assert status == 200
+    assert json.loads(body)["brief"]["follow_ups"][0]["request"] == first
+    second = "Use https://github.com/owner/repo/pull/15."
+    assert cli.main(["continue", run.id, second]) == 0
+    status, _, body = get(server, f"/api/run?id={run.id}")
+    assert status == 200
+    follows = json.loads(body)["brief"]["follow_ups"]
+    assert [(follow["number"], follow["request"]) for follow in follows] == [(2, second), (1, first)]
+    assert all(observe.timestamp(follow["time"]) > 0 for follow in follows)
+
+
+@pytest.mark.parametrize("content", [None, "", "{}", "null", "[]", "{", '{"task": ""}'])
+def test_the_run_api_allows_missing_empty_or_incomplete_inputs(server, finished, content):
+    path = finished.dir / "input.json"
+    if content is None:
+        path.unlink()
+    else:
+        path.write_text(content)
+    status, _, body = get(server, f"/api/run?id={finished.id}")
+    assert status == 200
+    brief = json.loads(body)["brief"]
+    assert brief["inputs"] == ({"task": ""} if content == '{"task": ""}' else {})
+    assert brief["main_input"] is None
+    assert get(server, "/api/runs")[0] == 200
+
+
+@pytest.mark.parametrize(("inputs", "summary"), [
+    ({"task": "Fix the flag.\nThen add a check.", "branch": "fm/a-long-branch-name"}, "Fix the flag."),
+    ({"note": "Short", "request": "Add the flag\nand check it. Next task."}, "Add the flag and check it."),
+    ({"pr": "https://github.com/owner/repo/pull/12"}, "https://github.com/owner/repo/pull/12"),
+    ({"repository": "owner/repo", "login": "a-long-account-name"}, "owner/repo"),
+    ({"task": "", "pr": "owner/repo#12"}, "owner/repo#12"),
+    ({}, ""),
+])
+def test_the_runs_api_has_a_one_line_task_summary(server, finished, inputs, summary):
+    runs.write_json(finished.dir / "input.json", inputs)
+    status, _, body = get(server, "/api/runs")
+    assert status == 200
+    assert json.loads(body)["runs"][0]["summary"] == summary
 
 
 def test_the_server_gives_data_only_to_the_page_that_has_its_key(server, finished):

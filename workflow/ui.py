@@ -48,7 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from . import diagram, observe, operate, progress, report, runs, spec
+from . import diagram, observe, operate, progress, report, runs, spec, trace_view
 from .runs import Run
 
 HOST = "127.0.0.1"
@@ -121,7 +121,7 @@ def run_list(source: Source) -> dict:
     for key, run in source.runs().items():
         state = operate.state(run)
         item = {"id": key, "run": run.id, "workflow": state.get("workflow"), "status": state.get("status"),
-                "dry_run": state.get("dry_run"), "updated": state.get("updated")}
+                "dry_run": state.get("dry_run"), "updated": state.get("updated"), "summary": _summary(_inputs(run))}
         if state.get("status") in MOVING:
             try:
                 with _viewing(run) as view:
@@ -138,7 +138,7 @@ def run_detail(run: Run) -> dict:
     state = operate.state(run)
     status = state.get("status")
     with _viewing(run) as view:  # after the state: the events go at least as far as it does
-        return {"state": state, "progress": view.progress(status), "graph": view.graph, "states": view.states(status),
+        return {"state": state, "brief": view.brief(state), "progress": view.progress(status), "graph": view.graph, "states": view.states(status),
                 "metrics": view.metrics(status), "sessions": view.open.live(), "attempts": view.attempts.listed()}
 
 
@@ -167,6 +167,13 @@ class _View:
         self.run, self.lock = run, threading.Lock()
         self.tally: report.Tally | None = None  # None until the first refresh
         self.asked = time.monotonic()  # when a page last asked for the run
+        self.follow_ups = _FollowUps(run)
+
+    def brief(self, state: dict) -> dict:
+        inputs = _inputs(self.run)
+        return {"workflow": self.workflow.name if self.workflow else state.get("workflow"),
+                "description": self.workflow.description if self.workflow else "", "inputs": inputs,
+                "main_input": _main_input(inputs), "follow_ups": self.follow_ups.read(), "output": self.run.output()}
 
     def _start(self) -> None:
         run = self.run
@@ -490,3 +497,59 @@ def serve(source: Source, port: int, say: Callable[[str], None] = lambda text: p
     finally:
         server.server_close()
     return 0
+
+
+def _inputs(run: Run) -> dict:
+    try:
+        value = json.loads((run.dir / "input.json").read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _main_input(inputs: dict) -> str | None:
+    short = {"branch", "pr", "repository", "login", "delivery", "delivery_mode"}
+    text = {key: value for key, value in inputs.items() if key not in short and isinstance(value, str) and value.strip()}
+    return max(text, key=lambda key: len(text[key]), default=None)
+
+
+def _summary(inputs: dict) -> str:
+    key = _main_input(inputs)
+    value = inputs[key] if key else inputs.get("pr") or inputs.get("repository") or ""
+    if not isinstance(value, str):
+        return ""
+    line = " ".join(value.split())
+    return re.split(r"(?<=[.!?])\s+", line, maxsplit=1)[0]
+
+
+class _FollowUps:
+    """Read each follow-up request from the trace once, including text stored in blobs."""
+
+    def __init__(self, run: Run):
+        self.run, self.inode, self.offset = run, None, 0
+        self.found: dict[int, dict] = {}
+
+    def read(self) -> list[dict]:
+        try:
+            with (self.run.dir / trace_view.FILE).open("rb") as file:
+                info = os.fstat(file.fileno())
+                if info.st_ino != self.inode or info.st_size < self.offset:
+                    self.inode, self.offset, self.found = info.st_ino, 0, {}
+                file.seek(self.offset)
+                for line in file:
+                    if not line.endswith(b"\n"):
+                        break
+                    self.offset += len(line)
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict) or record.get("kind") != "run" or record.get("action") != "continued":
+                        continue
+                    number = record.get("follow_up")
+                    request = trace_view.full(self.run, record.get("request"))
+                    if isinstance(number, int) and isinstance(request, str):
+                        self.found[number] = {"number": number, "time": record.get("time"), "request": request}
+        except OSError:
+            pass
+        return [self.found[number] for number in sorted(self.found, reverse=True)]
