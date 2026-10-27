@@ -41,8 +41,9 @@ process holds its lock, the process stopped without its `run_stopped`. It crashe
 it, as `wf status` says. The run is then `stopped` at its last record, and each attempt and turn that
 it left running is `cancelled` there. When `wf retry` runs them again, their new rows replace these.
 
-So exporting twice changes nothing: the second export finds nothing new and writes nothing. When
-ClickHouse makes the tables again, as after `docker compose down -v`, the identity changes. Then the
+The second export writes no new run rows when the run has not changed.
+The command still writes an export_runs row with its result.
+When ClickHouse makes the tables again, as after `docker compose down -v`, the identity changes. Then the
 next export of each run starts again from the start of its file. So does the export of a run whose
 export.json is gone. Each row that it writes replaces an equal one.
 

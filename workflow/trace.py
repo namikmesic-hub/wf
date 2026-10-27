@@ -26,9 +26,10 @@ It is in the top-level run folder, and sub-workflows write to it too:
     turn_end       the agent's turn ends           how it ended, and what it used: the tokens, the
                                                    cost, and the parts of the tokens (harnesses.Usage)
     attempt_end    the attempt ends                all of `attempt`, the session id, start, end,
-                                                   how it ended and what it used, as in turn_end.
+                                                   outcome, usage, duration_basis, awake_s, asleep_s.
                                                    For a command: its text, env, exit code, and
                                                    the files that hold its stdout and stderr
+    host_slept     detected sleep exceeds 60 s      started, ended, and asleep_s
     job_end        the job ends                    its output or error (or that it waits for a person)
     run_stopped    the process stops driving it    the run's status, and its output once it succeeds
 
@@ -37,6 +38,7 @@ Every record has `time`, `kind` and `id`. A record about a node also has `node`,
 `attempt` and `turn`. Ids nest, and `parent` names the id that holds a record:
 
     run                        the run
+    run.sleep.<monotonic seconds>  a host_slept record, with parent run
     review#2                   pass 2 of review (also its render, routes and job records)
     build#1[3]                 item 3 of build's pass 1
     review#2.a1                attempt 1 of that pass
@@ -45,6 +47,11 @@ Every record has `time`, `kind` and `id`. A record about a node also has `node`,
                                .k1 a block of thinking, .r1 a request)
     end                        the end outputs
     build#1[3].a1/implement#2  a pass in the sub-workflow that attempt 1 of build[3] runs
+
+The host_slept fields give an estimated wall clock span and its sleep seconds.
+The run writes an event with the same fields to events.jsonl.
+The sleep clock includes sleep, so wall clock steps do not change the measured sleep.
+For attempt_end, duration_basis is monotonic, awake_s gives monotonic seconds, and asleep_s sums detected sleep during the attempt.
 
 A value longer than CAP characters goes to blobs/<sha256>.txt (text) or .json
 (any other value). The trace writes that file once, however often the value
@@ -163,7 +170,7 @@ class Trace:
         ready = self._ready(record)
         try:
             line = (json.dumps(ready, ensure_ascii=False, default=str) + "\n").encode("utf-8")
-        except UnicodeEncodeError:
+        except UnicodeEncodeError:  # text with a lone surrogate, which UTF-8 can't hold: escape all of it
             line = (json.dumps(ready, default=str) + "\n").encode("ascii")
         with (self.folder / FILE).open("ab") as file:
             file.write(line)
@@ -182,10 +189,10 @@ class Trace:
 
     def _check_clock(self) -> None:
         current = (time.time(), time.monotonic(), self._continuous())
-        wall, awake, continuous = (now - before for now, before in zip(current, self._sample))
+        awake = current[1] - self._sample[1]
+        slept = current[2] - self._sample[2] - awake
         self._sample = current
-        slept = continuous - awake
-        if wall - awake > 60 and slept > 60:
+        if slept > 60:
             self.asleep_s += slept
             end = datetime.fromtimestamp(current[0]).astimezone()
             event = {"started": (end - timedelta(seconds=slept)).isoformat(timespec="milliseconds"),

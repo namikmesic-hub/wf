@@ -767,6 +767,8 @@ def test_a_render_reads_each_path_it_used_with_its_value(source, call, expected)
 
 @pytest.mark.parametrize("wall,awake,continuous,asleep", [
     (620, 20, 620, 600),
+    (-280, 20, 620, 600),
+    (1520, 20, 620, 600),
     (920, 20, 20, 0),
     (-880, 20, 20, 0),
     (20, 20, 20, 0),

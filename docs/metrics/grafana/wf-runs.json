@@ -862,22 +862,10 @@
           "unit": "s",
           "decimals": 1,
           "color": {
-            "mode": "thresholds"
+            "mode": "fixed",
+            "fixedColor": "blue"
           },
           "noValue": "No data",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 900
-              }
-            ]
-          },
           "mappings": [
             {
               "type": "special",
@@ -885,7 +873,7 @@
                 "match": "null",
                 "result": {
                   "text": "No data",
-                  "color": "red",
+                  "color": "blue",
                   "index": 0
                 }
               }

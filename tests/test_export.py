@@ -1021,12 +1021,19 @@ def test_wf_metrics_export_all_repos_writes_the_runs_of_each_repo_in_the_runs_fo
 @pytest.mark.parametrize("args, said", [
     (["--all-repos"], "--all-repos needs a runs folder"),
     (["--all-repos", "--runs-dir", "runs", TRACED], "name runs, or give --all-repos, but not both"),
-    (["20261020-0000-missing-zz99"], "no run `20261020-0000-missing-zz99`"),
 ])
 def test_wf_metrics_export_refuses_what_it_cant_do_before_it_opens_clickhouse(repo, stores, capsys, args, said):
     assert cli.main(["metrics", "export", *args]) == 1
     assert said in capsys.readouterr().err
     assert stores == []
+
+
+def test_a_missing_named_run_records_a_failed_export(repo, stores, capsys):
+    missing = "20261020-0000-missing-zz99"
+    assert cli.main(["metrics", "export", missing]) == 1
+    assert f"no run `{missing}`" in capsys.readouterr().err
+    (audit,) = stores[0].final()["export_runs"]
+    assert (audit["error_class"], audit["runs_read"], audit["rows_written"]) == ("UnreadableFolder", 0, 0)
 
 
 @pytest.mark.parametrize("text", ["", f'[metrics]\nenabled = false\nurl = "{metrics_url("127.0.0.1:8123")}"\n'])

@@ -832,7 +832,7 @@ def _metrics_export(args) -> int:
               file=sys.stderr)
         chosen, failure = [], "UnreadableFolder"
     if chosen is None:
-        return 1
+        chosen, failure = [], "UnreadableFolder"
     store = export.Store(chosen_config.metrics.url)
     runs_read, rows_written = 0, 0
     try:
@@ -862,7 +862,7 @@ def _metrics_export(args) -> int:
 
 
 def _runs_to_export(args, folder: Path) -> list[runs.Run] | None:
-    """Select the named runs, or all runs in the folder.
+    """The runs named, once each and in their order, or else each run in `folder` (export.runs_in).
     Return None after a message when a named run is absent.
     Raise OSError when the folder cannot be read.
     """
