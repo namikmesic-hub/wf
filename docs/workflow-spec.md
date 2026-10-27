@@ -1452,25 +1452,30 @@ A sub-workflow writes to the trace of its top-level run.
 | `sdk_retry` | The SDK reports a retry. | The retry message when the harness supplies one. A retry does not count as progress. |
 | `stall_detected` | An awake-time limit passes without progress, or an open tool reaches its limit. | The attempt, last progress time, silent wall time, awake time, threshold, and selected action. |
 | `stall_resolved` | Progress resumes, the attempt ends, or the driver accepts a stall command. | The attempt and `action`: `progress`, `attempt_end`, `end`, or `wait`. |
-| `host_slept` | The clock detects a sleep gap over 60 seconds. | The sleep start, end, and `asleep_s`. |
+| `host_slept` | The run clock check or an agent attempt's watchdog detects sleep over 60 seconds. | `started`, `ended`, and `asleep_s`. Run records use `run.sleep.<monotonic seconds>` as their id. Watchdog records use the attempt id. |
 | `request` | The runtime gives the id of a request of the turn. Only Cursor's SDK reports it. | `request_id`, which names the request in the records of the runtime. |
 | `tool_call` | The agent calls a tool: when the harness says that the call starts, and again when it gives more of the arguments. | The tool and all of its arguments. The last record of an id holds all that the harness gave. A call that a timeout stops has one too. |
 | `tool_result` | The tool answers. | All of the answer, and if it is an error. |
 | `submit_result` | The agent calls `submit_result`. | The arguments, and the problems that wf found, or that wf accepted the result. |
 | `turn_end` | The turn of the agent ends. | How the turn ended, and what it used, in `usage`. |
 | `attempt_end` | An attempt ends. | Attempt fields, session id, start, end, outcome, `usage`, `duration_basis`, `awake_s`, and `asleep_s`. Commands also hold text, `env`, exit code, stdout, and stderr paths. |
-| `host_slept` | Detected host sleep exceeds 60 seconds. | `started`, `ended`, and `asleep_s`. |
 | `job_end` | A job ends. | Its output or its error, or that it waits for a person. |
 | `run_stopped` | The process stops to drive the run. | The status of the run, and its output when it succeeded. |
 
-wf compares a clock that includes sleep with the monotonic clock, which omits sleep on macOS and Linux.
-A difference above 60 seconds writes a `host_slept` record and an event with the same fields in `events.jsonl`.
+The run clock check compares a clock that includes sleep with the monotonic clock.
+The monotonic clock omits sleep on macOS and Linux.
+A difference above 60 seconds writes a `host_slept` record and an event in `events.jsonl`.
+Run clock records use `run.sleep.<monotonic seconds>` as their id.
+An agent attempt's watchdog also writes `host_slept`, with the attempt id.
+Each writer includes `started`, `ended`, and `asleep_s` in its record and event.
+One sleep during an agent attempt can produce two records and two events.
 `started` and `ended` bound an estimated sleep span on the wall clock.
 That span ends when wf detects sleep.
 `asleep_s` gives the detected sleep in seconds.
-A wall clock step alone does not count as sleep, and a backward step does not hide sleep.
-wf samples before trace writes and every 30 seconds while the graph runs.
-When wf can't write the sleep to one of the two files, it still writes it to the other file, and writes the record that found the sleep.
+Wall clock steps do not affect the run clock check's sleep detection.
+The run clock check samples before trace writes and every 30 seconds while the graph runs.
+When wf can't write a run sleep record to one file, it still writes it to the other file.
+It also writes the trace record that found the sleep.
 The sleep clock uses `CLOCK_MONOTONIC_RAW` on macOS, which is `mach_continuous_time` there, and `CLOCK_BOOTTIME` on Linux.
 On other hosts, it uses the monotonic clock and cannot detect sleep.
 
@@ -1493,10 +1498,10 @@ Each record has an `id`, and the `parent` id that contains it:
 
 ```
 run                          the run
-run.sleep.<monotonic seconds> host_slept record, with parent run
+run.sleep.<monotonic seconds> run clock check's host_slept record, with parent run
 review#2                     pass 2 of review: its pass, job, render, routes and job_end records
 build#1[3]                   item 3 of pass 1 of build
-review#2.a1                  attempt 1 of that pass
+review#2.a1                  attempt 1 of that pass, and its watchdog's host_slept records
 review#2.a1.t2               turn 2 of that attempt: the first reminder
 review#2.a1.t2.c4            tool call 4 of that turn (s1 is a submit_result call, m1 a message, k1 a block of thinking, r1 a request)
 end                          the end outputs
@@ -1567,7 +1572,7 @@ The tests named below are in `tests/test_trace.py`, unless another file is named
 | A Codex turn overflows the model's context window | Codex sets its total to the window's size, with each part 0. The turn counts the tokens, and each part as 0, not less. | `workflow/harnesses/base.py:81` | `tests/test_codex.py::test_a_turn_that_overflows_the_context_window_counts_its_tokens_and_no_parts` |
 | A wf tool gets its token | The token goes into no file in the run folder or in `~/.wf`, the trace included. | `workflow/tools/relay.py:199` | `tests/test_tool_sessions.py::test_no_secret_reaches_an_agent_or_the_run_folder` |
 | A value holds text that UTF-8 can't hold, such as a lone surrogate | The trace writes it escaped, and the attempt goes on. `wf trace` prints it escaped too. | `workflow/trace.py:165`, `workflow/trace_view.py:158` | `test_writing_the_trace_survives_text_that_utf8_cannot_hold`, `test_wf_trace_prints_text_that_utf8_cannot_hold_escaped` |
-| The host sleeps for more than 60 seconds while wf drives a run | The trace gets a `host_slept` record, and `events.jsonl` gets an event with the same fields. The `asleep_s` of the attempt that the sleep is in counts the sleep. While the graph runs, wf also samples the clocks every 30 seconds. | `workflow/context.py:105`, `workflow/runner.py:467`, `workflow/trace.py:179`, `workflow/trace.py:197` | `test_attempt_clocks_separate_sleep_from_wall_clock_steps`, `test_a_run_writes_host_sleep_to_its_trace_and_its_events_and_samples_the_clock_while_the_graph_runs`, `test_watching_samples_the_clock_while_nothing_writes` |
+| The host sleeps for more than 60 seconds while wf drives a run | The run clock check writes a `host_slept` record and event. Each agent watchdog can also write a pair for its attempt. The `asleep_s` of the attempt that the sleep is in counts the sleep. While the graph runs, wf also samples the clocks every 30 seconds. | `workflow/context.py:105`, `workflow/runner.py:467`, `workflow/trace.py:179`, `workflow/trace.py:197`, `workflow/watchdog.py:100`, `workflow/trace.py:643` | `test_attempt_clocks_separate_sleep_from_wall_clock_steps`, `test_a_run_writes_host_sleep_to_its_trace_and_its_events_and_samples_the_clock_while_the_graph_runs`, `test_watching_samples_the_clock_while_nothing_writes`, `tests/test_watchdog.py::test_a_tool_call_across_sleep_counts_sleep_once` |
 | `trace.jsonl` or `events.jsonl` can't take the sleep | wf writes the sleep to the other file, and writes the record that found the sleep. It says on stderr which file failed, and the run continues. | `workflow/trace.py:189`, `workflow/trace.py:192` | `test_a_host_sleep_that_one_file_cant_take_still_goes_to_the_other_with_the_record_that_found_it` |
 | A command's log or stream file can't be opened | The command doesn't start. | `workflow/nodes.py:843` | `test_a_command_whose_stream_file_cant_be_opened_never_starts` |
 | `wf retry` stops without driving the run: it still waits for a person, or the run has ended | It writes no `run` record. Each `run` record has a `run_stopped` record. | `workflow/runner.py:279` | `test_each_run_record_has_a_run_stopped_record_whatever_wf_retry_does` |
