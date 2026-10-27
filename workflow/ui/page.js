@@ -12,6 +12,7 @@ const SVG = "http://www.w3.org/2000/svg";
 let selected = null;
 let eventsNext = null;
 let shownFile = null;
+let shownBrief = null;
 const busy = new Set();
 
 function el(tag, props = {}, ...children) {
@@ -90,6 +91,7 @@ async function refreshRuns() {
     }
     const button = el("button", { type: "button", "data-id": run.id, "aria-current": String(run.id === selected), onclick: () => select(run.id) },
       el("span", { class: "run-name", text: run.run }),
+      run.summary ? el("span", { class: "run-summary", text: run.summary, title: run.summary }) : null,
       el("span", { class: "run-line", text: `${run.workflow || "?"}${run.dry_run ? " (dry run)" : ""}` }), line);
     return el("li", {}, button);
   }));
@@ -106,6 +108,7 @@ function select(id) {
   selected = id;
   eventsNext = null;
   shownFile = null;
+  shownBrief = null;
   history.replaceState(null, "", `#run=${encodeURIComponent(id)}`);
   document.getElementById("events").replaceChildren();
   document.getElementById("viewer").hidden = true;
@@ -128,6 +131,7 @@ async function refreshRun() {
   document.getElementById("run-status").replaceChildren(dot(`run-${state.status}`), el("span", { text: state.status }));
   text("run-detail", detail(state));
   document.getElementById("run-detail").hidden = !detail(state);
+  showBrief(found.brief);
   showProgress(found.progress, state.status);
   showGraph(found.graph, found.progress, found.states);
   showSessions(found.sessions);
@@ -145,6 +149,106 @@ function detail(state) {
     return `Waits for an agent slot: ${state.agents_waiting.map((w) => w.node).join(", ")}`;
   }
   return "";
+}
+
+function urls(value) {
+  if (typeof value === "string") return (value.match(/https?:\/\/[^\s<>"'`]+/gi) || []).map((url) => url.replace(/[.,!?;:)\]}]+$/, ""));
+  if (value && typeof value === "object") return Object.values(value).flatMap(urls);
+  return [];
+}
+
+function linkLabel(url) {
+  const parsed = new URL(url);
+  const ticket = parsed.hostname === "linear.app" && parsed.pathname.match(/\/issue\/([a-z]+-\d+)/i);
+  if (ticket) return ticket[1].toUpperCase();
+  const pr = parsed.hostname === "github.com" && parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  return pr ? `${pr[1]}/${pr[2]}#${pr[3]}` : `${parsed.hostname}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+}
+
+function link(url, label = url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return el("a", { href: url, target: "_blank", rel: "noopener noreferrer", text: label });
+    }
+  } catch (_) {}
+  return document.createTextNode(label);
+}
+
+function linkedText(value) {
+  const node = el("span");
+  const pattern = /https?:\/\/[^\s<>"'`]+/gi;
+  let at = 0;
+  for (const match of value.matchAll(pattern)) {
+    const url = urls(match[0])[0];
+    node.append(value.slice(at, match.index), link(url));
+    at = match.index + url.length;
+  }
+  node.append(value.slice(at));
+  return node;
+}
+
+function taskText(value) {
+  const node = el("div");
+  const split = /\r?\n[ \t]*\r?\n/.exec(value);
+  const first = split ? value.slice(0, split.index) : value;
+  node.append(el("p", { class: "task-text" }, linkedText(first)));
+  if (split) node.append(el("details", {}, el("summary", { text: "show all" }),
+    el("p", { class: "task-text" }, linkedText(value.slice(split.index + split[0].length)))));
+  return node;
+}
+
+function showBrief(brief) {
+  const signature = JSON.stringify(brief);
+  if (signature === shownBrief) return;
+  shownBrief = signature;
+  const box = document.getElementById("brief");
+  box.replaceChildren();
+  if (!brief) return;
+  const inputs = brief.inputs || {};
+  if (brief.description) box.append(el("p", { class: "task-description secondary", text: brief.description, title: brief.description }));
+  if (brief.main_input) box.append(taskText(inputs[brief.main_input]));
+  const found = [...new Set(urls([inputs, brief.follow_ups, brief.output]))];
+  if (found.length) {
+    const line = el("p", {}, el("strong", { text: "Links: " }));
+    found.forEach((url, i) => {
+      if (i) line.append(" · ");
+      let label = url;
+      try { label = linkLabel(url); } catch (_) {}
+      line.append(link(url, label));
+    });
+    box.append(line);
+  }
+  const fields = [
+    [inputs, "branch", "Branch"], [inputs, "pr", "Pull request"],
+    [inputs, "delivery_mode", "Delivery mode"], [inputs, "delivery", "Delivery mode"],
+    [brief.output, "pr_url", "Pull request"], [brief.output, "pr", "Pull request"],
+    [brief.output, "pull_request_url", "Pull request"], [brief.output, "head", "Head"],
+    [brief.output, "not_ready", "Not ready"],
+  ];
+  const deliverables = el("p", {}, el("strong", { text: "Deliverables: " }));
+  let count = 0;
+  for (const [source, key, label] of fields) {
+    if (!source || source[key] === undefined || source[key] === null || source[key] === "") continue;
+    if (count++) deliverables.append(" · ");
+    deliverables.append(`${label}: `, linkedText(String(source[key])));
+  }
+  if (count) box.append(deliverables);
+  for (const follow of brief.follow_ups || []) {
+    const time = follow.time ? new Date(follow.time) : null;
+    const when = time && !Number.isNaN(time.getTime()) ? time.toLocaleString() : follow.time || "";
+    box.append(el("section", { class: "follow-up" }, el("h4", { text: `Follow-up ${follow.number}${when ? ` · ${when}` : ""}` }),
+      taskText(follow.request || "")));
+  }
+  const other = el("dl", { class: "task-inputs" });
+  for (const [key, value] of Object.entries(inputs)) {
+    if (key === brief.main_input || fields.some(([source, field]) => source === inputs && field === key)) continue;
+    if (value === null || value === "") continue;
+    const shown = typeof value === "string" ? value : JSON.stringify(value);
+    if (shown.length > 240 || shown.includes("\n")) continue;
+    other.append(el("dt", { text: key }), el("dd", {}, linkedText(shown)));
+  }
+  if (other.childElementCount) box.append(other);
 }
 
 function showProgress(progress, status) {

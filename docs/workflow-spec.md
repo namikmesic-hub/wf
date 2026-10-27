@@ -1568,9 +1568,29 @@ Keep it open in a terminal pane to follow a run.
 Each server makes a new random key.
 The page sends the key with each request for data, and the server answers no request without it.
 So another program or user on the machine can't read the transcripts through the server.
-The page lists the runs of the repo, newest first.
+The page lists the runs of the repo, newest first, with a one-line task summary under each name.
+The summary uses the first sentence of the longest text input, or the pull request or repository input.
 With `--all-repos` it lists the runs of each repo in the runs folder.
-For the run that you choose, the page shows these:
+The Task section comes before the progress card.
+It shows the workflow description on one line and keeps the first paragraph of the main text input in full.
+The **show all** control opens the rest, with line breaks and links.
+The Links line collects URLs from the inputs, the follow-up requests, and the end output.
+Ticket links show their key, and pull request links show `owner/repo#number`.
+The Deliverables line shows the branch, pull request, and delivery mode from the inputs.
+It also shows the pull request URL, head, and not-ready reason from the end output when present.
+The not-ready reason comes from the end output's `not_ready` field.
+Each follow-up shows its number, time, and request, newest first.
+Other short inputs appear as key and value pairs.
+The Task section and run list replace inputs that feed `secret_env` values with `[secret]`.
+Until the server can read the workflow files, the brief omits start inputs.
+The server keeps each run's secret input names after it can read all required workflow files.
+The run list and Task section share these names, so later requests do not parse those files again for inputs.
+The server stores no names after a failed read and tries again on the next request.
+Missing or empty input files leave out those parts without an error.
+The run API returns these data in `brief`, with the workflow name, description, inputs, follow-ups, and end output.
+Follow-up requests come from `trace.jsonl`, with long text read from `blobs/`.
+
+For the run that you choose, the page also shows these:
 
 - the workflow graph, with each node in the color of its state, a word and a sign for the state, and each loop's count
 - the progress estimate
@@ -1631,26 +1651,34 @@ It is three plain files in `workflow/ui/`, with no build step and nothing from a
 | The attempt, pass or item of a session ends, or that of the workflow node around it | The session is over, also with no `session_ended`. | `workflow/observe.py:76`, `workflow/observe.py:112` | `test_a_session_ends_with_its_attempt_its_item_or_the_workflow_node_around_it`, `test_a_session_inside_a_workflow_node_that_timed_out_is_not_listed` |
 | A process that no longer drives the run left a session open | `wf sessions` doesn't list it. | `workflow/observe.py:88` | `test_a_session_left_open_by_a_process_that_no_longer_drives_the_run_is_not_listed` |
 | `wf watch` follows a run | It prints each new event, and the run's state each time that the run needs attention. It stops once the run succeeds or is discarded. | `workflow/observe.py:196`, `workflow/observe.py:192`, `workflow/observe.py:186` | `test_wf_watch_prints_the_steps_and_tool_calls_as_they_come_until_the_run_ends`, `test_wf_watch_goes_on_through_a_question_until_the_run_succeeds`, `test_wf_watch_stops_when_the_run_is_discarded`, `test_wf_watch_on_a_run_that_ended_prints_the_last_events_and_how_it_ended` |
-| A request to `wf ui` for data has no key, or another key | The server refuses it with 401. | `workflow/ui.py:440` | `test_the_server_gives_data_only_to_the_page_that_has_its_key` |
-| A request to `wf ui` names another host in its `Host` header | The server refuses it with 403. So a web page can't read it through a DNS name that points to `127.0.0.1`. | `workflow/ui.py:432` | `test_the_server_refuses_other_hosts_unknown_runs_and_files_outside_the_passes` |
-| The page asks for a file of a run | Only `instruction.md`, `output.json`, `session.json` and `attempt-<n>.log` under `nodes/` come back, and no link out of `nodes/` is followed. | `workflow/ui.py:390` | `test_the_page_shows_files_of_the_passes_and_nothing_else` |
-| The page shows what a run wrote | It puts it in the page as text, never as HTML, and the server lets the page run only its own script. | `workflow/ui.py:465` | `test_the_server_serves_the_page_and_its_json_on_this_machine_only` |
+| The page asks for a run | The response includes `brief` with the workflow name, description, start inputs, follow-ups, and end output. | `workflow/ui.py:172` | `test_the_run_api_has_the_task_inputs_description_and_end_output` in `tests/test_ui.py` |
+| The Task section shows deliver-change output | The Deliverables line shows the `not_ready` reason. | `workflow/ui/page.js:227` | `test_the_task_card_with_node` in `tests/test_ui.py` and `tests/test_ui_page.cjs` |
+| A start input feeds `secret_env` | The brief and run summary hide that input, including through sub-workflows. Unreadable workflow files leave out inputs. | `workflow/ui.py:527` | `test_the_ui_hides_secret_start_inputs_before_the_run_starts` in `tests/test_ui.py` |
+| The page asks for the run list or brief again | Both APIs reuse the run's secret input names after a successful read. | `workflow/ui.py:506` | `test_the_run_list_and_brief_share_cached_secret_input_names` in `tests/test_ui.py` |
+| A workflow file cannot be read before secret input names are known | The server omits inputs and tries again on the next request. Failed reads add no cache entry. | `workflow/ui.py:518` | `test_secret_input_names_are_cached_only_after_all_workflow_files_can_be_read` in `tests/test_ui.py` |
+| A run has follow-up requests | The brief lists each request with its number and time, newest first, including long text from blobs. | `workflow/ui.py:556` | `test_the_run_api_has_each_follow_up_request_with_its_number_and_time` in `tests/test_ui.py` |
+| The input file is missing, empty, or incomplete | The brief leaves out missing inputs without an error. | `workflow/ui.py:522` | `test_the_run_api_allows_missing_empty_or_incomplete_inputs` in `tests/test_ui.py` |
+| The page asks for the run list | Each run has a one-line summary from its main text, pull request, or repository input. | `workflow/ui.py:540` | `test_the_runs_api_has_a_one_line_task_summary` in `tests/test_ui.py` |
+| A request to `wf ui` for data has no key, or another key | The server refuses it with 401. | `workflow/ui.py:447` | `test_the_server_gives_data_only_to_the_page_that_has_its_key` |
+| A request to `wf ui` names another host in its `Host` header | The server refuses it with 403. So a web page can't read it through a DNS name that points to `127.0.0.1`. | `workflow/ui.py:439` | `test_the_server_refuses_other_hosts_unknown_runs_and_files_outside_the_passes` |
+| The page asks for a file of a run | Only `instruction.md`, `output.json`, `session.json` and `attempt-<n>.log` under `nodes/` come back, and no link out of `nodes/` is followed. | `workflow/ui.py:397` | `test_the_page_shows_files_of_the_passes_and_nothing_else` |
+| The page shows what a run wrote | It puts it in the page as text, never as HTML, and the server lets the page run only its own script. | `workflow/ui.py:472` | `test_the_server_serves_the_page_and_its_json_on_this_machine_only` |
 | `--port` isn't a number from 0 to 65535 | `wf ui` says so and exits with code 1, before it starts a server. | `workflow/config/__init__.py:86` | `test_a_port_that_is_not_a_port_is_refused_with_a_message` |
 | `wf ui` has no `--port` | It listens on `port` under `[ui]` in `config.toml`, else on 8765. With `--all-repos`, `runs_dir` in the file is a runs folder too. | `workflow/cli.py:432` | `test_wf_ui_takes_its_port_and_its_runs_folder_from_config_toml_unless_a_flag_names_them` |
-| The port is in use | `wf ui` uses a free port, and says which. | `workflow/ui.py:482` | `test_a_port_in_use_gives_way_to_a_free_one` |
-| The page asks for a run again | The server reads only the events after those that it read before. It looks only for the files of attempts that run, and once more after the event that ends an attempt. What it adds up is what `wf report` and `wf status` count. | `workflow/ui.py:216`, `workflow/ui.py:354`, `workflow/ui.py:363` | `test_a_refresh_reads_only_the_new_events_and_the_files_of_attempts_that_can_change`, `test_a_transcript_shows_once_the_running_session_writes_it` |
-| `events.jsonl` was cut back and grew again since the page last asked | The server reads the run again from its start. | `workflow/ui.py:213` | `test_a_refresh_starts_over_when_events_jsonl_is_cut_back_and_grows_again` |
-| A look for a file of an attempt fails for another reason than a missing file | The server looks again at the next request, also for a node that finished. | `workflow/ui.py:381`, `workflow/ui.py:362` | `test_an_error_while_looking_for_a_finished_node_s_files_hides_its_attempt_only_until_the_next_refresh` |
-| A sub-workflow attempt starts over | The page lists the attempts of each of its steps in both sub-workflow attempts. | `workflow/ui.py:321` | `test_a_sub_workflow_attempt_that_starts_over_lists_the_attempts_of_both` |
+| The port is in use | `wf ui` uses a free port, and says which. | `workflow/ui.py:489` | `test_a_port_in_use_gives_way_to_a_free_one` |
+| The page asks for a run again | The server reads only the events after those that it read before. It looks only for the files of attempts that run, and once more after the event that ends an attempt. What it adds up is what `wf report` and `wf status` count. | `workflow/ui.py:223`, `workflow/ui.py:361`, `workflow/ui.py:370` | `test_a_refresh_reads_only_the_new_events_and_the_files_of_attempts_that_can_change`, `test_a_transcript_shows_once_the_running_session_writes_it` |
+| `events.jsonl` was cut back and grew again since the page last asked | The server reads the run again from its start. | `workflow/ui.py:220` | `test_a_refresh_starts_over_when_events_jsonl_is_cut_back_and_grows_again` |
+| A look for a file of an attempt fails for another reason than a missing file | The server looks again at the next request, also for a node that finished. | `workflow/ui.py:388`, `workflow/ui.py:369` | `test_an_error_while_looking_for_a_finished_node_s_files_hides_its_attempt_only_until_the_next_refresh` |
+| A sub-workflow attempt starts over | The page lists the attempts of each of its steps in both sub-workflow attempts. | `workflow/ui.py:328` | `test_a_sub_workflow_attempt_that_starts_over_lists_the_attempts_of_both` |
 | The page shows the steps | Each step has its state, also a step in a sub-workflow, from the run's events. The graph shows the same state. A step whose attempt around it ended is `failed`, and a step of a workflow node that the run goes back to is `waiting`. When the workflow node is done, a step that its sub-workflow didn't reach is `skipped`. | `workflow/progress.py:307`, `workflow/progress.py:318`, `workflow/progress.py:324`, `workflow/progress.py:321` | `test_each_step_has_a_state_and_a_step_that_runs_shows_its_numbers_so_far`, `test_each_step_of_a_sub_workflow_has_a_state_from_its_own_events` |
 | A step runs | Its numbers on the page add the attempt that runs, and the time since its pass started. They also add the last `agent_usage` of each of its sessions, in its sub-workflow too. A step inside an attempt that ended adds nothing more. | `workflow/report.py:153`, `workflow/report.py:167`, `workflow/report.py:210` | `test_each_step_has_a_state_and_a_step_that_runs_shows_its_numbers_so_far`, `test_a_pass_that_runs_adds_what_it_has_done_so_far_also_when_its_sub_workflow_starts_over`, `test_the_spending_so_far_of_items_and_of_agents_inside_workflow_items_adds_up` |
 | An agent attempt waits for its agent slot | The page doesn't count it as an attempt until it has the slot. | `workflow/report.py:105` | `test_an_agent_attempt_that_waits_for_its_slot_has_not_started`, `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
 | A node fails before it starts, and `wf retry` starts it | Only its pass counts in its time, in `wf report` and on the page. | `workflow/report.py:92`, `workflow/report.py:138` | `test_a_node_that_failed_before_it_started_adds_no_time_once_its_pass_ran` |
 | The same attempt of a workflow node goes on after a limit, a question or a crash | Its steps keep their states, times and spending. An attempt with a new number starts them over. | `workflow/progress.py:256`, `workflow/report.py:98` | `test_a_sub_workflow_attempt_that_goes_on_keeps_what_its_steps_did`, `test_a_sub_workflow_attempt_that_goes_on_keeps_the_time_and_spending_of_its_steps` |
-| A workflow file can't be read, for another reason than a missing or damaged file | wf ui reads it again at the next request, and then plays the events that came before. A missing or damaged file isn't read again. | `workflow/progress.py:291`, `workflow/progress.py:296`, `workflow/ui.py:182` | `test_a_sub_workflow_that_can_t_be_read_for_now_gets_its_events_once_it_can`, `test_a_workflow_file_that_can_t_be_read_for_now_is_read_at_the_next_refresh` |
-| More than 64 runs move | The server keeps what it read of each run that a page asked for in the last minute. So each refresh of the list reads only the new events of each run. | `workflow/ui.py:254` | `test_the_views_of_runs_that_a_page_asks_for_stay_when_more_than_64_move` |
+| A workflow file can't be read, for another reason than a missing or damaged file | wf ui reads it again at the next request, and then plays the events that came before. A missing or damaged file isn't read again. | `workflow/progress.py:291`, `workflow/progress.py:296`, `workflow/ui.py:189` | `test_a_sub_workflow_that_can_t_be_read_for_now_gets_its_events_once_it_can`, `test_a_workflow_file_that_can_t_be_read_for_now_is_read_at_the_next_refresh` |
+| More than 64 runs move | The server keeps what it read of each run that a page asked for in the last minute. So each refresh of the list reads only the new events of each run. | `workflow/ui.py:261` | `test_the_views_of_runs_that_a_page_asks_for_stay_when_more_than_64_move` |
 | The server can't read a run that moves | The list shows that run without its progress, and the other runs with theirs. | `workflow/ui.py:129` | `test_a_damaged_run_leaves_out_only_its_own_progress_from_the_run_list` |
-| An item of a `for_each` workflow node ends, or its attempt does | The server stops looking for the files of the attempts inside it, and goes on for the other items. | `workflow/ui.py:349` | `test_attempts_inside_workflow_items_end_with_their_item_or_their_attempt_and_not_a_sibling_s` |
+| An item of a `for_each` workflow node ends, or its attempt does | The server stops looking for the files of the attempts inside it, and goes on for the other items. | `workflow/ui.py:356` | `test_attempts_inside_workflow_items_end_with_their_item_or_their_attempt_and_not_a_sibling_s` |
 
 ### Metrics
 
