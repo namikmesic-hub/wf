@@ -638,7 +638,8 @@ async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str
     if root.script is not None:
         yield
         return
-    caps = [(harness, config.get().value(f"capacity.{harness}")), (None, root.max_agents)]
+    harness_key = f"capacity.{harness}"
+    caps = [(harness, config.get().value(harness_key) if harness_key in config.KEYS else None), (None, root.max_agents)]
     where = _path(ctx, job)
     holder = {"pid": os.getpid(), "run": root.run.id, "node": where, "attempt": number}
     slots = []

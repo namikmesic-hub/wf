@@ -20,7 +20,7 @@ Then the runner, built on LangGraph:
     limits.py      the run's limits: reaching one pauses it, `wf retry --limit` continues it
     overrides.py   another model for a node or an item, for the rest of a run: `wf retry --model`
     config/        wf's own settings for the user, in ~/.wf/config.toml: the keys, the precedence, the checks
-    capacity.py    the cap on live agent sessions across all runs that share a ~/.wf (max_agents)
+    capacity.py    global and harness caps on live agent sessions across all runs that share a ~/.wf
     runs.py        the run folder on disk
     trace.py       the run's trace: each render with what it read, each route
                    decision, attempt, turn and tool call, and no secrets

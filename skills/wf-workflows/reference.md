@@ -246,14 +246,20 @@ limit.
 Codex reports no dollar cost, so `cost_usd` counts Claude Code only: cap Codex with `tokens`.
 Cursor reports neither, so only `duration` caps it (validate warns about both).
 
-One cap also holds on the agent sessions live at once, across all runs that use
-the same `~/.wf` (spec: "Agent slots"):
+An optional global cap and optional harness caps limit live agent sessions across runs that use the same `~/.wf`.
+No cap applies by default (spec: "Agent slots").
+The `[capacity]` keys `claude-code`, `codex` and `cursor` each take a positive integer.
+The variables `WF_MAX_AGENTS_CLAUDE_CODE`, `WF_MAX_AGENTS_CODEX` and `WF_MAX_AGENTS_CURSOR` override the matching file keys.
+An attempt takes its harness slot before its global slot, when both caps are set.
+An attempt holds both slots until it ends.
 
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
-| `max_agents = N` in `~/.wf/config.toml`, or `WF_MAX_AGENTS=N`, which wins | At most N agent attempts hold a slot at once. | `workflow/capacity.py:51` | `test_two_runs_in_separate_processes_share_the_cap` |
+| `max_agents = N` in `~/.wf/config.toml`, or `WF_MAX_AGENTS=N`, which wins | At most N agent attempts hold a slot at once. | `workflow/capacity.py:57` | `test_two_runs_in_separate_processes_share_the_cap` |
+| A `[capacity]` key is set | It caps live sessions of that harness. Other harnesses use their own caps. | `workflow/nodes.py:651` | `test_a_harness_cap_queues_only_that_harness` |
+| Both caps are set | An attempt takes both slots before its session opens, and releases both when it ends. | `workflow/nodes.py:651`, `workflow/nodes.py:672` | `test_both_caps_apply_before_a_session_opens` |
 | An attempt finds every slot taken | It waits. It keeps its retries, and its `timeout` starts once it has a slot. | `workflow/nodes.py:318` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
-| A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:651` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
+| A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:659` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
 
 ## Sessions
 

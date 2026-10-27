@@ -54,8 +54,13 @@ To give the captain a live view, offer `wf watch <run-id>` for a terminal pane, 
 `wf watch` follows the run through questions and retries until it succeeds.
 `wf ui` prints the page's address with a key in it: give the captain that whole address.
 A `running` run whose `agents_waiting` is not empty waits for a free agent slot.
-The cap on agent sessions across all runs that use the same `~/.wf` comes from
-`max_agents` in `~/.wf/config.toml` or from `WF_MAX_AGENTS`.
+Runs that use the same `~/.wf` share the global cap and the harness caps.
+The global cap comes from `max_agents` in `~/.wf/config.toml` or from `WF_MAX_AGENTS`.
+The `[capacity]` keys `claude-code`, `codex` and `cursor` set the harness caps.
+The variables `WF_MAX_AGENTS_CLAUDE_CODE`, `WF_MAX_AGENTS_CODEX` and `WF_MAX_AGENTS_CURSOR` override those keys.
+Each cap is optional, and no cap applies by default.
+Each `agents_waiting` entry names the `harness` and the `capacity` that the attempt waits for.
+The `capacity` value is the harness name or `global`.
 That is not a stall.
 The attempt starts, with its timeout and retries intact, once a slot comes free
 and it is the first to take it.
