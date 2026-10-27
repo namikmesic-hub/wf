@@ -463,7 +463,7 @@ async def _stream(ctx: RunContext, command) -> StateSnapshot:
         ctx.resume(before.values or {})  # the clock, the usage and a follow-up's start, for the jobs that run again
         ctx.trace.know(lambda: graph.variables(before.values, ctx))  # a job that reruns first may show them
         try:
-            async with steer.answering(ctx.run, ctx.steering):
+            async with ctx.trace.trace.watching(), steer.answering(ctx.run, ctx.steering):
                 async for event in compiled.astream(command, config, context=ctx, stream_mode="custom", durability="sync"):
                     ctx.run.add_event(event)
                     if (line := describe(event)) is not None:
