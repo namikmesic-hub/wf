@@ -70,6 +70,19 @@ Without `follow_up`, the first agent node with `edit` or `full` access takes the
 Then wf adds the request to the instruction of that node.
 Its routes count from zero again, and `--limit` gives it a budget of its own.
 
+`wf run` and `wf continue` also accept `--harness NODE=HARNESS`, `--model NODE=MODEL`, and `--effort NODE=EFFORT`.
+Each flag can repeat, and `NODE[INDEX]` names one item of a `for_each` node.
+Only named nodes or items change, and all other nodes keep the workflow file's values.
+Run overrides apply to every pass, and continue overrides apply from that follow-up onward.
+wf checks each override before the run or follow-up starts and records it in `events.jsonl`.
+`wf run` needs `--harness` for an override when the node's harness template reads earlier node output.
+An item on `wf run` must have a list that wf can compute from the start input.
+
+```sh
+wf run wf-examples/implement.yaml task="Add a --version flag" --model implement=claude-sonnet-5-5
+wf continue <run-id> "Add tests" --harness implement=codex --model implement=gpt-6 --effort implement=high
+```
+
 Steps that read Slack, Granola, Linear, Notion or Gmail list them in `tools`.
 Sign in to each once per machine:
 

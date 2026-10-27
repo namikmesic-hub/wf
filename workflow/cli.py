@@ -131,8 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--dry-run", type=Path, metavar="SCRIPT", help="run with scripted agent results, answers and command results instead of real agents")
     run.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
     run.add_argument("--runs-dir", **runs_dir)
+    _override_arguments(run)
     run.set_defaults(handler=lambda a: runner.start(a.file, a.inputs, a.input_file, a.no_input, a.detach, a.json,
-                                                    a.dry_run, a.limits, a.runs_dir))
+                                                    a.dry_run, a.limits, a.runs_dir, _override_pairs(a)))
 
     retry = commands.add_parser("retry", help="continue a failed or paused run from its last checkpoint")
     retry.add_argument("run_id", metavar="run-id")
@@ -141,17 +142,11 @@ def main(argv: list[str] | None = None) -> int:
     retry.add_argument("--detach", action="store_true", help="continue in the background")
     retry.add_argument("--json", action="store_true", help="with --detach: print the run id as JSON")
     retry.add_argument("--limit", action="append", dest="limits", metavar="NAME=VALUE", **limit_help)
-    retry.add_argument("--model", action="append", dest="models", metavar="NODE=MODEL",
-                       help="another model for an agent node, or for one item with NODE[INDEX]=MODEL, for the rest "
-                            "of the run (repeat for several)")
-    retry.add_argument("--harness", action="append", dest="harnesses", metavar="NODE=HARNESS",
-                       help="the harness for that node or item: needed when the node names a list or a template")
-    retry.add_argument("--effort", action="append", dest="efforts", metavar="NODE=EFFORT",
-                       help="the effort for that node or item (not for cursor, whose model id carries it)")
+    _override_arguments(retry)
     retry.add_argument("--runs-dir", **runs_dir)
     retry.set_defaults(handler=lambda a: runner.retry(
         a.run_id, a.no_input, a.answers, a.detach, a.json, a.limits, a.runs_dir,
-        {"model": a.models or [], "harness": a.harnesses or [], "effort": a.efforts or []}))
+        _override_pairs(a)))
 
     answer = commands.add_parser("answer", help="answer the questions a run waits on, and continue it")
     answer.add_argument("run_id", metavar="run-id")
@@ -754,6 +749,20 @@ def _graph(args) -> int:
     return 0
 
 
+def _override_arguments(parser) -> None:
+    parser.add_argument("--model", action="append", dest="models", metavar="NODE=MODEL",
+                        help="another model for an agent node, or for one item with NODE[INDEX]=MODEL, for the rest "
+                             "of the run (repeat for several)")
+    parser.add_argument("--harness", action="append", dest="harnesses", metavar="NODE=HARNESS",
+                        help="the harness for that node or item: needed when the node names a list or a template")
+    parser.add_argument("--effort", action="append", dest="efforts", metavar="NODE=EFFORT",
+                        help="the effort for that node or item (not for cursor, whose model id carries it)")
+
+
+def _override_pairs(args) -> dict[str, list[str]]:
+    return {"harness": args.harnesses or [], "model": args.models or [], "effort": args.efforts or []}
+
+
 # ---------- wf continue ----------
 
 
@@ -775,6 +784,7 @@ def _continue_command(commands, no_input: dict, runs_dir: dict) -> None:
                            help="a limit for this follow-up instead of the file's, counted from its start: cost_usd=20, "
                                 "tokens=5000000, duration=2h, or NAME=none for no limit (repeat for several)")
     following.add_argument("--runs-dir", **runs_dir)
+    _override_arguments(following)
     following.set_defaults(handler=_continue)
 
 
@@ -784,7 +794,8 @@ def _continue(args) -> int:
     except ValueError as error:
         print(f"wf continue: {error}", file=sys.stderr)
         return 1
-    return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir)
+    return runner.follow_up(args.run_id, request, args.no_input, args.detach, args.json, args.limits, args.runs_dir,
+                            _override_pairs(args))
 
 
 # ---------- wf metrics ----------

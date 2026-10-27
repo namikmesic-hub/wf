@@ -77,13 +77,15 @@ class Tally:
 
     def add(self, event: dict) -> None:
         kind, raw = event.get("event"), event.get("node")
+        if kind == "override":
+            return
         if kind == "follow_up" and self.last:  # the time the run waited for it doesn't count
             self.follow_ups += 1
             self.waited += _seconds(self.last, event["time"])
         if "time" in event:
             self.first, self.last = self.first or event["time"], event["time"]
         name = _name(raw) if isinstance(raw, str) else ""
-        if not name or kind == "override":  # run-level events (limit, warnings), and what an operator gave `wf retry`
+        if not name:  # Run events have no node.
             return
         node, index, when = self.nodes[name], event.get("index"), event.get("time")
         if kind == "node_started":  # a new pass: not the one that `wf retry` reruns
