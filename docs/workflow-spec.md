@@ -471,6 +471,7 @@ A new consumer reads only notices from the current follow-up, after its `follow_
 Before the first follow-up, a new consumer reads notices from the start of the run.
 The consumer records an event byte offset, the follow-up number, the status sequence number, and the last reported status.
 If the driver stops during an attention stall, the consumer reports `stopped` once, even when the sequence number stays the same.
+For an older cursor without a saved status, wf uses the sequence number to prevent a second notice.
 
 ```sh
 wf stall <run-id> <node> end

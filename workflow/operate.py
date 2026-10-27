@@ -117,7 +117,7 @@ def wait(run: Run, timeout: float, consumer: str | None = None) -> dict | None:
                 cursor.seq, cursor.status = current.get("seq", 0), current["status"]
             _save_cursor(cursor_file, cursor)
             return {**current, "status": "stall_detected", "current_status": current["status"], "stall": notice}
-        stopped = current["status"] == "stopped" and cursor.status != "stopped"
+        stopped = current["status"] == "stopped" and cursor.status == "stall_detected"
         if current["status"] in ATTENTION and (current.get("seq", 0) > cursor.seq or stopped):
             cursor.seq, cursor.status = current.get("seq", 0), current["status"]
             _save_cursor(cursor_file, cursor)

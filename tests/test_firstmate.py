@@ -165,6 +165,27 @@ def test_poll_reports_a_driver_stop_after_an_attention_stall(repo, monkeypatch, 
     assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
 
 
+def test_poll_keeps_a_reported_stop_from_an_old_cursor(repo, monkeypatch, capsys):
+    folder = waiting_run(capsys)
+    run = runs.Run.at(folder)
+    monkeypatch.setattr(firstmate, "POLL_SECONDS", 0)
+    monkeypatch.setattr(operate, "GRACE_SECONDS", 0)
+    monkeypatch.setattr(runs.Run, "driven", lambda self: False)
+    run.set_status("running")
+    before = run.status()["seq"]
+    cursor = folder / "consumers" / "firstmate-stopped.json"
+    cursor.parent.mkdir(exist_ok=True)
+    cursor.write_text(json.dumps({"seq": before}))
+    request = invoke("source.poll", source_id="stopped", config_ref=f"wf-run:{folder}")
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+    run.set_status("running")
+    reply = call(monkeypatch, capsys, "invoke", request)
+    stopped = json.loads(reply["result"]["output"])
+    assert stopped["status"] == "stopped" and stopped["seq"] > before
+    assert call(monkeypatch, capsys, "invoke", request)["result"]["status"] == "no-result"
+
+
 def test_bounded_output_keeps_the_stall_notice():
     state = {"run": "r", "status": "stall_detected", "current_status": "waiting", "dir": "/run",
              "stall": {"node": "work", "attempt": 1, "action": "retry"},
