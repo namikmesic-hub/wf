@@ -139,7 +139,7 @@ from . import git_tool, mcp_http
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
 TESTED = "2026.10.18-ea085cb"
-FLAGS = ["--sandbox", "disabled", "--disable-project-configs"]
+FLAGS = ["--sandbox", "disabled", "--disable-project-configs", "--disable-indexing"]
 SERVER = "wf"  # the MCP server name the agent sees
 CONFIG = {
     "version": 1,

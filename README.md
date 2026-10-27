@@ -27,7 +27,8 @@ Cursor's model catalog is the account's model list.
 wf shares this list for 15 minutes per API key, across sessions and runs on the machine.
 `wf runtimes cursor doctor --model <id>` fetches the current catalog for its model check.
 `wf validate` checks workflow settings locally.
-Cursor catalog and session-open rate limits use bounded retries.
+Cursor catalog and session-open rate limits return at once, with no retry inside the host.
+The node's retry waits 60 to 75 seconds.
 Codex skips the model list when the workflow pins its model and effort.
 cursor-agent skips the model list when the workflow pins its model.
 Cursor's `edit` steps run through `cursor-agent`, logged in.

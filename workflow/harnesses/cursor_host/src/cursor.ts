@@ -28,7 +28,7 @@ import {
 } from "./protocol.ts";
 import { effective, resolveModel, type Resolved } from "./models.ts";
 import { cachedCatalog } from "./catalog.ts";
-import { RequestBudget } from "./budget.ts";
+import { rateLimitRetryAfter, RequestBudget } from "./budget.ts";
 
 type Sdk = typeof import("@cursor/sdk");
 
@@ -80,15 +80,16 @@ async function catalog(sdk: Sdk, apiKey: string, budget = new RequestBudget()): 
 }
 
 export async function retryRateLimit<T>(action: () => Promise<T>, wait = sleep, budget = new RequestBudget()): Promise<T> {
-  const delays = [5_000, 10_000, 20_000];
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await budget.run(action);
     } catch (error) {
-      if (classify(error).code !== "cursor.rate_limit" || attempt === delays.length) throw error;
-      budget.retrying();
-      log(`Cursor rate limit. Try again in ${delays[attempt] / 1000} seconds.`);
-      await budget.wait(delays[attempt], wait);
+      const info = classify(error);
+      if (info.code !== "cursor.rate_limit" || attempt === 3) throw error;
+      const retryAfter = rateLimitRetryAfter();
+      budget.retrying(retryAfter);
+      log(`Cursor rate limit. Try again in ${retryAfter} seconds.`);
+      await budget.wait(retryAfter * 1000, wait, new HostError({ ...info, retry_after_s: retryAfter }));
     }
   }
 }
@@ -512,14 +513,14 @@ export function classify(error: unknown): ErrorInfo {
   const retryable = e.isRetryable === true;
   if (/rate[ _-]?limit|too many requests|requests per minute/i.test(message)
       || (e.status === 429 && !/usage|quota|payment|plan/i.test(message))) {
-    return { class: "transient", code: "cursor.rate_limit", message, retryable: true, retry_after_s: RETRY_AFTER_S };
+    return { class: "transient", code: "cursor.rate_limit", message, retryable: true, retry_after_s: rateLimitRetryAfter() };
   }
   switch (name) {
     case "AuthenticationError":
       return { class: "auth", code: "cursor.auth", message: `Cursor refused the API key: ${message}`, retryable: false };
     case "RateLimitError":
       return retryable
-        ? { class: "transient", code: "cursor.rate_limit", message, retryable, retry_after_s: RETRY_AFTER_S }
+        ? { class: "transient", code: "cursor.rate_limit", message, retryable, retry_after_s: rateLimitRetryAfter() }
         : { class: "usage_limit", code: "cursor.usage_limit", message, retryable: false };
     case "ConfigurationError":
     case "IntegrationNotConnectedError":
