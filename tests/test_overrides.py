@@ -948,3 +948,112 @@ def test_continue_restores_overrides_when_it_cannot_store_the_request(repo, no_r
     after = record()
     assert json.loads(after.pop("status.json"))["status"] == json.loads(before.pop("status.json"))["status"]
     assert after == before
+
+
+@pytest.mark.parametrize("setting, value, flag, replacement, expected", [
+    ("effort", "low", "--model", "sonnet", [("claude-code", "sonnet", "low"), ("claude-code", "opus", "low")]),
+    ("model", "sonnet", "--effort", "low", [("claude-code", "sonnet", "low"), ("claude-code", "sonnet", "high")]),
+])
+def test_run_item_overrides_keep_settings_that_need_prior_output(repo, no_real_harness, setting, value,
+                                                                flag, replacement, expected):
+    write("prior.yaml", """
+        version: 1
+        name: prior
+        defaults: {harness: claude-code, harnesses: {claude-code: {model: opus, effort: high}}}
+        start: {input: {}}
+        nodes:
+          prepare:
+            needs: [start]
+            instruction: Prepare the setting
+            output: {value: {type: string}}
+          review:
+            needs: [prepare]
+            for_each: "[1, 2]"
+            instruction: Review the item
+        end: {output: {}}
+    """)
+    flow = yaml.safe_load(Path("prior.yaml").read_text())
+    flow["nodes"]["review"][setting] = "{{ prepare.value }}"
+    Path("prior.yaml").write_text(yaml.safe_dump(flow))
+    steps = {"agents": {"prepare": [{"value": value}], "review[0]": [{"summary": "a"}], "review[1]": [{"summary": "b"}]}}
+    assert cli.main(["run", "prior.yaml", "--dry-run", script(steps), flag, f"review[0]={replacement}"]) == 0
+    items = only_run() / "nodes" / "review" / "1"
+    assert [given(items / str(i) / "attempt-1.log") for i in range(2)] == expected
+
+
+def test_run_refuses_an_item_whose_list_needs_prior_output_without_changes(repo, no_real_harness, monkeypatch, capsys):
+    write("prior.yaml", """
+        version: 1
+        name: prior
+        defaults: {harness: claude-code}
+        start: {input: {}}
+        nodes:
+          prepare:
+            needs: [start]
+            instruction: Prepare the items
+            output: {items: {type: array}}
+          review:
+            needs: [prepare]
+            for_each: prepare.items
+            instruction: Review the item
+        end: {output: {}}
+    """)
+    dry = script({"agents": {"prepare": [{"items": [1, 2]}], "review[0]": [{"summary": "done"}]}})
+    before = {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()}
+    monkeypatch.setattr(runs, "create", lambda *args, **kwargs: pytest.fail("A refused override created a run."))
+    assert cli.main(["run", "prior.yaml", "--dry-run", dry, "--model", "review[0]=sonnet"]) == 1
+    assert "hasn't started yet, so it has no items" in capsys.readouterr().err
+    assert {str(path): path.read_bytes() for path in repo.rglob("*") if path.is_file()} == before
+
+
+def test_continue_overrides_keep_idle_time_out_of_report_and_ui(repo, no_real_harness, monkeypatch, capsys):
+    from workflow import ui
+
+    monkeypatch.setattr(runs, "now", lambda: "2026-10-27T09:00:00+00:00")
+    write("one.yaml", ONE.replace("nodes:\n", "follow_up: {to: plan}\nnodes:\n"))
+    assert cli.main(["run", "one.yaml", "--dry-run", script({"agents": {"plan": [{"summary": "done"}] * 2}})]) == 0
+    run = runs.find(repo, only_run().name)
+    view = ui._View(run)
+    view.refresh()
+    assert view.metrics("succeeded")["run"]["duration_s"] == 0
+    monkeypatch.setattr(runs, "now", lambda: "2026-10-27T10:00:00+00:00")
+    assert cli.main(["continue", run.id, "Do it again", "--model", "plan=sonnet"]) == 0
+    capsys.readouterr()
+    assert cli.main(["report", run.id, "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)["runs"][0]
+    assert summary["duration_s"] == 0 and summary["follow_ups"] == 1
+    view.refresh()
+    summary = view.metrics("succeeded")["run"]
+    assert summary["duration_s"] == 0 and summary["follow_ups"] == 1
+
+
+def test_continue_restores_settings_and_worktrees_when_all_new_writes_fail(repo, no_real_harness, monkeypatch, capsys):
+    write("one.yaml", ONE.replace("nodes:\n", "follow_up: {to: plan}\nnodes:\n"))
+    assert cli.main(["run", "one.yaml", "--dry-run", script({"agents": {"plan": [{"summary": "done"}]}})]) == 0
+    before = record()
+    run_id = only_run().name
+    write_json = runs.write_json
+    full = False
+    restored = workspaces.root() / run_id
+
+    def restore(*args, **kwargs):
+        restored.mkdir(parents=True)
+
+    def write_when_space_exists(path, value):
+        if full:
+            raise OSError(28, "No space left on device")
+        return write_json(path, value)
+
+    async def fail(ctx, given):
+        nonlocal full
+        assert restored.exists()
+        full = True
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(runner, "_restore_worktrees", restore)
+    monkeypatch.setattr(runs, "write_json", write_when_space_exists)
+    monkeypatch.setattr(runner, "_give", fail)
+    assert cli.main(["continue", run_id, "Do it again", "--model", "plan=sonnet"]) == 1
+    assert "No space left on device" in capsys.readouterr().err
+    assert record() == before
+    assert not restored.exists()

@@ -46,6 +46,7 @@ import os
 import shutil
 import signal
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -749,24 +750,17 @@ def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: s
         print(f"{name}: can't bring back the run's workspaces, so the run stays as it was: {error}", file=sys.stderr)
         return 1
     number, before = _number(state.values) + 1, run.status()
-    info = run.info()
-    event_size = (run.dir / "events.jsonl").stat().st_size if checked.found else 0
-    kept, given = False, False
     try:
-        with _holding_signals():  # status.json says the follow-up runs before the checkpoints hold it
+        with _holding_signals(), _follow_up_settings(run, bool(checked.found)):
             _keep(run, state.values, checked.found, {})
-            kept = bool(checked.found)
             run.set_status("running", follow_up=number)
             try:
                 asyncio.run(_give(ctx, {"request": request, "number": number, "limits": new_limits, "pending": True}))
-                given = True
             except BaseException:
-                run.set_status(before.get("status", "unknown"), **_details(before), follow_up=before.get("follow_up"))
+                if not checked.found:
+                    run.set_status(before.get("status", "unknown"), **_details(before), follow_up=before.get("follow_up"))
                 raise
     except BaseException as error:  # OSError, or the checkpoint store failing: the run stays as it was
-        if kept and not given:
-            runs.write_json(run.dir / "run.json", info)
-            run.take_back_events(event_size)
         workspaces.remove_run(home["path"], run.id)
         if not isinstance(error, Exception):
             raise
@@ -782,6 +776,34 @@ def _checked_follow_up(run: runs.Run, workflows: list[spec.Workflow], request: s
              f"Run {run.id} takes follow-up {number} in the background. Follow it with: {run.command('wait')}", as_json)
         return 0
     return _retry(ctx, asyncio.run(_snapshot(ctx)), interactive() and not no_input, None)
+
+
+@contextlib.contextmanager
+def _follow_up_settings(run: runs.Run, enabled: bool) -> Iterator[None]:
+    """Save settings and status before overrides change them, and restore failed writes without new data blocks."""
+    if not enabled:
+        yield
+        return
+    with tempfile.TemporaryDirectory(prefix=".follow-up-", dir=run.dir) as folder:
+        saved = Path(folder)
+        for name in ("run.json", "status.json"):
+            os.link(run.dir / name, saved / name)
+        events = run.dir / "events.jsonl"
+        size = events.stat().st_size if events.exists() else None
+        try:
+            yield
+        except BaseException:
+            try:
+                (saved / "run.json").replace(run.dir / "run.json")
+            finally:
+                try:
+                    (saved / "status.json").replace(run.dir / "status.json")
+                finally:
+                    if size is None:
+                        events.unlink(missing_ok=True)
+                    else:
+                        run.take_back_events(size)
+            raise
 
 
 def _not_continuable(run: runs.Run, workflow: spec.Workflow, state: StateSnapshot) -> str | None:

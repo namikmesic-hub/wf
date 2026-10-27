@@ -747,10 +747,13 @@ def _graph(args) -> int:
 
 
 def _override_arguments(parser) -> None:
-    for setting, dest in (("harness", "harnesses"), ("model", "models"), ("effort", "efforts")):
-        parser.add_argument(f"--{setting}", action="append", dest=dest, metavar=f"NODE={setting.upper()}",
-                            help=f"the {setting} for an agent node or item with NODE[INDEX], for the rest of the run "
-                                 "(repeat for several)")
+    parser.add_argument("--model", action="append", dest="models", metavar="NODE=MODEL",
+                        help="another model for an agent node, or for one item with NODE[INDEX]=MODEL, for the rest "
+                             "of the run (repeat for several)")
+    parser.add_argument("--harness", action="append", dest="harnesses", metavar="NODE=HARNESS",
+                        help="the harness for that node or item: needed when the node names a list or a template")
+    parser.add_argument("--effort", action="append", dest="efforts", metavar="NODE=EFFORT",
+                        help="the effort for that node or item (not for cursor, whose model id carries it)")
 
 
 def _override_pairs(args) -> dict[str, list[str]]:

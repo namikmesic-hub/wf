@@ -56,6 +56,12 @@ When a model fails again and again, `--model` gives that step, or one item of it
 wf retry <run-id> --harness 'review[2]=claude-code' --model 'review[2]=claude-opus-5-5'
 ```
 
+`wf continue <run-id> "<request>"` gives a run that succeeded a follow-up request.
+The run goes on from the node that its workflow's `follow_up` names, on the same branches and agent sessions.
+Without `follow_up`, the first agent node with `edit` or `full` access takes the request.
+Then wf adds the request to the instruction of that node.
+Its routes count from zero again, and `--limit` gives it a budget of its own.
+
 `wf run` and `wf continue` also accept `--harness NODE=HARNESS`, `--model NODE=MODEL`, and `--effort NODE=EFFORT`.
 Each flag can repeat, and `NODE[INDEX]` names one item of a `for_each` node.
 Only named nodes or items change, and all other nodes keep the workflow file's values.
@@ -67,12 +73,6 @@ An item on `wf run` must have a list that wf can compute from the start input.
 wf run wf-examples/implement.yaml task="Add a --version flag" --model implement=claude-sonnet-5-5
 wf continue <run-id> "Add tests" --harness implement=codex --model implement=gpt-6 --effort implement=high
 ```
-
-`wf continue <run-id> "<request>"` gives a run that succeeded a follow-up request.
-The run goes on from the node that its workflow's `follow_up` names, on the same branches and agent sessions.
-Without `follow_up`, the first agent node with `edit` or `full` access takes the request.
-Then wf adds the request to the instruction of that node.
-Its routes count from zero again, and `--limit` gives it a budget of its own.
 
 Steps that read Slack, Granola, Linear, Notion or Gmail list them in `tools`.
 Sign in to each once per machine:

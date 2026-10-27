@@ -200,10 +200,11 @@ def check_start(given: dict[str, dict[str, str]], workflows: list[Workflow], inp
             continue
         if isinstance(items, (list, tuple)):
             progress.s["active"][node_id] = {"items": list(items), "vars": variables, "outputs": {}}
-    return check(given, workflows, progress.s)
+    return check(given, workflows, progress.s, before_start=True)
 
 
-def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: dict) -> Checked:
+def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: dict,
+          *, before_start: bool = False) -> Checked:
     """The overrides, each with its harness filled in, what is wrong with them, and the models to check.
     Here workflows holds the run's copies, its own workflow first, and values holds its state (state.RunState)."""
     workflow, checked = workflows[0], Checked()
@@ -217,7 +218,7 @@ def check(given: dict[str, dict[str, str]], workflows: list[Workflow], values: d
         override = {"harness": harness, "model": settings.get("model"), "effort": settings.get("effort")}
         models = None
         if problem is None:
-            models, problem = _models(key, node_id, override, workflow, jobs)
+            models, problem = _models(key, node_id, override, workflow, {} if before_start else jobs)
         if problem is not None:
             checked.problems.append(problem)
             continue
