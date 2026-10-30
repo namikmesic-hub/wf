@@ -15,7 +15,7 @@ from textwrap import dedent
 
 import pytest
 
-from workflow import cli, operate, runner
+from workflow import cli, operate, runner, runs
 
 
 @pytest.fixture
@@ -286,3 +286,46 @@ def test_a_damaged_output_file_does_not_break_list(repo, capsys):
     capsys.readouterr()
     assert cli.main(["list", "--json"]) == 0
     assert json_out(capsys)[0]["status"] == "succeeded"
+
+
+def test_a_consumer_keeps_its_event_offset_and_waits_for_a_complete_notice(repo):
+    write("ask.yaml", ASK)
+    run = runs.create(repo, "ask", [Path("ask.yaml")], Path("ask.yaml"), {})
+    run.set_status("running")
+    cursor = run.dir / "consumers" / "fm.json"
+    cursor.parent.mkdir()
+    cursor.write_text(json.dumps({"seq": run.status()["seq"]}))
+    run.add_event({"event": "progress", "node": "é"})
+    events = run.dir / "events.jsonl"
+    offset = events.stat().st_size
+    notice = json.dumps({"event": "stall_detected", "node": "é", "attempt": 1}, ensure_ascii=False).encode()
+    with events.open("ab") as file:
+        file.write(notice)
+    assert operate.wait(run, 0, consumer="fm") is None
+    assert json.loads(cursor.read_text())["event_offset"] == offset
+    with events.open("ab") as file:
+        file.write(b"\n")
+    result = operate.wait(run, 0, consumer="fm")
+    assert result["status"] == "stall_detected" and result["stall"]["node"] == "é"
+    assert json.loads(cursor.read_text())["event_offset"] == events.stat().st_size
+    assert operate.wait(run, 0, consumer="fm") is None
+    assert operate.wait(run, 0) is None
+
+
+@pytest.mark.parametrize("prior_cursor", [False, True])
+def test_a_consumer_skips_old_stalls_before_the_follow_up_event_arrives(repo, monkeypatch, prior_cursor):
+    write("ask.yaml", ASK)
+    run = runs.create(repo, "ask", [Path("ask.yaml")], Path("ask.yaml"), {})
+    monkeypatch.setattr(runs.Run, "driven", lambda self: True)
+    run.add_event({"event": "stall_detected", "node": "old", "pass": 1, "attempt": 1})
+    if prior_cursor:
+        cursor = run.dir / "consumers" / "fm.json"
+        cursor.parent.mkdir()
+        cursor.write_text(json.dumps({"seq": run.status()["seq"], "event_offset": 0}))
+    run.set_status("running", follow_up=1)
+    assert operate.wait(run, 0, consumer="fm") is None
+    run.add_event({"event": "follow_up", "number": 1, "to": ["work"]})
+    run.add_event({"event": "stall_detected", "node": "work", "pass": 2, "attempt": 1})
+    result = operate.wait(run, 0, consumer="fm")
+    assert (result["status"], result["follow_up"], result["stall"]["node"]) == ("stall_detected", 1, "work")
+    assert operate.wait(run, 0, consumer="fm") is None

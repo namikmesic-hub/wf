@@ -155,3 +155,19 @@ def test_examples_are_copied_out_and_valid(tmp_path, monkeypatch, capsys):
     assert cli.main(["validate", "wf-examples/feature.yaml"]) == 0
     assert cli.main(["examples"]) == 0  # again: nothing is overwritten
     assert "already exists" in capsys.readouterr().out
+
+
+def test_a_stall_status_names_the_live_node_and_the_agent_slot_wait():
+    current = {"status": "stall_detected", "run": "run-id", "workflow": "flow",
+               "stalls": [{"node": "sub/work", "index": 2}], "agents_waiting": [{"node": "next"}]}
+    assert cli._describe(current) == "run-id [flow]: running, no progress: sub/work[2], waiting for an agent slot: next"
+
+
+def test_retry_help_keeps_its_flag_order_and_harness_constraints(capsys):
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["retry", "--help"])
+    assert stopped.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert help_text.index("--model") < help_text.index("--harness") < help_text.index("--effort")
+    assert "needed when the node names a list or a template" in help_text
+    assert "not for cursor, whose model id carries it" in help_text

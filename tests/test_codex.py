@@ -17,7 +17,7 @@ import pytest
 
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, harnesses, runner
-from workflow.harnesses.codex import Codex, _tokens
+from workflow.harnesses.codex import APP_SERVER, Codex, _tokens, program
 from workflow.output_tool import FINISH, REMINDER
 
 FAKE = Path(__file__).parent / "fake_codex.py"
@@ -86,7 +86,7 @@ def test_paths_codex_names_the_codex_that_wf_runs(repo, monkeypatch, wf_home, ca
     monkeypatch.setitem(harnesses.FACTORIES, "codex", lambda: Codex(request_timeout=5))
     assert run() == 0
     assert output() == {"out": "hi"}
-    assert said.read_text() == "app-server --disable hooks --disable apps\n"
+    assert said.read_text() == "app-server --disable hooks --disable apps --disable plugins\n"
     assert "codex 0.1.0 is installed; wf is tested with" in capsys.readouterr().out  # the version of that codex
 
 
@@ -254,6 +254,9 @@ def test_a_usage_limit_makes_codex_unavailable(repo, monkeypatch, capsys):
 def test_a_retried_rate_limit_is_ignored(repo, monkeypatch):
     codex(monkeypatch, repo, [{"error": {"codexErrorInfo": "rateLimitExceeded", "message": "slow down", "willRetry": True}}, GOOD])
     assert run() == 0
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    events = [json.loads(line) for line in (folder / "events.jsonl").read_text().splitlines()]
+    assert sum(event["event"] == "sdk_retry" for event in events) == 1
 
 
 def test_a_failed_turn_fails_the_attempt(repo, monkeypatch, capsys):
@@ -277,6 +280,15 @@ def test_progress_shows_commands_and_file_changes(repo, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "ask: command git status" in out
     assert "ask: edit a.py" in out
+
+
+@pytest.mark.harness
+def test_the_installed_codex_disables_plugins_and_has_removed_remote_models():
+    result = subprocess.run([program(), *APP_SERVER[1:], "--disable", "remote_models", "features", "list"],
+                            capture_output=True, text=True, check=True, timeout=10)
+    features = {parts[0]: parts[1:] for line in result.stdout.splitlines() if (parts := line.split())}
+    assert features["plugins"][-1] == "false"
+    assert features["remote_models"] == ["removed", "false"]
 
 
 @pytest.mark.harness
@@ -311,6 +323,22 @@ def test_without_settings_the_model_lists_defaults_are_used_not_your_codex_confi
     assert run() == 0
     (thread,) = sent(log, "thread/start")
     assert (thread["model"], thread["config"]["model_reasoning_effort"]) == ("gpt-b", "low")
+    assert sent(log, "model/list") == [{}]
+
+
+def test_a_pinned_model_and_effort_need_no_model_list(repo, monkeypatch):
+    log = codex(monkeypatch, repo, [GOOD], silent=["model/list"])
+    assert run("model: gpt-pinned\neffort: high\n") == 0
+    assert sent(log, "model/list") == []
+    (thread,) = sent(log, "thread/start")
+    assert (thread["model"], thread["config"]["model_reasoning_effort"]) == ("gpt-pinned", "high")
+
+
+@pytest.mark.parametrize("settings", ["model: gpt-a\n", "effort: high\n"])
+def test_a_missing_model_or_effort_needs_the_model_list(repo, monkeypatch, settings):
+    log = codex(monkeypatch, repo, [GOOD])
+    assert run(settings) == 0
+    assert sent(log, "model/list") == [{}]
 
 
 def test_a_model_with_no_known_effort_warns_that_your_codex_config_decides(repo, monkeypatch, capsys):

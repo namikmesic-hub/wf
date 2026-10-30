@@ -128,7 +128,8 @@ def test_a_session_runs_on_the_local_login_with_wfs_own_cursor_config(repo, monk
     assert run() == 0
     assert output() == {"out": "hi"}
     (start,) = entries(log, "start")
-    assert start["args"] == ["--model", "composer-2.5", "--sandbox", "disabled", "--disable-project-configs", "acp"]
+    assert start["args"] == ["--model", "composer-2.5", "--sandbox", "disabled", "--disable-project-configs",
+                             "--disable-indexing", "acp"]
     assert (start["api_key"], start["auth_token"], start["no_browser"]) == (False, False, "1")  # the local login, never a key
     assert Path(start["cwd"]).resolve() == Path.cwd().resolve()
     config = Path(start["config"])
@@ -345,21 +346,53 @@ def test_a_reminder_is_another_prompt_in_the_same_session(repo, monkeypatch):
     assert prompts[1]["prompt"][0]["text"] == REMINDER
 
 
-def test_a_model_cursor_does_not_list_is_unavailable_and_the_next_harness_runs(repo, monkeypatch, capsys):
-    from fakes import Fake, submit
+@pytest.mark.parametrize("model", ["composer-2.5", "composer-2.5[fast=true]"])
+def test_a_pinned_model_needs_no_model_list(repo, monkeypatch, model):
+    log = cursor(monkeypatch, repo, [GOOD])
+    assert run(f"model: {model}\n") == 0
+    assert entries(log, "list-models") == []
+    assert entries(log, "start")[0]["args"][:2] == ["--model", model]
+
+
+def test_an_explicit_model_check_refuses_an_unknown_model(repo, monkeypatch):
     log = cursor(monkeypatch, repo, models=["composer-2.5"])
-    claude = Fake("claude-code", submit({"summary": "from claude"}))
-    monkeypatch.setitem(harnesses.FACTORIES, "claude-code", claude.factory)
-    assert run("harness: [cursor, claude-code]\nmodel: {cursor: claude-fable-9-max, claude-code: opus}\n") == 0
-    assert output() == {"out": "from claude"}
-    assert "Cursor has no model `claude-fable-9-max`" in capsys.readouterr().out
-    assert entries(log, "start") == []  # no cursor-agent was started for it
+
+    async def check():
+        harness = harnesses.create("cursor")
+        await harness.open(repo / "run")
+        try:
+            with pytest.raises(harnesses.Unavailable, match="Cursor has no model `claude-fable-9-max`"):
+                await harness.check_model("claude-fable-9-max")
+        finally:
+            await harness.close()
+
+    asyncio.run(check())
+    assert len(entries(log, "list-models")) == 1
+    assert entries(log, "start") == []
 
 
-def test_a_cursor_agent_that_is_not_logged_in_is_unavailable(repo, monkeypatch, capsys):
+def test_a_cursor_agent_that_is_not_logged_in_is_unavailable(repo, monkeypatch):
     cursor(monkeypatch, repo, logged_out=True)
+
+    async def check():
+        harness = harnesses.create("cursor")
+        await harness.open(repo / "run")
+        try:
+            with pytest.raises(harnesses.Unavailable, match="list-models.*failed"):
+                await harness.check_model("composer-2.5")
+        finally:
+            await harness.close()
+
+    asyncio.run(check())
+
+
+def test_a_logged_out_session_keeps_the_login_hint_without_a_model_list(repo, monkeypatch, capsys):
+    log = cursor(monkeypatch, repo, logged_out=True)
     assert run() == 1
-    assert "cursor is unavailable: `cursor-agent --list-models` failed (is it logged in? `cursor-agent login`)" in capsys.readouterr().out
+    assert "Run `cursor-agent login`, then try again" in capsys.readouterr().out
+    assert entries(log, "list-models") == []
+    assert sent(log, "authenticate") == [{"methodId": "cursor_login"}]
+    assert entries(log, "start")[0]["no_browser"] == "1"
 
 
 @pytest.mark.parametrize("notice", [
@@ -687,3 +720,27 @@ def test_a_message_for_cursor_is_dropped_when_the_agent_submits_first(repo, monk
     queued, dropped = steer_events()
     assert (queued["status"], dropped["status"]) == ("queued", "dropped")
     assert dropped["reason"] == "the agent submitted its result before it read the message"
+
+
+def test_thought_chunks_form_one_block_and_keep_live_progress(tmp_path):
+    from workflow.harnesses.base import Recorder
+    from workflow.harnesses.cursor_acp import CursorSession
+
+    class Thinking(Recorder):
+        def __init__(self):
+            self.blocks = []
+
+        def thinking(self, text, duration_ms):
+            self.blocks.append((text, duration_ms))
+
+    events, trace = [], Thinking()
+    settings = SessionSpec(cwd=tmp_path, access="read-only", web=False, model=None, effort=None,
+                           tool=ResultTool({}), log=tmp_path / "attempt.log", emit=events.append, trace=trace)
+    session = CursorSession(CursorAcp(), settings)
+    session.turn = True
+    for _ in range(100):
+        session.update({"update": {"sessionUpdate": "agent_thought_chunk", "content": {"text": "x"}}})
+    assert trace.blocks == []
+    assert len(events) == 100 and all(event == {"event": "progress", "source": "thinking"} for event in events)
+    session.update({"update": {"sessionUpdate": "agent_message_chunk", "content": {"text": "Done"}}})
+    assert trace.blocks == [("x" * 100, None)]

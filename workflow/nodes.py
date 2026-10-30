@@ -59,12 +59,12 @@ an `agent_model` event. An override from `wf retry --model` (overrides.py)
 runs the job on the override's harness only, with the model and effort that it
 gives. Then the event also names the override.
 
-With a cap on live agent sessions (capacity.py), each agent attempt first takes
-one of the agent slots, and holds it until the attempt ends. An
-attempt that waits for one isn't failing: the wait uses no retry, the node's
-timeout starts once the attempt has its slot, and the wait shows in
-events.jsonl (slot_waiting, slot_taken) and in status.json (agents_waiting).
-A limit reached while it waits ends the wait, and the attempt doesn't start.
+Optional global and harness caps limit live agent sessions across runs (capacity.py).
+An attempt takes its harness slot before its global slot, when those caps are set.
+The attempt holds both slots until it ends.
+A wait uses no retry, and the node's timeout starts once the attempt has all required slots.
+The wait appears in events.jsonl (slot_waiting, slot_taken) and status.json (agents_waiting).
+A run limit ends the wait, and the attempt does not start.
 
 A node with `tools` doesn't run on a harness whose commands could reach the
 Keychain at its access level (harnesses.KEYCHAIN_SHELL) unless it sets
@@ -119,7 +119,7 @@ from typing import Any
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 
-from . import capacity, dryrun, output_tool, overrides, schemas, templates, workspaces
+from . import capacity, config, dryrun, output_tool, overrides, schemas, templates, watchdog, workspaces
 from .context import RunContext
 from .runs import Run, now, write_json
 from .harnesses import SessionSpec, StartFailed, Unavailable, Usage, reaches_keychain
@@ -306,12 +306,16 @@ async def _attempts(job: Job, ctx: RunContext, emit,
     label = _label(job)
     first, number, error = job["attempt"], job["attempt"], ""
     handed_over = False  # did the last harness give up because it was unavailable (already said)?
+    stall = getattr(ctx.workflow.nodes[node_id], "stall", None) if any(harnesses) else None
+    stall_used = 0
     for position, harness in enumerate(harnesses):
-        for tries in range(retry + 1):
+        first_on_harness = number
+        tries = 0
+        while tries <= retry:
             if number > first and (reason := ctx.limit_reached()):
                 raise _limit_stop(error, number, reason)
             on = {"harness": harness} if harness else {}
-            fallback = {"fallback": True} if position and not tries and not handed_over else {}
+            fallback = {"fallback": True} if position and number == first_on_harness and not handed_over else {}
             handed_over = False
             deadline, wait = None, 0
             try:
@@ -319,10 +323,15 @@ async def _attempts(job: Job, ctx: RunContext, emit,
                     if number > 1:
                         emit({"event": "attempt_started", **label, **on, **fallback, "attempt": number})
                     record = ctx.trace.attempt(job, number, harness, **fallback)
+                    if harness:
+                        record.facts["slot_wait_s"] = job.get("slot_wait_s", 0.0)
+                        record.progress = watchdog.Watchdog(record, stall,
+                            lambda event: emit({**event, **label, **on, "attempt": number}))
                     deadline = asyncio.timeout(seconds(timeout) if timeout else None)
                     try:
                         async with deadline:
-                            result = await attempt(number, harness, record, deadline)
+                            sending = attempt(number, harness, record, deadline)
+                            result = await record.progress.run(sending) if harness else await sending
                     except BaseException as failure:
                         record.end(*_ending(failure, deadline, timeout))
                         raise
@@ -341,6 +350,17 @@ async def _attempts(job: Job, ctx: RunContext, emit,
                 break
             except _AttemptFailed as failure:
                 error, wait = str(failure), failure.retry_after
+            except watchdog.Stalled as failure:
+                error = str(failure)
+                emit({"event": "attempt_failed", **label, **on, "attempt": number, "error": error,
+                      "error_class": "stalled"})
+                if failure.action == "end" or stall_used >= stall.retries:
+                    raise _Failed(error, number) from None
+                stall_used += 1
+                number += 1
+                if failure.action == "fallback":
+                    break
+                continue
             except dryrun.ScriptExhausted as failure:  # another attempt would find no entry either
                 emit({"event": "attempt_failed", **label, **on, "attempt": number, "error": str(failure)})
                 raise _Failed(str(failure), number) from None
@@ -348,6 +368,7 @@ async def _attempts(job: Job, ctx: RunContext, emit,
             number += 1
             if wait and tries < retry:  # only before a retry on this harness, not before a fallback
                 await _pause(ctx, wait)
+            tries += 1
     raise _Failed(error, number - 1)
 
 
@@ -368,7 +389,7 @@ def _ending(error: BaseException, deadline, timeout: str | None) -> tuple[str, s
         return "unavailable", str(error)
     if isinstance(error, _Failed) and error.stopped == "limit":
         return "limit", str(error)
-    if isinstance(error, (_AttemptFailed, _Failed, dryrun.ScriptExhausted)):
+    if isinstance(error, (_AttemptFailed, _Failed, dryrun.ScriptExhausted, watchdog.Stalled)):
         return "failed", str(error)
     return "failed", f"{type(error).__name__}: {error}"
 
@@ -488,7 +509,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             budget_usd=wf.harness_setting(node_id, name, "budget_usd"),
             tool=output_tool.ResultTool(schema, record.submitted),
             log=folder / f"attempt-{number}.log",
-            emit=lambda event: emit({**event, **_label(job), "attempt": number, "harness": name}),
+            emit=record.progress.event,
             node=node_id,
             where=_path(ctx, job),
             continuable=continuing,
@@ -498,7 +519,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             only_wf_tools=listed is not None,
             project_instructions=wf.setting(node_id, "project_instructions"),
             read_roots=list(readable),
-            trace=record,
+            trace=record.progress,
+            watchdog=record.progress,
         )
         with ctx.steering.opening(spec.where, number, name):
             try:
@@ -534,6 +556,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             turn = turn_so_far or Usage()
             so_far = Usage(spent.tokens + turn.tokens, spent.cost_usd + turn.cost_usd)  # no parts: the event has none
             if so_far != told:
+                if so_far.tokens > told.tokens:
+                    record.progress.progress("tokens")
                 told = so_far
                 spec.emit({"event": "agent_usage", "tokens": so_far.tokens, "cost_usd": round(so_far.cost_usd, 6)})
 
@@ -556,6 +580,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                     except Exception as error:  # the SDK or the agent process broke
                         raise _AttemptFailed(f"{name}: {type(error).__name__}: {error}") from error
                     live.sent(end)
+                    record.progress.progress("turn_end")
                     usage.add(end.usage)
                     spent.add(end.usage)
                     ctx.add_usage(end.usage)  # live, so limits apply before the next attempt
@@ -631,33 +656,48 @@ def _in_run(ctx: RunContext, path: Path) -> str:
 
 @asynccontextmanager
 async def _agent_slot(job: Job, ctx: RunContext, emit, number: int, harness: str) -> AsyncIterator[None]:
-    """Hold one of the agent slots (capacity.py) for attempt `number`, waiting for one if
-    they're all taken, until a limit is reached (_LimitWhileWaiting). No cap, or a dry run:
-    there's nothing to hold."""
+    """Hold the harness and global slots for an attempt until it ends.
+    A dry run takes no slots.
+    A wait ends when a slot is free or a run limit is reached."""
     root = ctx.root
-    if root.max_agents is None or root.script is not None:
+    job["slot_wait_s"] = 0.0
+    if root.script is not None:
         yield
         return
+    harness_key = f"capacity.{harness}"
+    caps = [(harness, config.get().value(harness_key) if harness_key in config.KEYS else None), (None, root.max_agents)]
     where = _path(ctx, job)
     holder = {"pid": os.getpid(), "run": root.run.id, "node": where, "attempt": number}
-    slot = capacity.take(root.max_agents, holder)
+    slots = []
     try:
-        if slot is None:
-            on = {**_label(job), "attempt": number, "harness": harness}
-            emit({"event": "slot_waiting", **on, "max_agents": root.max_agents})
-            began, key = time.monotonic(), f"{where}#{number}"
-            ctx.note_slot_wait(key, {"node": where, "attempt": number, "since": now()})
-            try:
-                slot = await capacity.wait(root.max_agents, holder, stop=lambda: ctx.limit_reached() is not None)
-            finally:
-                ctx.note_slot_wait(key, None)
-            reason = ctx.limit_reached()  # asked again: the slot may have come free just as a limit was reached
-            if slot is None or reason:
-                raise _LimitWhileWaiting(reason)
-            emit({"event": "slot_taken", **on, "waited_s": round(time.monotonic() - began, 1)})
+        for name, cap in caps:
+            if cap is None:
+                continue
+            scope = {"harness": name} if name is not None else {}
+            slot = capacity.take(cap, holder, **scope)
+            if slot is None:
+                on = {**_label(job), "attempt": number, "harness": harness, "capacity": name or "global"}
+                emit({"event": "slot_waiting", **on, "max_agents": cap})
+                began, key = time.monotonic(), f"{where}#{number}"
+                ctx.note_slot_wait(key, {"node": where, "attempt": number, "harness": harness,
+                                         "capacity": name or "global", "since": now()})
+                try:
+                    slot = await capacity.wait(cap, holder, stop=lambda: ctx.limit_reached() is not None, **scope)
+                finally:
+                    ctx.note_slot_wait(key, None)
+                if slot is not None:
+                    slots.append(slot)
+                reason = ctx.limit_reached()
+                if slot is None or reason:
+                    raise _LimitWhileWaiting(reason)
+                waited = round(time.monotonic() - began, 1)
+                job["slot_wait_s"] += waited
+                emit({"event": "slot_taken", **on, "waited_s": waited})
+            else:
+                slots.append(slot)
         yield
     finally:
-        if slot is not None:
+        for slot in reversed(slots):
             slot.release()
 
 

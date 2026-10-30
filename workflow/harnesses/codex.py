@@ -1,11 +1,12 @@
 """Codex: agent threads through `codex app-server`, JSON-RPC over stdio.
 
-One app server process serves every Codex session in a stream of the graph:
-`codex app-server --disable hooks --disable apps`, with the codex of paths.codex,
-else the one on PATH. Then `initialize` (with experimentalApi, which dynamic tools
-need) and the `initialized` notification. Messages are JSON objects, one per line,
-in both directions. Requests carry an id, notifications don't, and either side can
-send requests.
+One app server process serves every Codex session in a stream of the graph.
+The command is `codex app-server --disable hooks --disable apps --disable plugins`.
+The program comes from paths.codex, or from PATH.
+Then wf sends `initialize` with experimentalApi and the `initialized` notification.
+Dynamic tools need experimentalApi.
+Messages are JSON objects, one per line, in both directions.
+Requests carry an id, notifications don't, and either side can send requests.
 
 A session is a thread (thread/start), and a turn is turn/start followed by
 notifications (item/started, item/completed, thread/tokenUsage/updated, ...)
@@ -91,7 +92,8 @@ from .. import config, output_tool
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
 TESTED = "0.163.0"
-APP_SERVER = ["app-server", "--disable", "hooks", "--disable", "apps"]
+APP_SERVER = ["app-server", "--disable", "hooks", "--disable", "apps",
+              "--disable", "plugins"]
 SANDBOX = {"read-only": "read-only", "edit": "workspace-write", "full": "danger-full-access"}
 UNAVAILABLE = {"usageLimitExceeded", "unauthorized"}
 STEER_TIMEOUT = 10  # seconds for turn/steer: inside the time `wf steer` waits for an answer (steer.py)
@@ -113,7 +115,8 @@ class Codex:
         self.command = command or [program(), *APP_SERVER]
         self.request_timeout = request_timeout  # a wedged app server counts as unavailable after this
         self.rpc: _Connection | None = None
-        self.models: list[dict] = []
+        self.models: list[dict] | None = None
+        self._models_lock = asyncio.Lock()
         self.warning: str | None = None  # shown once, with the first session
 
     async def open(self, run_dir: Path) -> None:
@@ -122,7 +125,6 @@ class Codex:
             await self.rpc.request("initialize", {"clientInfo": {"name": "wf", "version": "0.1.0"},
                                                   "capabilities": {"experimentalApi": True}})
             await self.rpc.notify("initialized")
-            self.models = (await self.rpc.request("model/list", {})).get("data", [])
         except BaseException as error:  # failed or cancelled (Ctrl-C): don't leave the app server running
             await self.close()
             if isinstance(error, (OSError, _RpcError, TimeoutError)):
@@ -134,7 +136,15 @@ class Codex:
                 self.warning = f"codex {installed} is installed; wf is tested with {TESTED}, and the app server is experimental"
 
     async def check_model(self, model: str | None, access: str = "read-only") -> None:
-        pass  # model/list gives defaults, and wf doesn't take it as the list of every model the account can use
+        await self._load_models()
+
+    async def _load_models(self) -> None:
+        async with self._models_lock:
+            if self.models is None:
+                try:
+                    self.models = (await self.rpc.request("model/list", {})).get("data", [])
+                except (_RpcError, TimeoutError) as error:
+                    raise Unavailable(f"Codex could not list its models: {error}") from error
 
     async def session(self, spec: SessionSpec) -> "CodexSession":
         if self.rpc is None or self.rpc.dead:
@@ -154,8 +164,8 @@ class Codex:
     def defaults(self, model: str | None) -> tuple[str | None, str | None]:
         """The model to use, and its default effort, from the app server's model list."""
         if model is None:
-            model = next((m.get("id") for m in self.models if isinstance(m, dict) and m.get("isDefault")), None)
-        effort = next((m.get("defaultReasoningEffort") for m in self.models if isinstance(m, dict) and m.get("id") == model), None)
+            model = next((m.get("id") for m in self.models or [] if isinstance(m, dict) and m.get("isDefault")), None)
+        effort = next((m.get("defaultReasoningEffort") for m in self.models or [] if isinstance(m, dict) and m.get("id") == model), None)
         return model, effort
 
 
@@ -172,6 +182,8 @@ class CodexSession:
 
     async def start(self) -> None:
         spec = self.spec
+        if not spec.model or not spec.effort:
+            await self.harness._load_models()
         model, default_effort = self.harness.defaults(spec.model)
         effort = spec.effort or default_effort
         config = {"web_search": "live" if spec.web else "disabled"}
@@ -276,10 +288,18 @@ class CodexSession:
             elif method == "item/completed":
                 self._record(params.get("item") or {})
             elif method == "thread/tokenUsage/updated":
+                before = self._total.tokens
                 self._count(params.get("tokenUsage") or {})
+                if self._total.tokens > before:
+                    self.spec.emit({"event": "progress", "source": "tokens"})
+            elif method in ("item/agentMessage/delta", "item/reasoning/textDelta", "item/reasoning/summaryTextDelta"):
+                if params.get("delta"):
+                    self.spec.emit({"event": "progress", "source": "text"})
             elif method == "error":
                 error = params.get("error") or {}
                 transcript(log, "error", error=error, will_retry=params.get("willRetry"))
+                if params.get("willRetry"):
+                    self.spec.emit({"event": "sdk_retry", "message": error.get("message", "")})
                 if not params.get("willRetry"):
                     kind = "unavailable" if _code(error) in UNAVAILABLE else "failed"
                     status, message = kind, error.get("message") or str(_code(error))

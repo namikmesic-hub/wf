@@ -19,6 +19,7 @@
 // differs between code paths in 1.0.38, so it is never left to the default.
 
 import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelListItem, Run, SDKAgent, SDKCustomTool, SDKMessage, TokenUsage } from "@cursor/sdk";
 import {
@@ -26,6 +27,8 @@ import {
   type Content, type ErrorInfo, type Usage, type Wire,
 } from "./protocol.ts";
 import { effective, resolveModel, type Resolved } from "./models.ts";
+import { cachedCatalog } from "./catalog.ts";
+import { rateLimitRetryAfter, RequestBudget } from "./budget.ts";
 
 type Sdk = typeof import("@cursor/sdk");
 
@@ -68,11 +71,26 @@ function needKey(apiKey: string | null): string {
   return apiKey;
 }
 
-async function catalog(sdk: Sdk, apiKey: string): Promise<ModelListItem[]> {
+async function catalog(sdk: Sdk, apiKey: string, budget = new RequestBudget()): Promise<ModelListItem[]> {
   try {
-    return await sdk.Cursor.models.list({ apiKey });
+    return await retryRateLimit(() => sdk.Cursor.models.list({ apiKey }), sleep, budget);
   } catch (error) {
     throw new HostError(classify(error));
+  }
+}
+
+export async function retryRateLimit<T>(action: () => Promise<T>, wait = sleep, budget = new RequestBudget()): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await budget.run(action);
+    } catch (error) {
+      const info = classify(error);
+      if (info.code !== "cursor.rate_limit" || attempt === 3) throw error;
+      const retryAfter = rateLimitRetryAfter();
+      budget.retrying(retryAfter);
+      log(`Cursor rate limit. Try again in ${retryAfter} seconds.`);
+      await budget.wait(retryAfter * 1000, wait, new HostError({ ...info, retry_after_s: retryAfter }));
+    }
   }
 }
 
@@ -143,15 +161,28 @@ export class CursorSession {
   }
 
   async open(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const ms = typeof args.timeout_ms === "number" && Number.isFinite(args.timeout_ms) && args.timeout_ms > 0
+      ? Math.min(args.timeout_ms, 54_000) : 54_000;
+    const budget = new RequestBudget(ms);
+    return budget.run(() => this.openWithBudget(args, budget));
+  }
+
+  private async openWithBudget(args: Record<string, unknown>, budget: RequestBudget): Promise<Record<string, unknown>> {
     const sdk = await loadSdk();
     const apiKey = needKey(this.apiKey);
     const access = accessOptions(String(args.access), args.web === true);
     if (typeof args.cwd !== "string" || !args.cwd) throw fail("invalid", "protocol.cwd", "session.open needs a cwd");
     if (typeof args.model !== "string" || !args.model) throw fail("unavailable", "cursor.no_model", "Cursor needs a model");
+    if (typeof args.catalog_dir !== "string" || !isAbsolute(args.catalog_dir)) {
+      throw fail("invalid", "cursor.catalog_dir", "Cursor needs an absolute catalog cache folder");
+    }
     this.allowed = access.tools ? new Set(access.tools) : null;
     this.ownMcpOnly = args.only_given_tools === true || args.access !== "full";
     this.tools(Array.isArray(args.tools) ? args.tools : []);
-    this.resolved = resolveModel(args.model, await catalog(sdk, apiKey));
+    const models = await cachedCatalog(apiKey, () => catalog(sdk, apiKey, budget), args.catalog_dir, budget);
+    this.resolved = resolveModel(args.model, models);
+    // SDK 1.0.38 reads this catalog for its own model check.
+    process.env.CURSOR_SDK_LOCAL_MODEL_CATALOG_JSON = JSON.stringify(models);
     const start = (args.start ?? { kind: "fresh" }) as Record<string, unknown>;
     const options = {
       apiKey,
@@ -173,10 +204,10 @@ export class CursorSession {
     try {
       if (start.kind === "load") {
         if (typeof start.from !== "string") throw fail("invalid", "protocol.start", "start: load needs `from`");
-        this.agent = await sdk.Agent.resume(start.from, options);
+        this.agent = await retryRateLimit(() => sdk.Agent.resume(start.from as string, options), sleep, budget);
         this.force = true; // a host that died mid-turn leaves that run active in the store
       } else {
-        this.agent = await sdk.Agent.create(options);
+        this.agent = await retryRateLimit(() => sdk.Agent.create(options), sleep, budget);
       }
     } catch (error) {
       throw new HostError(classify(error));
@@ -299,11 +330,14 @@ export class CursorSession {
       this.thinking(turn, message.text, message.thinking_duration_ms);
     } else if (message.type === "request") {
       this.request(turn, message.request_id);
+    } else if (message.type === "status" && /\bretry\b|\bretrying\b|\breconnect/i.test(message.message ?? "")) {
+      this.wire.event(this.id, turn, "turn.retry", {});
     }
   }
 
   // The SDK sends a block of thinking as pieces of text, then a message with the time the block took.
   private thinking(turn: string, text: string, durationMs: number | null | undefined): void {
+    if (text) this.wire.event(this.id, turn, "turn.progress", { source: "thinking" });
     this.thought += text ?? "";
     if (durationMs === undefined) return;
     const took = typeof durationMs === "number" && Number.isFinite(durationMs) ? Math.max(0, Math.round(durationMs)) : null;
@@ -475,17 +509,21 @@ export function fromTokens(tokens: TokenUsage | undefined): Usage {
 // The protocol's class for an error the SDK threw.
 export function classify(error: unknown): ErrorInfo {
   if (error instanceof HostError) return error.info;
-  const e = (error ?? {}) as { name?: string; message?: string; code?: string; isRetryable?: boolean };
+  const e = (error ?? {}) as { name?: string; message?: string; code?: string; isRetryable?: boolean; status?: number };
   const name = typeof e.name === "string" ? e.name : "";
   const message = typeof e.message === "string" && e.message ? e.message : String(error);
   const code = typeof e.code === "string" ? e.code : "";
   const retryable = e.isRetryable === true;
+  if (/rate[ _-]?limit|too many requests|requests per minute/i.test(message)
+      || (e.status === 429 && !/usage|quota|payment|plan/i.test(message))) {
+    return { class: "transient", code: "cursor.rate_limit", message, retryable: true, retry_after_s: rateLimitRetryAfter() };
+  }
   switch (name) {
     case "AuthenticationError":
       return { class: "auth", code: "cursor.auth", message: `Cursor refused the API key: ${message}`, retryable: false };
     case "RateLimitError":
       return retryable
-        ? { class: "transient", code: "cursor.rate_limit", message, retryable, retry_after_s: RETRY_AFTER_S }
+        ? { class: "transient", code: "cursor.rate_limit", message, retryable, retry_after_s: rateLimitRetryAfter() }
         : { class: "usage_limit", code: "cursor.usage_limit", message, retryable: false };
     case "ConfigurationError":
     case "IntegrationNotConnectedError":

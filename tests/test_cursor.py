@@ -100,7 +100,7 @@ def test_a_read_only_session_runs_on_the_sdk_with_wfs_settings(repo, monkeypatch
 
 
 def test_tokens_that_the_sdk_reports_count_in_the_run_and_its_events(repo, monkeypatch, cursor_host):
-    use(monkeypatch, repo, cursor_host, [{"text": "Looking."}], [GOOD])  # a reminder: two turns
+    log = use(monkeypatch, repo, cursor_host, [{"text": "Looking."}], [GOOD])  # a reminder: two turns
     assert run(end='{tokens: {type: integer, value: "{{ run.tokens }}"}}') == 0
     assert output() == {"tokens": 2400}
     (finished,) = events("node_finished")
@@ -108,8 +108,8 @@ def test_tokens_that_the_sdk_reports_count_in_the_run_and_its_events(repo, monke
     turns = [e for e in attempt_log() if e["kind"] == "turn"]
     assert [t["usage"]["total_tokens"] for t in turns] == [1200, 1200]
     assert [t["usage"]["cost_source"] for t in turns] == ["pending", "pending"]
-    (billed,) = [e for e in attempt_log() if e["kind"] == "usage"]
-    assert billed["billed"]["cost"] == {"raw_cost_cents": 1.5, "charged_cents": 0}  # what Cursor bills, for the record
+    assert not [e for e in attempt_log() if e["kind"] == "usage"]
+    assert not entries(log, "getUsage")
 
 
 def trace(kind: str) -> list[dict]:
@@ -449,7 +449,7 @@ def test_a_host_that_does_not_answer_is_unavailable_not_a_node_timeout(repo, mon
     use(monkeypatch, repo, cursor_host, silent_create=True, timeout=2)
     assert run() == 1
     out = capsys.readouterr()
-    assert "cursor is unavailable: the Cursor host didn't start a session" in out.out
+    assert "cursor is unavailable: Cursor's request time limit has expired" in out.out
     assert "timed out after" not in out.out + out.err
 
 

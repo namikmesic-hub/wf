@@ -17,8 +17,8 @@ each run, the server reads only the events that came since it last read them.
 It looks only at the files of attempts that can still change (_View).
 
     GET /                          the page
-    GET /api/runs                  the runs, newest first, with their state and progress
-    GET /api/run?id=ID             one run: state, progress, graph, states, metrics, sessions, attempts
+    GET /api/runs                  the runs, newest first, with their summary, state and progress
+    GET /api/run?id=ID             one run: brief, state, progress, graph, states, metrics, sessions, attempts
     GET /api/events?id=ID&after=N  the events after byte N of events.jsonl (the last EVENTS_BACK without N)
     GET /api/file?id=ID&path=P     a transcript, instruction, output or session file of the run
 
@@ -48,7 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from . import diagram, observe, operate, progress, report, runs, spec
+from . import diagram, observe, operate, progress, report, runs, spec, trace, trace_view
 from .runs import Run
 
 HOST = "127.0.0.1"
@@ -59,7 +59,7 @@ STATIC = {"/": ("page.html", "text/html"), "/page.js": ("page.js", "text/javascr
 FILES = re.compile(r"instruction\.md|output\.json|session\.json|attempt-\d+\.log")
 POLICY = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; "
           "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-MOVING = ("running", "waiting")  # the runs whose progress the list shows
+MOVING = ("running", "stall_detected", "waiting")  # the runs whose progress the list shows
 
 
 class Source:
@@ -121,7 +121,7 @@ def run_list(source: Source) -> dict:
     for key, run in source.runs().items():
         state = operate.state(run)
         item = {"id": key, "run": run.id, "workflow": state.get("workflow"), "status": state.get("status"),
-                "dry_run": state.get("dry_run"), "updated": state.get("updated")}
+                "dry_run": state.get("dry_run"), "updated": state.get("updated"), "summary": _summary(_inputs(run))}
         if state.get("status") in MOVING:
             try:
                 with _viewing(run) as view:
@@ -138,7 +138,7 @@ def run_detail(run: Run) -> dict:
     state = operate.state(run)
     status = state.get("status")
     with _viewing(run) as view:  # after the state: the events go at least as far as it does
-        return {"state": state, "progress": view.progress(status), "graph": view.graph, "states": view.states(status),
+        return {"state": state, "brief": view.brief(state), "progress": view.progress(status), "graph": view.graph, "states": view.states(status),
                 "metrics": view.metrics(status), "sessions": view.open.live(), "attempts": view.attempts.listed()}
 
 
@@ -167,6 +167,13 @@ class _View:
         self.run, self.lock = run, threading.Lock()
         self.tally: report.Tally | None = None  # None until the first refresh
         self.asked = time.monotonic()  # when a page last asked for the run
+        self.follow_ups = _FollowUps(run)
+
+    def brief(self, state: dict) -> dict:
+        inputs = _inputs(self.run, self.workflow)
+        return {"workflow": self.workflow.name if self.workflow else state.get("workflow"),
+                "description": self.workflow.description if self.workflow else "", "inputs": inputs,
+                "main_input": _main_input(inputs), "follow_ups": self.follow_ups.read(), "output": self.run.output()}
 
     def _start(self) -> None:
         run = self.run
@@ -233,7 +240,7 @@ class _View:
     def metrics(self, status: str | None) -> dict:
         """The numbers of `wf report`, with what each pass that runs has done so far. That is until now,
         or until the last event while the run doesn't move."""
-        now = time.time() if status in ("running", None) or self.last is None else observe.timestamp(self.last)
+        now = time.time() if status in ("running", "stall_detected", None) or self.last is None else observe.timestamp(self.last)
         found = self.tally.report(now)
         return {"run": found["runs"][0], "nodes": found["nodes"], "notes": found["notes"]}
 
@@ -490,3 +497,83 @@ def serve(source: Source, port: int, say: Callable[[str], None] = lambda text: p
     finally:
         server.server_close()
     return 0
+
+
+_INPUT_SECRETS: dict[Path, frozenset[str]] = {}
+_INPUT_SECRETS_LOCK = threading.Lock()
+
+
+def _hidden_inputs(run: Run, workflow: spec.Workflow | None) -> frozenset[str]:
+    """Keep secret input names from each run's workflow copies after a successful read."""
+    with _INPUT_SECRETS_LOCK:
+        if run.dir not in _INPUT_SECRETS:
+            loaded = {workflow.path: workflow} if workflow is not None else {}
+
+            def load(path: Path) -> spec.Workflow:
+                if path not in loaded:
+                    loaded[path] = spec.load(path)
+                return loaded[path]
+
+            root = workflow if workflow is not None else load(run.workflow_file)
+            _INPUT_SECRETS[run.dir] = frozenset(trace.secret_inputs(root, load))
+        return _INPUT_SECRETS[run.dir]
+
+
+def _inputs(run: Run, workflow: spec.Workflow | None = None) -> dict:
+    try:
+        value = json.loads((run.dir / "input.json").read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or not value:
+            return {}
+        hidden = _hidden_inputs(run, workflow)
+        return {key: trace.HIDDEN if key in hidden else item for key, item in value.items()}
+    except (OSError, ValueError, KeyError, spec.SpecError):
+        return {}
+
+
+def _main_input(inputs: dict) -> str | None:
+    short = {"branch", "pr", "repository", "login", "delivery", "delivery_mode"}
+    text = {key: value for key, value in inputs.items()
+            if key not in short and isinstance(value, str) and value.strip() and value != trace.HIDDEN}
+    return max(text, key=lambda key: len(text[key]), default=None)
+
+
+def _summary(inputs: dict) -> str:
+    key = _main_input(inputs)
+    value = inputs[key] if key else inputs.get("pr") or inputs.get("repository") or ""
+    if not isinstance(value, str):
+        return ""
+    line = " ".join(value.split())
+    return re.split(r"(?<=[.!?])\s+", line, maxsplit=1)[0]
+
+
+class _FollowUps:
+    """Read each follow-up request from the trace once, including text stored in blobs."""
+
+    def __init__(self, run: Run):
+        self.run, self.inode, self.offset = run, None, 0
+        self.found: dict[int, dict] = {}
+
+    def read(self) -> list[dict]:
+        try:
+            with (self.run.dir / trace_view.FILE).open("rb") as file:
+                info = os.fstat(file.fileno())
+                if info.st_ino != self.inode or info.st_size < self.offset:
+                    self.inode, self.offset, self.found = info.st_ino, 0, {}
+                file.seek(self.offset)
+                for line in file:
+                    if not line.endswith(b"\n"):
+                        break
+                    self.offset += len(line)
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict) or record.get("kind") != "run" or record.get("action") != "continued":
+                        continue
+                    number = record.get("follow_up")
+                    request = trace_view.full(self.run, record.get("request"))
+                    if isinstance(number, int) and isinstance(request, str):
+                        self.found[number] = {"number": number, "time": record.get("time"), "request": request}
+        except OSError:
+            pass
+        return [self.found[number] for number in sorted(self.found, reverse=True)]

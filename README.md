@@ -15,14 +15,23 @@ wf runs the graph on LangGraph:
 - any run can pause for a person and be answered later, from a terminal or by
   an autonomous operator.
 
-One cap on live agent sessions holds across all your runs that share a `~/.wf`.
+Optional global and harness caps limit live agent sessions across all runs that share a `~/.wf`.
 Agents can also read Slack, Granola, Linear, Notion and Gmail through tools that wf brings itself.
 
 ## Install
 
 Needs Python 3.13, [uv](https://docs.astral.sh/uv/), and Claude Code, Codex or Cursor set up.
 Cursor runs through Cursor's SDK, so it needs Node.js 22.18 or later and a Cursor API key (`wf runtimes cursor signin`).
-Its `edit` steps run through `cursor-agent`, logged in.
+Cursor model names include `grok-4.7-xhigh-fast` and the explicit form `grok-4.7[reasoning_effort=xhigh,fast=true]`.
+Cursor's model catalog is the account's model list.
+wf shares this list for 15 minutes per API key, across sessions and runs on the machine.
+`wf runtimes cursor doctor --model <id>` fetches the current catalog for its model check.
+`wf validate` checks workflow settings locally.
+Cursor catalog and session-open rate limits return at once, with no retry inside the host.
+The node's retry waits 60 to 75 seconds.
+Codex skips the model list when the workflow pins its model and effort.
+cursor-agent skips the model list when the workflow pins its model.
+Cursor's `edit` steps run through `cursor-agent`, logged in.
 Until a key is set, all its steps run through `cursor-agent`, and each run warns once.
 
 ```sh
@@ -62,6 +71,19 @@ Without `follow_up`, the first agent node with `edit` or `full` access takes the
 Then wf adds the request to the instruction of that node.
 Its routes count from zero again, and `--limit` gives it a budget of its own.
 
+`wf run` and `wf continue` also accept `--harness NODE=HARNESS`, `--model NODE=MODEL`, and `--effort NODE=EFFORT`.
+Each flag can repeat, and `NODE[INDEX]` names one item of a `for_each` node.
+Only named nodes or items change, and all other nodes keep the workflow file's values.
+Run overrides apply to every pass, and continue overrides apply from that follow-up onward.
+wf checks each override before the run or follow-up starts and records it in `events.jsonl`.
+`wf run` needs `--harness` for an override when the node's harness template reads earlier node output.
+An item on `wf run` must have a list that wf can compute from the start input.
+
+```sh
+wf run wf-examples/implement.yaml task="Add a --version flag" --model implement=claude-sonnet-5-5
+wf continue <run-id> "Add tests" --harness implement=codex --model implement=gpt-6 --effort implement=high
+```
+
 Steps that read Slack, Granola, Linear, Notion or Gmail list them in `tools`.
 Sign in to each once per machine:
 
@@ -88,7 +110,10 @@ wf ui                  # a web page on 127.0.0.1 with all of it, at the address 
 The `wf status` line above is for a run of `implement.yaml` with no earlier finished runs, at its tests for the second time.
 
 `wf ui` is a small web page that wf serves on your machine only.
-It lists the runs of the repo.
+It lists the runs of the repo, with a one-line task summary under each name.
+The Task section comes before progress.
+It shows the workflow description, the task text, the links, the deliverables, and each follow-up request, newest first.
+The first paragraph stays in view, and **show all** opens the rest.
 For each run it draws the workflow graph, with the state of each step.
 It also shows the progress, the numbers of `wf report` for each step with its state, the live events, and each session's transcript and instruction.
 A step that runs shows what it has done so far: its attempts, its time, and its tokens and cost.
@@ -105,7 +130,12 @@ wf only reads the file, and each key in it is optional:
 
 ```toml
 runs_dir = "~/wf-runs"        # keep run folders outside the repos, a folder per repo
-max_agents = 4                # at most 4 live agent sessions, across all runs
+max_agents = 64               # optional global cap on live agent sessions across all runs
+
+[capacity]                   # optional caps on live agent sessions per harness
+claude-code = 16
+codex = 32
+cursor = 24
 
 [claude]
 auth = "subscription"         # or "api-key", to use ANTHROPIC_API_KEY
@@ -135,10 +165,16 @@ url = "https://wf:password@clickhouse.example.com:8443/wf"
 
 A key takes its value from its command-line flag, else from its environment variable, else from the file, else from wf's default.
 The flags are `--runs-dir`, and the `--port` of `wf ui` and of `wf tools <name> setup`.
-The environment variables are `WF_RUNS_DIR`, `WF_MAX_AGENTS`, `WF_CLAUDE_AUTH` and `WF_CURSOR_RUNTIME`.
+The environment variables include `WF_RUNS_DIR`, `WF_MAX_AGENTS`, `WF_CLAUDE_AUTH` and `WF_CURSOR_RUNTIME`.
+The harness caps use `WF_MAX_AGENTS_CLAUDE_CODE`, `WF_MAX_AGENTS_CODEX` and `WF_MAX_AGENTS_CURSOR`.
 A variable with an empty value counts as no variable.
 Only an empty `WF_RUNS_DIR` turns the runs folder off, also when the file names one.
 `wf config show` prints the value of each key and where it comes from.
+
+Each cap takes a positive integer, and an absent key means no cap.
+By default, neither the global cap nor the harness caps limit sessions.
+An attempt takes its harness slot and its global slot before it opens a session, when those caps are set.
+`wf status` names the harness and the cap that an attempt waits for.
 
 wf doesn't start when the file has an unknown key or a value of the wrong kind.
 Its message names the key, the file and what the key allows.
@@ -164,7 +200,8 @@ wf metrics export --all-repos --runs-dir ~/runs  # each run of each repo in a ru
 ```
 
 wf makes the database and the tables that are missing, from `workflow/clickhouse.sql`.
-Each run folder keeps where its export stopped, in `export.json`, so a second export writes nothing.
+Each run folder keeps its export offset in `export.json`, so an unchanged run adds no new run rows.
+The command still writes its times, counts, and error class to the `export_runs` table when ClickHouse accepts the row.
 Delete the `export.json` of a run to export it again from the start.
 A run from before wf wrote a trace exports from its `events.jsonl`, with less detail.
 

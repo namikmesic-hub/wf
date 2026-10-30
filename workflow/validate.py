@@ -611,6 +611,8 @@ class _Checker:
         """Check the node's harness; returns the harnesses it can run on, as far as validate can tell."""
         node, at = self.nodes[node_id], f"nodes.{node_id}"
         harness = self.wf.setting(node_id, "harness")
+        if node.stall and node.stall.then == "fallback" and not isinstance(harness, list):
+            self.error(f"{at}.stall.then", "stall fallback needs a harness list")
         if harness is None:
             self.error(at, "no harness: set `harness` here or `defaults.harness`")
             return set()

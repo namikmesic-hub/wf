@@ -133,7 +133,7 @@ function forms(model: ModelListItem): string {
 function unknown(requested: string, catalog: ModelListItem[]) {
   const ids = catalog.map((m) => m.id);
   const listed = ids.length > 40 ? `${ids.slice(0, 40).join(", ")} and ${ids.length - 40} more` : ids.join(", ");
-  return fail("unavailable", "cursor.model", `Cursor has no model \`${requested}\`: this account's models are ${listed}`);
+  return fail("unavailable", "cursor.model", `Cursor has no model \`${requested}\`: this account's models are ${listed}. Use id[name=value,...] for explicit parameters.`);
 }
 
 // The model a session uses, as the transcript records it: { model, ...parameters }.

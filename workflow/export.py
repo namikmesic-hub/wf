@@ -2,7 +2,8 @@
 
     wf metrics export [<run-id>...] [--all-repos] [--runs-dir DIR]
 
-ClickHouse keeps the tables in the database of metrics.url in config.toml, as clickhouse.sql makes them:
+ClickHouse keeps these tables and the view in the database of metrics.url in config.toml.
+clickhouse.sql makes the tables, and migrations/001_attempt_times.sql makes the view attempt_times:
 
     runs           a row per run: workflow, status, start and end, and what its attempts used
     attempts       a row per attempt of a pass or an item: harness, model, how it ended, its error
@@ -11,11 +12,15 @@ ClickHouse keeps the tables in the database of metrics.url in config.toml, as cl
     tool_calls     a row per tool call of an agent: when it started, how long it took, if it failed
     routes         a row per route decision of a pass
     metric_points  the points of custom metrics, which nothing writes yet
+    export_runs    one row per export, including empty exports and errors
+    schema_version the schema steps that prepare has applied
+    attempt_times  a view of completed trace attempts, with awake time and sleep time
 
-Store.prepare() makes the database and each table that is missing. Then it checks each table that
-the export writes against clickhouse.sql: each column with its type, the engine and the key. A table
-that differs is a SchemaMismatch, and the export writes nothing. It doesn't check metric_points,
-which nothing writes yet.
+Store.prepare() makes the database and each table that is missing.
+It applies each missing schema step, then checks column types, engines, and keys against clickhouse.sql.
+A table that differs raises SchemaMismatch.
+The command records the error when export_runs can take the row.
+It does not check metric_points, which nothing writes yet.
 
 An export of a run folder reads its trace.jsonl from the byte offset where the last export stopped.
 A record that starts or ends something gives a row. An `attempt` gives a row with the outcome
@@ -37,8 +42,9 @@ process holds its lock, the process stopped without its `run_stopped`. It crashe
 it, as `wf status` says. The run is then `stopped` at its last record, and each attempt and turn that
 it left running is `cancelled` there. When `wf retry` runs them again, their new rows replace these.
 
-So exporting twice changes nothing: the second export finds nothing new and writes nothing. When
-ClickHouse makes the tables again, as after `docker compose down -v`, the identity changes. Then the
+The second export writes no new run rows when the run has not changed.
+The command still writes an export_runs row with its result.
+When ClickHouse makes the tables again, as after `docker compose down -v`, the identity changes. Then the
 next export of each run starts again from the start of its file. So does the export of a run whose
 export.json is gone. Each row that it writes replaces an equal one.
 
@@ -71,6 +77,7 @@ import json
 import os
 import re
 import stat
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -84,6 +91,7 @@ from .runs import Run
 from .trace import FILE as TRACE
 
 SCHEMA = Path(__file__).with_name("clickhouse.sql")
+MIGRATIONS = Path(__file__).with_name("migrations")
 PROGRESS = "export.json"
 LOCK = "export.lock"
 EVENTS = "events.jsonl"
@@ -102,6 +110,7 @@ AFTER_SUCCESS = ("routes: ", "can't write output.json: ", "workspace: git status
 # that doesn't fit its column. ClickHouse answers them with HTTP 400, 404 or 500.
 SCHEMA_CODES = {"6", "8", "16", "27", "47", "53", "60", "81", "117"}
 ERROR_CLASSES = (  # the first class whose pattern the error matches, else "other"
+    ("stalled", r"^stalled:"),
     ("rate_limit", r"resource_exhausted|\b429\b|usage.?limit|rate.?limit|quota"),
     ("dropped_connection", r"stream closed|econnreset|\[canceled\]|\[aborted\]|connection (stalled|failed|reset|closed|lost)"
                            r"|enotfound|can't reach"),
@@ -109,6 +118,18 @@ ERROR_CLASSES = (  # the first class whose pattern the error matches, else "othe
     ("auth", r"unauthori[sz]ed|unauthenticated|authenticat|log ?in\b|logged in|api key"),
     ("no_result", r"never made a valid submit_result call"),
 )
+
+PROGRESS_COLUMNS = {
+    "duration_basis": "Nullable(String)", "awake_s": "Nullable(Float64)", "measure_version": "Nullable(UInt8)",
+    **dict.fromkeys(("startup_s", "asleep_s", "tool_s", "active_s", "idle_s", "slot_wait_s", "longest_gap_s"),
+                    "Nullable(Float64)"),
+    **dict.fromkeys(("longest_gap_at", "last_progress_at", "stall_detected_at"), "Nullable(DateTime64(3, 'UTC'))"),
+    "stall_action": "Nullable(String)", "sdk_retries": "Nullable(UInt32)",
+}
+
+
+def _progress_columns(record):
+    return {key: _utc(record.get(key)) if key.endswith("_at") else record.get(key) for key in PROGRESS_COLUMNS}
 
 
 class ExportError(Exception):
@@ -143,6 +164,7 @@ class Store:
         host = f"[{url.host}]" if ":" in url.host else url.host  # an IPv6 address
         self.where = f"{url.scheme}://{host}:{url.port}/{url.database}"  # for messages: no user, no password
         self.identity = ""  # prepare() sets it
+        self.rows_written = 0
 
     def prepare(self) -> None:
         """Make the database and each table of clickhouse.sql that is missing, then check the tables that
@@ -155,11 +177,23 @@ class Store:
                 self._post(f"CREATE DATABASE IF NOT EXISTS {_identifier(self.database)}", inside=False)
             for statement in _statements(SCHEMA.read_text(encoding="utf-8")):
                 self._post(statement, inside=True)
-            tables = self._tables()
+        versions = self._select(f"SELECT max(version) AS version FROM {_identifier(self.database)}.schema_version", "version")
+        version = int(versions[0]["version"]) if versions else 0
+        for migration in sorted(MIGRATIONS.glob("*.sql")):
+            number = int(migration.stem.split("_", 1)[0])
+            if number > version:
+                for statement in _statements(migration.read_text(encoding="utf-8")):
+                    self._post(statement, inside=True)
+                self.insert("schema_version", [{"version": number}])
+        tables = self._tables()
         columns: dict[str, dict[str, str]] = {}
         query = "SELECT table, name, type FROM system.columns WHERE database = {database:String}"
         for row in self._select(query, "table", "name", "type"):
             columns.setdefault(row["table"], {})[row["name"]] = row["type"]
+        for name, kind in PROGRESS_COLUMNS.items():
+            if name not in columns.get("attempts", {}):
+                self._post(f"ALTER TABLE attempts ADD COLUMN IF NOT EXISTS {name} {kind}", inside=True)
+                columns.setdefault("attempts", {})[name] = kind
         problems = differences(wanted, tables, columns, self.database)
         if problems:
             raise SchemaMismatch(f"the tables in ClickHouse at {self.where} differ from {SCHEMA.name}: {'; '.join(problems)}. "
@@ -170,6 +204,7 @@ class Store:
     def insert(self, table: str, rows: list[dict]) -> None:
         body = "".join(json.dumps(row) + "\n" for row in rows).encode()
         self._post(f"INSERT INTO {table} FORMAT JSONEachRow", body, inside=True)
+        self.rows_written += len(rows)
 
     def _tables(self) -> dict[str, dict]:
         query = "SELECT name, toString(uuid) AS uuid, engine, sorting_key FROM system.tables WHERE database = {database:String}"
@@ -257,7 +292,7 @@ def differences(wanted: dict, tables: dict, columns: dict, database: str) -> lis
     """How the tables that the export writes, in `database`, differ from `wanted` (schema()). A difference
     is a table or a column that is missing, a column of another type, another engine or another key."""
     found = []
-    for name in WRITTEN:
+    for name in (*WRITTEN, "export_runs", "schema_version"):
         table, have = wanted[name], tables.get(name)
         if have is None:
             found.append(f"there's no table {database}.{name}")
@@ -274,6 +309,21 @@ def differences(wanted: dict, tables: dict, columns: dict, database: str) -> lis
 
 
 # ---------- the runs ----------
+
+
+def export_time() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def record_export(store, started: str, runs_read: int, rows_written: int, failure: str) -> bool:
+    try:
+        store.insert("export_runs", [{"started_at": started, "finished_at": export_time(),
+                                      "runs_read": runs_read, "rows_written": rows_written, "error_class": failure}])
+    except ExportError as error:
+        if not failure:
+            print(f"wf metrics export: can't record the export: {error}", file=sys.stderr)
+        return False
+    return True
 
 
 def runs_in(folder: Path, every_repo: bool = False) -> list[Run]:
@@ -528,7 +578,9 @@ class _Trace:
         last = self.state["last"]
         for table, word in (("attempts", "outcome"), ("turns", "status")):
             for row in self.state[table].values():
-                self._row(table, {**row, word: "cancelled", "ended": _utc(last), "duration_s": _seconds(row["started"], last)})
+                basis = {"duration_basis": "wall", "awake_s": None, "asleep_s": None} if table == "attempts" else {}
+                self._row(table, {**row, word: "cancelled", "ended": _utc(last),
+                                  "duration_s": _seconds(row["started"], last), **basis})
 
     def _before(self, time: str) -> None:
         """The rows of the events that a wf from before the trace wrote. The trace starts at `time`, in the
@@ -612,6 +664,10 @@ class _Trace:
             "started": _utc(record.get("started")) or _utc(record["time"]),
             "ended": _utc(record.get("ended")) if ended else None,
             "duration_s": _number(record.get("duration_s")) if ended else None,
+            **_progress_columns(record),
+            "duration_basis": _word(record.get("duration_basis")) or "monotonic",
+            "awake_s": _number(record.get("awake_s", record.get("duration_s"))) if ended else None,
+            "asleep_s": _number(record.get("asleep_s")) if ended else None,
             "outcome": _word(record.get("outcome")) if ended else "running", "error": error, "error_class": error_class(error),
             **_usage(record.get("usage")), "exit_code": exit_code if isinstance(exit_code, int) else None}
 
@@ -787,6 +843,7 @@ def _events(run: Run, events: list[dict | None]) -> dict[str, list[dict]]:
             "effort": seen.get("effort", ""), "access": "", "session_id": "",
             "session_start": "load" if session == "fork" and harness == "cursor" else session,
             "started": _utc(seen["started"]), "ended": _utc(ended), "duration_s": _seconds(seen["started"], ended),
+            **_progress_columns({}), "duration_basis": "wall", "awake_s": None, "asleep_s": None,
             "outcome": seen.get("outcome") or ("succeeded" if ended_pass else ""), "error": error,
             "error_class": error_class(error), **used, "exit_code": None})
         for count, (time, tool) in enumerate(seen["tools"], 1):

@@ -1,13 +1,16 @@
-"""Capacity: one cap on the agent sessions live at once, across every wf process of the
+"""Capacity: optional global and harness caps on live agent sessions, across every wf process of the
 user that uses the same ~/.wf (WF_HOME moves it).
 
 `max_parallel` caps the items of one node in one run. Several runs started
 together (eight reviews while another change is being written) can still open
 more agent sessions at once than the machine, or an account's quota, holds.
-`max_agents` caps them all:
+`max_agents` caps them all.
+The keys under [capacity] cap each harness, with no cap by default:
 
     WF_MAX_AGENTS=4                       this process, and the background drivers it starts
     max_agents = 4  in ~/.wf/config.toml  every wf process that uses this ~/.wf (config/)
+    [capacity]
+    codex = 16                           WF_MAX_AGENTS_CODEX overrides this value
 
 The environment variable wins over the file, which is checked all the same.
 With neither there is no cap, and nothing here runs. Give every wf process the
@@ -21,6 +24,8 @@ as the attempt runs, like a run's lock (runs.py): the operating system releases
 it when the process dies, so a crashed or killed run never keeps one. The file
 names its holder (pid, run, node, attempt); a free slot's file may still name
 its last one.
+Harness slots use ~/.wf/agent-slots/<harness>/<n>.
+An attempt takes its harness slot before its global slot, and holds both until it ends.
 
 An attempt that finds every slot taken waits, and tries again every
 POLL_SECONDS. Waiting isn't failing: it uses no retry, and the node's timeout
@@ -44,8 +49,9 @@ from . import config
 POLL_SECONDS = 0.2
 
 
-def slots_dir() -> Path:
-    return config.home() / "agent-slots"
+def slots_dir(harness: str | None = None) -> Path:
+    folder = config.home() / "agent-slots"
+    return folder / harness if harness is not None else folder
 
 
 def configured() -> int | None:
@@ -64,9 +70,9 @@ class Slot:
         os.close(self.fd)  # closing releases the flock
 
 
-def take(cap: int, holder: dict) -> Slot | None:
+def take(cap: int, holder: dict, *, harness: str | None = None) -> Slot | None:
     """A slot among the first `cap` that is free right now, or None if they're all taken."""
-    folder = slots_dir()
+    folder = slots_dir(harness)
     folder.mkdir(parents=True, exist_ok=True)
     for number in range(cap):
         fd = os.open(folder / str(number), os.O_RDWR | os.O_CREAT, 0o600)
@@ -87,11 +93,11 @@ def take(cap: int, holder: dict) -> Slot | None:
     return None
 
 
-async def wait(cap: int, holder: dict, stop: Callable[[], bool]) -> Slot | None:
+async def wait(cap: int, holder: dict, stop: Callable[[], bool], *, harness: str | None = None) -> Slot | None:
     """The first slot that frees up, or None once stop() is true: it's asked before every try.
     A cancelled wait holds none."""
     while not stop():
-        if (slot := take(cap, holder)) is not None:
+        if (slot := take(cap, holder, **({"harness": harness} if harness is not None else {}))) is not None:
             return slot
         await asyncio.sleep(POLL_SECONDS)
     return None

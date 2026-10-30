@@ -7,6 +7,7 @@ The real run costs a little quota. Run it with:  uv run pytest -m harness
 import asyncio
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,7 @@ def test_every_session_sets_everything_explicitly(tmp_path, monkeypatch):
     assert o.setting_sources == ["project"]  # the repo's CLAUDE.md, not your user settings
     assert o.system_prompt == {"type": "preset", "preset": "claude_code"}
     assert list(o.mcp_servers) == ["wf"]
-    assert o.env == {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}  # use the subscription login
+    assert o.env == {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}
     assert o.extra_args == {REPLAY: None}  # Claude Code says which messages it read: wf steer needs that
 
 
@@ -74,12 +75,13 @@ def test_without_project_instructions_no_setting_source_loads(tmp_path):
 
 def test_api_key_auth_can_be_chosen(tmp_path, monkeypatch, wf_home):
     monkeypatch.setenv("WF_CLAUDE_AUTH", "api-key")
-    assert options(spec(tmp_path)).env == {}
+    assert options(spec(tmp_path)).env == {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
     monkeypatch.delenv("WF_CLAUDE_AUTH")
     (wf_home / "config.toml").write_text('[claude]\nauth = "api-key"\n')
-    assert options(spec(tmp_path)).env == {}
+    assert options(spec(tmp_path)).env == {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
     monkeypatch.setenv("WF_CLAUDE_AUTH", "subscription")  # the environment wins
-    assert options(spec(tmp_path)).env == {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}
+    assert options(spec(tmp_path)).env == {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                                           "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}
 
 
 def test_opening_finds_the_claude_code_program_as_the_sdk_does(tmp_path, monkeypatch):
@@ -229,6 +231,26 @@ def test_claude_code_takes_a_message_only_mid_turn_once_it_repeated_one(tmp_path
     with pytest.raises(OSError):
         steer("id-4")
     assert session._held == ["id-3"]  # a message that wasn't written isn't waited for
+
+
+@pytest.mark.harness
+def test_a_real_session_submits_with_nonessential_traffic_disabled(tmp_path):
+    settings = replace(spec(tmp_path), model="claude-haiku-5-5", effort="low", max_turns=3,
+                       project_instructions=False, only_wf_tools=True)
+    assert options(settings).env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+    async def main():
+        harness = ClaudeCode()
+        await harness.open(tmp_path)
+        session = await harness.session(settings)
+        try:
+            await asyncio.wait_for(session.send('Call submit_result with summary set to "hi". Use no other tool.'), 60)
+            assert settings.tool.result == {"summary": "hi"}
+        finally:
+            await session.close()
+            await harness.close()
+
+    asyncio.run(main())
 
 
 @pytest.mark.harness

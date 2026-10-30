@@ -70,9 +70,9 @@ Cursor would save.
 - full: everything is allowed.
 Web search and fetch follow `web` at every level.
 
-The model must be one `cursor-agent --list-models` lists (read when the harness
-opens); any other makes the session unavailable, so a fallback harness takes
-over. `effort` isn't used: Cursor model ids carry their own.
+An explicit model goes to cursor-agent without a model list call.
+The explicit model check calls `cursor-agent --list-models`.
+`effort` is not used because Cursor model ids carry their own.
 
 How a turn ends: Cursor reports a failed request as a paragraph it adds at
 the end of the turn's last message, with stopReason end_turn, not as an error.
@@ -139,7 +139,7 @@ from . import git_tool, mcp_http
 from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 
 TESTED = "2026.10.18-ea085cb"
-FLAGS = ["--sandbox", "disabled", "--disable-project-configs"]
+FLAGS = ["--sandbox", "disabled", "--disable-project-configs", "--disable-indexing"]
 SERVER = "wf"  # the MCP server name the agent sees
 CONFIG = {
     "version": 1,
@@ -187,7 +187,6 @@ class CursorAcp:
         self.home = workspaces.temp_root(Path(run_dir).name) / "cursor-agent"
         self.home.mkdir(parents=True, exist_ok=True)
         self.saved = workspaces.saved_sessions(Path(run_dir), "cursor-agent")
-        self.models = await self._list_models()
         installed = await self._version()
         if installed and installed != TESTED:
             self.warning = (f"cursor-agent {installed} is installed; wf is tested with {TESTED}, "
@@ -196,11 +195,13 @@ class CursorAcp:
         await self.tools.start()
 
     async def check_model(self, model: str | None, access: str = "read-only") -> None:
+        self.models = await self._list_models()
         if model is not None and model not in self.models:
             raise Unavailable(f"Cursor has no model `{model}`: `cursor-agent --list-models` lists the ones you can use")
 
     async def session(self, spec: SessionSpec) -> "CursorSession":
-        await self.check_model(spec.model)
+        if not spec.model:
+            raise Unavailable("Cursor needs a model")
         if self.warning:
             spec.emit({"event": "warning", "message": self.warning})
             self.warning = None
@@ -276,6 +277,7 @@ class CursorSession:
         self.turn = False  # updates count only while a turn runs (session/load replays history)
         self.calls: dict[str, dict] = {}  # tool calls in progress, as their updates describe them
         self.text = ""  # the agent's message since the last tool call
+        self.thought = ""
         self.succeeded = False  # a turn ended with a result: the attempt has its result
         # Marks a continued session while an attempt that continued it has no result
         self.continuing = harness.home / "continuing" / spec.fork_from if spec.fork_from else None
@@ -311,7 +313,10 @@ class CursorSession:
                 "protocolVersion": 1, "clientInfo": {"name": "wf", "version": "0.1.0"},
                 "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False,
                                        "_meta": {"parameterizedModelPicker": True}}})
-            await self.rpc.request("authenticate", {"methodId": "cursor_login"})
+            try:
+                await self.rpc.request("authenticate", {"methodId": "cursor_login"})
+            except (_RpcError, TimeoutError) as error:
+                raise Unavailable(f"Cursor could not sign in. Run `cursor-agent login`, then try again: {error or 'no answer'}") from error
             if saved is not None:
                 result = await self.rpc.request("session/load", {"sessionId": self.id, "cwd": str(spec.cwd),
                                                                   "mcpServers": servers})
@@ -377,7 +382,18 @@ class CursorSession:
         if not self.turn:
             return
         if kind == "agent_message_chunk":
+            if self.thought:
+                self._flush()
+            if (update.get("content") or {}).get("text"):
+                self.spec.emit({"event": "progress", "source": "text"})
             self.text += (update.get("content") or {}).get("text") or ""
+        elif kind == "agent_thought_chunk":
+            if self.text:
+                self._flush()
+            text = (update.get("content") or {}).get("text") or ""
+            if text:
+                self.spec.emit({"event": "progress", "source": "thinking"})
+                self.thought += text
         elif kind in ("tool_call", "tool_call_update"):
             self._flush()
             self._tool_call(update)
@@ -420,6 +436,9 @@ class CursorSession:
             self.spec.trace.tool_call(call_id, _label(call), arguments)
 
     def _flush(self) -> None:
+        if self.thought:
+            self.spec.trace.thinking(self.thought, None)
+            self.thought = ""
         if self.text.strip():
             transcript(self.spec.log, "text", text=self.text)
             self.spec.trace.text(self.text)

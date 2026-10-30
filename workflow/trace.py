@@ -26,9 +26,10 @@ It is in the top-level run folder, and sub-workflows write to it too:
     turn_end       the agent's turn ends           how it ended, and what it used: the tokens, the
                                                    cost, and the parts of the tokens (harnesses.Usage)
     attempt_end    the attempt ends                all of `attempt`, the session id, start, end,
-                                                   how it ended and what it used, as in turn_end.
+                                                   outcome, usage, duration_basis, awake_s, asleep_s.
                                                    For a command: its text, env, exit code, and
                                                    the files that hold its stdout and stderr
+    host_slept     detected sleep exceeds 60 s      started, ended, and asleep_s
     job_end        the job ends                    its output or error (or that it waits for a person)
     run_stopped    the process stops driving it    the run's status, and its output once it succeeds
 
@@ -37,6 +38,7 @@ Every record has `time`, `kind` and `id`. A record about a node also has `node`,
 `attempt` and `turn`. Ids nest, and `parent` names the id that holds a record:
 
     run                        the run
+    run.sleep.<monotonic seconds>  a host_slept record, with parent run
     review#2                   pass 2 of review (also its render, routes and job records)
     build#1[3]                 item 3 of build's pass 1
     review#2.a1                attempt 1 of that pass
@@ -45,6 +47,11 @@ Every record has `time`, `kind` and `id`. A record about a node also has `node`,
                                .k1 a block of thinking, .r1 a request)
     end                        the end outputs
     build#1[3].a1/implement#2  a pass in the sub-workflow that attempt 1 of build[3] runs
+
+The host_slept fields give an estimated wall clock span and its sleep seconds.
+The run writes an event with the same fields to events.jsonl.
+The sleep clock includes sleep, so wall clock steps do not change the measured sleep.
+For attempt_end, duration_basis is monotonic, awake_s gives monotonic seconds, and asleep_s sums detected sleep during the attempt.
 
 A value longer than CAP characters goes to blobs/<sha256>.txt (text) or .json
 (any other value). The trace writes that file once, however often the value
@@ -68,6 +75,7 @@ Writing the trace never stops a run. When wf can't write it, wf says so once,
 and the run continues.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -76,8 +84,9 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +96,7 @@ from .schemas import EACH
 FILE = "trace.jsonl"
 BLOBS = "blobs"
 CAP = 1000  # characters a value may have in a record. A longer one goes to blobs/
+SLEEP_POLL = 30  # seconds between clock samples while the graph runs
 PREVIEW = 80  # characters of a blob shown in its reference
 HIDDEN = "[secret]"
 _LONGEST = 32  # steps of a secret path. A longer one, from lists that read each other's results, is cut: that hides more
@@ -105,14 +115,26 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
+def _continuous_clock() -> Callable[[], float]:
+    if sys.platform == "darwin":  # there it is mach_continuous_time, which counts sleep
+        return lambda: time.clock_gettime(time.CLOCK_MONOTONIC_RAW)
+    if hasattr(time, "CLOCK_BOOTTIME"):
+        return lambda: time.clock_gettime(time.CLOCK_BOOTTIME)
+    return time.monotonic
+
+
 class Trace:
     """A run's trace.jsonl and blobs/. One per process that drives the run."""
 
-    def __init__(self, folder: Path):
+    def __init__(self, folder: Path, on_sleep: Callable[[dict], None] | None = None):
         self.folder = Path(folder)
         self.hidden: set[str] = set()  # secret text found so far
         self._lock = threading.Lock()
         self._failed = False
+        self._continuous = _continuous_clock()
+        self._sample = (time.time(), time.monotonic(), self._continuous())
+        self.asleep_s = 0.0
+        self.on_sleep = on_sleep
 
     def hide(self, value: Any) -> None:
         """Remove the text of `value`, and of everything in it, from every later record."""
@@ -126,19 +148,66 @@ class Trace:
             self.hidden.add(str(value))
 
     def write(self, record: dict) -> None:
+        with self._lock:
+            self._check_clock()
+            self._safely_append(record)
+
+    def _safely_append(self, record: dict) -> None:
         try:
-            with self._lock:
-                ready = self._ready(record)
-                try:
-                    line = (json.dumps(ready, ensure_ascii=False, default=str) + "\n").encode("utf-8")
-                except UnicodeEncodeError:  # text with a lone surrogate, which UTF-8 can't hold: escape all of it
-                    line = (json.dumps(ready, default=str) + "\n").encode("ascii")
-                with (self.folder / FILE).open("ab") as file:
-                    file.write(line)
+            self._append(record)
         except (OSError, ValueError, TypeError) as error:
-            if not self._failed:
-                self._failed = True
-                print(f"wf: can't write the run's trace ({error}). The run continues without it.", file=sys.stderr)
+            self._write_error(error)
+
+    def _append(self, record: dict) -> None:
+        ready = self._ready(record)
+        try:
+            line = (json.dumps(ready, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+        except UnicodeEncodeError:  # text with a lone surrogate, which UTF-8 can't hold: escape all of it
+            line = (json.dumps(ready, default=str) + "\n").encode("ascii")
+        with (self.folder / FILE).open("ab") as file:
+            file.write(line)
+
+    def _write_error(self, error: Exception) -> None:
+        if not self._failed:
+            self._failed = True
+            print(f"wf: can't write the run's trace ({error}). The run continues without it.", file=sys.stderr)
+
+    def check_clock(self) -> None:
+        with self._lock:
+            self._check_clock()
+
+    def _check_clock(self) -> None:
+        current = (time.time(), time.monotonic(), self._continuous())
+        awake = current[1] - self._sample[1]
+        slept = current[2] - self._sample[2] - awake
+        self._sample = current
+        if slept > 60:
+            self.asleep_s += slept
+            end = datetime.fromtimestamp(current[0]).astimezone()
+            event = {"started": (end - timedelta(seconds=slept)).isoformat(timespec="milliseconds"),
+                     "ended": end.isoformat(timespec="milliseconds"), "asleep_s": round(slept, 3)}
+            self._safely_append({"kind": "host_slept", "id": f"run.sleep.{current[1]}", "parent": "run", **event})
+            if self.on_sleep is not None:
+                try:
+                    self.on_sleep({"event": "host_slept", **event})
+                except (OSError, ValueError, TypeError) as error:
+                    print(f"wf: can't add the host_slept event to the run's events ({error}).", file=sys.stderr)
+
+    @asynccontextmanager
+    async def watching(self):
+        async def poll():
+            while True:
+                await asyncio.sleep(SLEEP_POLL)
+                self.check_clock()
+
+        task = asyncio.create_task(poll())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            self.check_clock()
 
     def _ready(self, record: dict) -> dict:
         secrets = sorted(self.hidden | _everywhere, key=len, reverse=True)
@@ -544,10 +613,13 @@ class Attempt:
         self.id = f"{self.parent}.a{number}"
         self.place = {**place(job), "attempt": number}
         self.facts = {**({"harness": harness} if harness else {}), **facts}
+        scope.trace.check_clock()
+        self._asleep_start = scope.trace.asleep_s
         self.started, self._clock = _now(), time.monotonic()
         self._turn = 0
         self._calls: dict[str, str] = {}  # the harness's call id -> the trace's
         self._counts: Counter = Counter()
+        self.progress = None
 
     def begin(self, **facts) -> None:
         """The attempt starts, with these facts (harness, model, ...), which its end repeats."""
@@ -556,9 +628,20 @@ class Attempt:
 
     def end(self, outcome: str, error: str | None = None) -> None:
         """outcome: succeeded, failed, timed_out, unavailable, limit, waiting or cancelled."""
+        self.scope.trace.check_clock()
+        ended = _now()
+        awake = round(time.monotonic() - self._clock, 3)
+        self.facts.update(duration_basis="monotonic", awake_s=awake,
+                          asleep_s=round(self.scope.trace.asleep_s - self._asleep_start, 3))
+        if self.progress is not None:
+            wall = (datetime.fromisoformat(ended) - datetime.fromisoformat(self.started)).total_seconds()
+            self.facts.update(self.progress.finish(wall))
         self.scope.write("attempt_end", self.id, self.parent, **self.place, **self.facts, started=self.started,
-                         ended=_now(), duration_s=round(time.monotonic() - self._clock, 1), outcome=outcome,
+                         ended=ended, duration_s=round(awake, 1), outcome=outcome,
                          **({"error": error} if error else {}))
+
+    def signal(self, kind: str, **data) -> None:
+        self.scope.write(kind, self.id, self.parent, **self.place, **data)
 
     async def turn(self, number: int, sends: str, text: str, sending) -> Any:
         """Await `sending`, the harness's turn with `text`, between a turn and a turn_end record.
