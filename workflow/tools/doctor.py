@@ -19,7 +19,7 @@ from typing import Literal
 
 from ..spec import ToolUse
 from . import keychain, relay
-from .catalog import Tool
+from .catalog import SLACK_MCP_DISABLED, Tool
 from .signin import NotSetUp, Unreachable
 
 
@@ -66,6 +66,9 @@ async def check(tool: Tool) -> Report:
     except keychain.Unavailable as error:
         return report.failed(str(error), f"unlock your login Keychain, then {again}")
     except Unreachable as error:
+        if tool.name == "slack" and SLACK_MCP_DISABLED.lower() in str(error).lower():
+            return report.failed(str(error), "turn on Model Context Protocol under Agents & AI Apps. "
+                                 f"Reinstall the app. Then {again}")
         return report.failed(str(error), f"check your network connection, then {again}")
     if is_error:
         said = " ".join(" ".join(block.get("text", "") for block in content).split())

@@ -31,7 +31,7 @@ from mcp.types import Implementation
 
 from .. import trace
 from . import keychain, signin
-from .catalog import TOOLS
+from .catalog import SLACK_MCP_DISABLED, TOOLS
 from .signin import NotSetUp, Unreachable
 
 CALL_TIMEOUT = 120  # seconds for one call to a tool's server
@@ -189,6 +189,10 @@ class _Bearer(httpx2.Auth):
             response = yield request
         if response.status_code >= 400 and request.method == "POST":  # a GET is only the optional event stream
             self.status = response.status_code
+            if self.tool.name == "slack" and self.status == 400:
+                await response.aread()
+                if SLACK_MCP_DISABLED.lower() in response.text.lower():
+                    self.problem = Unreachable(f"Slack refused MCP access (HTTP 400): {SLACK_MCP_DISABLED}")
 
     async def _token(self, refused: str | None = None) -> str:
         try:

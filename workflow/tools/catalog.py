@@ -43,14 +43,18 @@ class Tool:
         return f"{how}, or a pasted {self.token.split(' (')[0]}" if self.token else how
 
 
+SLACK_MCP_DISABLED = "App is not enabled for Slack MCP server access"
+
 SLACK_HELP = """\
 Slack's MCP server only takes OAuth clients that are Slack apps, so wf needs one (once):
-1. At https://api.slack.com/apps, create a new app from scratch in your workspace.
-2. Under Agents, turn on "Slack Model Context Protocol (MCP) Server".
+1. At https://api.slack.com/apps, select "Create new app".
+   Select "Blank app" for your workspace.
+2. Under Agents & AI Apps, turn on "Model Context Protocol".
 3. Under OAuth & Permissions, add the redirect URL {redirect}
    and these user token scopes: {scopes}
    (`--write` asks for the write scopes too, so the app needs them as well then)
-4. Under Basic Information, copy the Client ID and the Client Secret."""
+4. Install the app to your workspace.
+5. Under Basic Information, copy the Client ID and the Client Secret."""
 
 GMAIL_HELP = """\
 Google's Gmail MCP server is a Developer Preview, and it takes OAuth clients that you make (once):
@@ -122,7 +126,7 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in [
         token="Notion MCP token (Business and Enterprise plans: a workspace owner makes one in Notion's Developer portal)",
         probe=("notion-get-self", {}),
         reads=frozenset({
-            "notion-search", "notion-ai-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-teams",
+            "notion-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-teams",
             "notion-get-groups", "notion-get-comments", "notion-get-tool-access", "notion-get-async-task",
             "notion-list-private-pages", "notion-list-shared-pages", "notion-list-favorite-pages",
             "notion-list-recent-pages", "notion-list-page-backlinks", "notion-query-data-sources",
