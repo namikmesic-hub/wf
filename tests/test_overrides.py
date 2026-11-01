@@ -6,6 +6,7 @@ log. The tests that check whether a harness can run here use fake harnesses (fak
 """
 
 import json
+import os
 import shutil
 import signal
 import subprocess
@@ -17,7 +18,7 @@ import pytest
 import yaml
 
 from fakes import Fake, ends, submit
-from workflow import cli, harnesses, overrides, runner, runs, workspaces
+from workflow import cli, harnesses, overrides, runner, runs, spec, workspaces
 
 
 @pytest.fixture
@@ -603,6 +604,25 @@ def test_a_node_override_checks_only_the_items_that_run_again(repo, monkeypatch)
     assert [spec.model for spec in cursor.specs] == ["grok"]
 
 
+def test_a_node_override_skips_completed_items_in_pending_writes(repo):
+    workflow = spec.load(write("fan.yaml", TAKEN))
+    values = {
+        "active": {"review": {
+            "pass": 2, "items": [{"model": "opus"}, {"model": "grok"}], "outputs": {},
+            "vars": {"workspace": {"review": None}},
+        }},
+        "inbox": [
+            {"node": "review", "pass_no": 2, "index": 0, "ok": True},
+            {"node": "review", "pass_no": 1, "index": 1, "ok": True},
+            {"node": "other", "pass_no": 2, "index": 1, "ok": True},
+            {"node": "review", "pass_no": 2, "index": 1, "ok": False},
+        ],
+    }
+    checked = overrides.check({"review": {"harness": "cursor"}}, [workflow], values)
+    assert checked.problems == []
+    assert checked.models == {"review": {"grok"}}
+
+
 TAKEN = """
 version: 1
 name: fan
@@ -644,6 +664,27 @@ def test_an_item_that_failed_before_it_had_a_workspace_has_its_model_checked(rep
     git("branch", "-D", "fm/taken")
     assert cli.main(["retry", only_run().name, "--harness", "review[1]=cursor", "--model", "review[1]=grok"]) == 0
     assert [spec.model for spec in cursor.specs] == ["grok"]
+
+
+@pytest.mark.parametrize("condition", ["workspace.review is defined", "workspace.review"])
+def test_a_model_that_needs_an_absent_workspace_cannot_change_the_run(repo, monkeypatch, capsys, condition):
+    claude = Fake("claude-code", submit({"summary": "a"}))
+    cursor = Fake("cursor", submit({"summary": "b"}), models={"grok"})
+    for fake in (claude, cursor):
+        monkeypatch.setitem(harnesses.FACTORIES, fake.name, fake.factory)
+    model = "{{ 'gone' if " + condition + " else item.model }}"
+    write("fan.yaml", TAKEN.replace('cursor: {model: "{{ item.model }}"}', f'cursor: {{model: "{model}"}}'))
+    git("branch", "fm/taken")
+    assert cli.main(["run", "fan.yaml"]) == 1
+    git("branch", "-D", "fm/taken")
+    before = record()
+    capsys.readouterr()
+    assert cli.main(["retry", only_run().name, "--harness", "review[1]=cursor"]) == 1
+    assert "has no workspace yet" in capsys.readouterr().err
+    assert record() == before
+    assert cursor.opened == 0
+    assert cli.main(["retry", only_run().name, "--harness", "review[1]=cursor", "--model", "review[1]=grok"]) == 0
+    assert [session.model for session in cursor.specs] == ["grok"]
 
 
 def test_a_setting_that_reads_a_workspace_the_item_doesnt_have_yet_must_be_given(repo, no_real_harness, capsys):
@@ -725,6 +766,36 @@ def test_a_check_folder_that_stays_changes_nothing(repo, monkeypatch, tmp_path_f
     capsys.readouterr()
     assert cli.main(["retry", run_id, "--harness", "plan=codex"]) == 1
     (folder,) = temp.iterdir()
+    assert f"wf can't remove {folder}, which the harness check made: Permission denied" in capsys.readouterr().err
+    assert record() == before
+    assert codex.opened == 1
+
+
+def test_a_check_folder_that_cannot_be_inspected_changes_nothing(repo, monkeypatch, tmp_path_factory, capsys):
+    codex = Fake("codex", models={"gpt-6"})
+    run_id = failed_run(monkeypatch, codex)
+    before = record()
+    temp = tmp_path_factory.mktemp("temp")
+    removed, lstat = shutil.rmtree, os.lstat
+
+    def stuck(path, *args, **options):
+        if Path(path).parent == temp:
+            raise PermissionError(13, "Permission denied")
+        return removed(path, *args, **options)
+
+    def denied(path, *args, **options):
+        if Path(path).parent == temp:
+            raise PermissionError(13, "Permission denied")
+        return lstat(path, *args, **options)
+
+    capsys.readouterr()
+    with monkeypatch.context() as patch:
+        patch.setattr(tempfile, "tempdir", str(temp))
+        patch.setattr(shutil, "rmtree", stuck)
+        patch.setattr(os, "lstat", denied)
+        assert cli.main(["retry", run_id, "--harness", "plan=codex"]) == 1
+    (folder,) = temp.iterdir()
+    assert folder.is_dir()
     assert f"wf can't remove {folder}, which the harness check made: Permission denied" in capsys.readouterr().err
     assert record() == before
     assert codex.opened == 1

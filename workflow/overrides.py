@@ -51,7 +51,6 @@ attempt, and why.
 """
 
 import json
-import os
 import re
 import shutil
 import tempfile
@@ -160,16 +159,18 @@ def _rendered(workflow: Workflow, node_id: str, harness: str, name: str, variabl
 
 
 def job_variables(values: dict, node_id: str, key: str) -> dict | None:
-    """The template variables of a job of the node's pass in progress, as nodes.run_job makes them. The key is
-    "-", or an item's index. A job with no workspace yet, as when making it failed, gets none of its own, so a
-    template that reads it can't render. None when the node has no pass in progress."""
+    """The template variables for a job in the active pass, as nodes.run_job makes them.
+    The key is "-" or an item's index.
+    An absent workspace stays None, so a setting check can detect a read of it.
+    Return None when the node has no active pass.
+    """
     active = (values.get("active") or {}).get(node_id)
     if active is None:
         return None
     own = ((active.get("failed") or {}).get(key) or {}).get("workspace") or (active.get("workspaces") or {}).get(key)
     workspace = {name: value for name, value in active["vars"]["workspace"].items() if name != node_id}
     item = {} if key == "-" else {"item": active["items"][int(key)], "index": int(key)}
-    return {**active["vars"], **item, "workspace": workspace if own is None else {**workspace, node_id: own}}
+    return {**active["vars"], **item, "workspace": {**workspace, node_id: own}}
 
 
 # ---------- checks ----------
@@ -274,7 +275,11 @@ def _jobs(values: dict, node_id: str, index: int | None) -> dict[str, dict]:
         keys = [str(index)]
     else:
         keys = ["-"] if active.get("items") is None else [str(i) for i in range(len(active["items"]))]
-    return {key: job_variables(values, node_id, key) for key in keys if key not in active["outputs"]}
+    done = set(active["outputs"])
+    done.update("-" if result["index"] is None else str(result["index"])
+                for result in values.get("inbox", [])
+                if result["ok"] and result["node"] == node_id and result["pass_no"] == active["pass"])
+    return {key: job_variables(values, node_id, key) for key in keys if key not in done}
 
 
 def _harness(key: str, node_id: str, index: int | None, settings: dict[str, str], workflow: Workflow,
@@ -337,6 +342,14 @@ def _models(key: str, node_id: str, override: dict, workflow: Workflow,
     of them can't run. A job still to run in the pass in progress renders its settings as its next attempt
     will. Else wf takes the override's model, or the workflow's model when it isn't a template."""
     harness = override["harness"]
+
+    def render(field, source, variables, call=templates.render, **facts):
+        value, reads = templates.watched(call, source, variables)
+        if variables["workspace"].get(node_id) is None and any(
+                read.path == ("workspace",) or read.path[:2] == ("workspace", node_id) for read in reads):
+            raise templates.TemplateError(f"{field}: the template reads `{node_id}` before it has a workspace")
+        return value
+
     if jobs:
         models = set()
         for job, variables in jobs.items():
@@ -344,11 +357,11 @@ def _models(key: str, node_id: str, override: dict, workflow: Workflow,
                 if before_start:
                     model = _start_model(workflow, node_id, override, variables)
                 else:
-                    model, _ = job_setting(workflow, node_id, harness, override, variables)
+                    model, _ = job_setting(workflow, node_id, harness, override, variables, render)
             except SettingError as error:
                 return None, f"{key}: {error}"
             except templates.TemplateError as error:
-                if node_id in variables["workspace"]:
+                if variables["workspace"].get(node_id) is not None:
                     return None, f"{key}: {error}"
                 name = f"`{node_id}`" if job == "-" else f"item {job} of `{node_id}`"
                 return None, (f"{key}: {error}. {name} has no workspace yet, so a template can't read it: "
@@ -416,8 +429,13 @@ def _remove(folder: Path) -> str | None:
     try:
         shutil.rmtree(folder)
     except OSError as error:
-        if os.path.lexists(folder):
-            return f"wf can't remove {folder}, which the harness check made: {error.strerror or error}"
+        try:
+            folder.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            pass
+        return f"wf can't remove {folder}, which the harness check made: {error.strerror or error}"
     return None
 
 
