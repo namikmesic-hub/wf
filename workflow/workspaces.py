@@ -43,9 +43,9 @@ When a run succeeds its worktrees go and their branches stay, and `wf continue` 
 
 An agent with `access: review` works in a copy of its workspace (review_copy), which nodes.py makes
 for each attempt in ~/.wf/temp/<run-id>/review-copies/ and removes when the job ends (discard_copy).
-state() records the reviewed worktree when the job's first attempt starts, with its objects in
-~/.wf/temp/<run-id>/review-objects/, and changed_since() says before and after each attempt whether
-the worktree or its branch changed. Only you can open those two folders (review_folders). The copy
+state() records the reviewed worktree when the job's first attempt starts, with an index and objects of its own
+in ~/.wf/temp/<run-id>/review-objects/, and changed_since() says before and after each attempt whether
+the worktree, its index or its branch changed. Only you can open those two folders (review_folders). The copy
 isn't a clone or a linked worktree: a clone makes the worktree its `origin` remote, and a linked
 worktree shares the refs and the config of the repository.
 
@@ -73,6 +73,7 @@ GRACE = 5  # seconds a stopped git gets to remove its temporary and lock files b
 NO_PUSH = "wf-review-copy-cannot-push::"  # a transport that git has no program for, where a review copy pushes
 PRE_PUSH = "#!/bin/sh\necho 'wf-review-copy-cannot-push: this is a review copy, and its pushes fail' >&2\nexit 1\n"
 LISTED = 10  # changed files that the review check names
+AS_IS = "* -text -filter -ident -working-tree-encoding\n"  # gitattributes for git to read and write each file's bytes
 
 
 class WorkspaceError(Exception):
@@ -81,6 +82,10 @@ class WorkspaceError(Exception):
 
 class _TimedOut(WorkspaceError):
     pass
+
+
+class NotReviewable(WorkspaceError):
+    """The workspace of an `access: review` node isn't in a git worktree with a commit. A retry finds it the same."""
 
 
 class _Stopped(WorkspaceError):
@@ -308,7 +313,7 @@ def temp_root(run_id: str) -> Path:
 
 
 def review_folders(run_id: str, parts: list[str]) -> tuple[Path, Path]:
-    """Where an `access: review` job's copy goes, and the objects of its check: review-copies/<parts> and
+    """Where an `access: review` job's copy goes, and the index and objects of its check: review-copies/<parts> and
     review-objects/<parts> in temp_root(). Both hold the untracked files of the reviewed worktree, which can be
     secrets, so only you can open review-copies and review-objects."""
     found = []
@@ -386,24 +391,24 @@ def uncommitted(repo: str | Path) -> list[Path]:
     return [Path(top) / entry[3:] for entry in out.split("\0") if len(entry) > 3] if top else []
 
 
-def review_copy(path: str | Path, copy: Path, tree: str, objects: Path) -> Path:
+def review_copy(path: str | Path, copy: Path, tree: str, check: Path) -> Path:
     """Make `copy` a copy of the git worktree that holds `path`, for an agent with `access: review`, and
     return the folder in it that matches `path`. A copy that is there already goes first. `tree` is the
-    worktree's files as state() found them, and `objects` the object folder that state() wrote to.
+    worktree's files as state() found them, and `check` the folder that state() kept its objects in.
 
     The copy is a repository of its own that borrows the worktree's objects (objects/info/alternates).
-    It has the worktree's branches, remote-tracking branches and tags, its remotes, its filters and the
-    config of its branch, and the same branch or commit checked out. The copy of a shallow clone has its
-    list of shallow commits, so that its history ends at the same commits. git then writes the files of
-    `tree`, so the copy has each change that isn't committed, and each untracked file, but not the files that git
-    ignores, such as a virtual environment. Only the objects are shared: git writes each file again.
-    Git LFS reads the worktree's LFS folder while git writes the files, and then uses a folder in the copy.
-    Most pushes fail there (NO_PUSH, PRE_PUSH). What the agent commits, fetches or configures stays in the copy."""
+    It has the worktree's branches, remote-tracking branches and tags, its remotes, its filters, its sparse
+    checkout and the config of its branch, and the same branch or commit checked out. The copy of a shallow clone
+    has its list of shallow commits, so that its history ends at the same commits. git then writes the bytes of
+    each file of `tree`, so the copy has each change that isn't committed, and each untracked file, but not the files
+    that git ignores, such as a virtual environment. Only the objects are shared: git writes each file again.
+    Git LFS uses a folder in the copy. Most pushes fail there (NO_PUSH, PRE_PUSH). What the agent commits,
+    fetches or configures stays in the copy."""
     top = _top(path)
     discard_copy(copy)
     copy.mkdir(parents=True)
     _git(copy, "init", "--quiet", f"--object-format={_git(top, 'rev-parse', '--show-object-format')}")
-    alternates = [_git(top, "rev-parse", "--path-format=absolute", "--git-path", "objects"), str(objects)]
+    alternates = [_git(top, "rev-parse", "--path-format=absolute", "--git-path", "objects"), str(check / "objects")]
     (copy / ".git" / "objects" / "info" / "alternates").write_text("\n".join(alternates) + "\n", encoding="utf-8")
     shallow = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-path", "shallow"))
     if shallow.is_file():  # before the fetch: without the list, git looks for the parents of the shallow commits
@@ -411,21 +416,25 @@ def review_copy(path: str | Path, copy: Path, tree: str, objects: Path) -> Path:
     _git(copy, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--update-head-ok", "--no-write-fetch-head",
          str(top), "+refs/heads/*:refs/heads/*", "+refs/remotes/*:refs/remotes/*", "+refs/tags/*:refs/tags/*")
     branch = _git(top, "symbolic-ref", "--quiet", "HEAD", check=False)
+    if branch:
+        _git(copy, "symbolic-ref", "HEAD", branch)
+    else:
+        _git(copy, "update-ref", "--no-deref", "HEAD", head(top))
+    _git(copy, "--attr-source", _as_is(copy), "read-tree", "--reset", "-u", tree)  # before the config: all files
     for remote in _copy_config(top, copy, branch):
         _git(copy, "config", f"remote.{remote}.pushurl", NO_PUSH)
     _git(copy, "config", f"url.{NO_PUSH}.pushInsteadOf", "")  # a push to a URL goes there too, unless a longer rule wins
+    _git(copy, "config", "lfs.storage", str(copy / ".git" / "lfs"))  # also when your own git config sets one
+    sparse = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-path", "info/sparse-checkout"))
+    if sparse.is_file():
+        (copy / ".git" / "info").mkdir(exist_ok=True)
+        shutil.copyfile(sparse, copy / ".git" / "info" / "sparse-checkout")
     hooks = copy / ".git" / "wf-hooks"
     hooks.mkdir()
     (hooks / "pre-push").write_text(PRE_PUSH, encoding="utf-8")
     (hooks / "pre-push").chmod(0o755)
     _git(copy, "config", "core.hooksPath", str(hooks))
-    if branch:
-        _git(copy, "symbolic-ref", "HEAD", branch)
-    else:
-        _git(copy, "update-ref", "--no-deref", "HEAD", head(top))
-    shared = ("-c", f"lfs.storage={storage}") if (storage := _lfs_storage(top)) else ()  # only while the runner writes the files
-    _git(copy, *shared, "read-tree", "--reset", "-u", tree)
-    _git(copy, *shared, "reset", "--quiet")  # the index of the commit: the changes show as not staged, as untracked files
+    _git(copy, "reset", "--quiet")  # the index of the commit, with the sparse checkout: the changes show as not staged
     folder = copy / Path(path).resolve().relative_to(top)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
@@ -453,24 +462,29 @@ def discard_copy(copy: Path) -> None:
         raise WorkspaceError(f"can't remove the review copy {copy}")
 
 
-def state(path: str | Path, objects: Path) -> dict:
+def state(path: str | Path, check: Path, fresh: bool = False) -> dict:
     """What the review check compares in a git worktree: its branch (None when HEAD is detached), its
-    commit, and a tree of its files. `path` is in the worktree. The tree has each file as it is, committed
-    or not, but not the files that git ignores or can't read. git builds the tree in an index of its own,
-    so the worktree's index doesn't change. The objects that it writes go to `objects`, not to the
-    worktree's repository."""
+    commit, a tree of its files, and a hash of its index. `path` is in the worktree. The tree has the bytes of
+    each file, committed or not, with no filter or line end rule of the repository, but not the files that git
+    ignores or can't read. The rules of $GIT_DIR/info/attributes still apply, except filters. Needs git 2.41.
+
+    git builds the tree in an index of its own, in `check`, which keeps the file data of each check, so that git
+    reads only the files that changed. `fresh` starts that index again from the commit, with the file data
+    that still holds. The objects that git writes go to `check`, not to the worktree's repository. Raises
+    WorkspaceError when git fails, but not for a file that git can't read."""
     top = _top(path)
-    index = _git(top, "rev-parse", "--path-format=absolute", "--git-path", "index")
+    objects = check / "objects"
     objects.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="wf-review-") as folder:
-        env = {"GIT_INDEX_FILE": os.path.join(folder, "index"), **_apart(top, objects)}
-        with contextlib.suppress(FileNotFoundError):
-            shutil.copyfile(index, env["GIT_INDEX_FILE"])  # with its file data, git reads only the files that changed
-        _unflag(top, env)
-        _git(top, "add", "--all", "--ignore-errors", env=env, check=False)
-        tree = _git(top, "write-tree", env=env)
+    index = check / "index"
+    env = {"GIT_INDEX_FILE": str(index), **_apart(top, objects)}
+    raw = ["--attr-source", _as_is(top, env), "-c", "core.sparseCheckout=false", *_no_filters(top)]
+    if fresh or not index.exists():
+        _git(top, "read-tree", *(["-m"] if index.exists() else []), "HEAD", env=env)  # with HEAD's ignored files
+    _git(top, *raw, "add", "--all", "--ignore-errors", env=env, codes=(0, 1))  # 1: some files git can't read
+    # write-tree reads again each file that changed in the same second as the index, so it gets `raw` too
+    staged = _git(top, "ls-files", "--stage", "-z", strip=False)
     return {"branch": _git(top, "symbolic-ref", "--quiet", "HEAD", check=False) or None, "commit": head(top),
-            "tree": tree}
+            "tree": _git(top, *raw, "write-tree", env=env), "staged": hashlib.sha256(staged.encode()).hexdigest()}
 
 
 def _apart(path: str | Path, objects: Path) -> dict:
@@ -479,17 +493,26 @@ def _apart(path: str | Path, objects: Path) -> dict:
     return {"GIT_OBJECT_DIRECTORY": str(objects), "GIT_ALTERNATE_OBJECT_DIRECTORIES": stored}
 
 
-def _unflag(top: Path, env: dict) -> None:
-    """Clear the assume-unchanged and skip-worktree flags in an index, so that `git add` reads those files too."""
-    listed = _git(top, "-c", "core.quotePath=false", "ls-files", "-z", "-v", env=env, strip=False).split("\0")
-    flagged = [entry[2:] for entry in listed if entry[:1] == "S" or entry[:1].islower()]  # "s": both flags
-    for at in range(0, len(flagged), 500):
-        _git(top, "update-index", "--no-assume-unchanged", "--no-skip-worktree", "--", *flagged[at:at + 500], env=env)
+def _as_is(cwd: str | Path, env: dict | None = None) -> str:
+    """A tree with only a .gitattributes file of AS_IS, for `git --attr-source`: then git hashes and writes each file
+    as its bytes are. It replaces each .gitattributes file of the worktree. An older git than 2.41 fails at once."""
+    blob = _git(cwd, "hash-object", "-w", "--stdin", env=env, input=AS_IS)
+    return _git(cwd, "mktree", env=env, input=f"100644 blob {blob}\t.gitattributes\n")
 
 
-def changed_since(path: str | Path, before: dict, objects: Path) -> list[str]:
+def _no_filters(top: Path) -> list[str]:
+    """Options for git that switch off each filter that a git config names, also for a path that
+    $GIT_DIR/info/attributes gives one. That file wins over `--attr-source`."""
+    found = _git(top, "config", "--includes", "--null", "--name-only", "--get-regexp", r"^filter\.", check=False, strip=False)
+    names = {key[len("filter."):].rpartition(".")[0] for key in filter(None, found.split("\0"))}
+    return [option for name in sorted(names) for variable in ("clean", "smudge", "process")
+            for option in ("-c", f"filter.{name}.{variable}=")] + \
+           [option for name in sorted(names) for option in ("-c", f"filter.{name}.required=false")]
+
+
+def changed_since(path: str | Path, before: dict, check: Path) -> list[str]:
     """How the worktree that holds `path` changed since state() gave `before`, in words. [] when it didn't."""
-    after, said = state(path, objects), []
+    after, said = state(path, check), []
     if after["branch"] != before["branch"]:
         said.append(f"it has {_checked_out(after)} checked out now, not {_checked_out(before)}")
     elif after["commit"] != before["commit"]:
@@ -497,10 +520,12 @@ def changed_since(path: str | Path, before: dict, objects: Path) -> list[str]:
         said.append(f"{moved} moved from {before['commit'][:12]} to {after['commit'][:12]}")
     if after["tree"] != before["tree"]:
         names = _git(path, "diff-tree", "-r", "-z", "--name-only", "--no-renames", before["tree"], after["tree"],
-                     check=False, strip=False, env=_apart(path, objects)).split("\0")
+                     check=False, strip=False, env=_apart(path, check / "objects")).split("\0")
         names = [name for name in names if name]
         more = f" and {len(names) - LISTED} more" if len(names) > LISTED else ""
         said.append(f"files changed: {', '.join(names[:LISTED])}{more}" if names else "its files changed")
+    if after["staged"] != before.get("staged", after["staged"]):  # a record from before wf kept `staged` has none
+        said.append("what is staged in its index changed")
     return said
 
 
@@ -510,40 +535,39 @@ def _checked_out(found: dict) -> str:
 
 
 def _top(path: str | Path) -> Path:
-    """The top folder of the git worktree that holds `path`. Raises WorkspaceError when there's none,
+    """The top folder of the git worktree that holds `path`. Raises NotReviewable when there's none,
     or when it has no commit yet: `access: review` needs one."""
     top = _git(path, "rev-parse", "--show-toplevel", check=False)
     if not top or not _git(top, "rev-parse", "--verify", "--quiet", "HEAD", check=False):
-        raise WorkspaceError(f"`access: review` works in a copy of a git worktree with a commit, and {path} isn't in one")
+        raise NotReviewable(f"`access: review` works in a copy of a git worktree with a commit, and {path} isn't in one")
     return Path(top).resolve()
 
 
 def _copy_config(top: Path, copy: Path, branch: str) -> list[str]:
     """Copy the worktree's remotes, without their push URLs, its filters (such as Git LFS), its line end
-    settings and the config of its branch into the copy, also those that a file that the config includes sets.
-    Then `git fetch` and `gh` work there as in the worktree, and git writes each file as it does there. Returns
-    the remotes' names."""
-    found = _git(top, "config", "--local", "--includes", "--null", "--get-regexp",
-                 r"^(remote|branch|filter|lfs)\.|^core\.(autocrlf|eol)$", check=False, strip=False)
+    settings, its sparse checkout and the config of its branch into the copy. They come from the config of the
+    repository and of the worktree ($GIT_DIR/config.worktree), also from a file that one of them includes.
+    Then `git fetch` and `gh` work there as in the worktree, and git reads each file as it does there.
+    Returns the remotes' names."""
+    scopes = ["--local"]
+    if _git(top, "config", "--type=bool", "--get", "extensions.worktreeConfig", check=False) == "true":
+        scopes.append("--worktree")
     remotes = []
-    for entry in filter(None, found.split("\0")):
-        key, _, value = entry.partition("\n") if "\n" in entry else (entry, "", "true")  # a key alone is true
-        section, _, rest = key.partition(".")
-        name, _, variable = rest.rpartition(".")
-        if (section == "branch" and name != branch.removeprefix("refs/heads/")) or variable == "pushurl" \
-                or key == "lfs.storage":  # _lfs_storage gives it, as an absolute path
-            continue
-        if section == "remote" and name and name not in remotes:
-            remotes.append(name)
-        _git(copy, "config", "--add", key, value)
+    for scope in scopes:
+        found = _git(top, "config", scope, "--includes", "--null", "--get-regexp",
+                     r"^(remote|branch|filter|lfs)\.|^core\.(autocrlf|eol|sparsecheckout|sparsecheckoutcone)$|^index\.sparse$",
+                     check=False, strip=False)
+        for entry in filter(None, found.split("\0")):
+            key, _, value = entry.partition("\n") if "\n" in entry else (entry, "", "true")  # a key alone is true
+            section, _, rest = key.partition(".")
+            name, _, variable = rest.rpartition(".")
+            if (section == "branch" and name != branch.removeprefix("refs/heads/")) or variable == "pushurl" \
+                    or key == "lfs.storage":  # the copy keeps its own
+                continue
+            if section == "remote" and name and name not in remotes:
+                remotes.append(name)
+            _git(copy, "config", "--add", key, value)
     return remotes
-
-
-def _lfs_storage(top: Path) -> str | None:
-    """The folder where Git LFS keeps the worktree's files, when there is one, so that the copy can read them."""
-    common = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    folder = common / (_git(top, "config", "--local", "--includes", "--get", "lfs.storage", check=False) or "lfs")
-    return str(folder) if folder.is_dir() else None
 
 
 def branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> list[str]:
@@ -629,15 +653,17 @@ def _exit(signum: int) -> None:
 
 
 def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, timeout: float = 600,
-         env: dict[str, str] | None = None) -> str:
+         env: dict[str, str] | None = None, input: str | None = None, codes: tuple[int, ...] = (0,)) -> str:
+    """git's output. `codes`: the exit codes that aren't a failure. A failure raises WorkspaceError, or with
+    check=False returns ""."""
     stop = _stop.get()
-    process = _start(cwd, args, env, stop)
+    process = _start(cwd, args, env, stop, input is not None)
     try:
         with process:
-            stdout, stderr = _output(process, args, timeout, stop)
+            stdout, stderr = _output(process, args, timeout, stop, input)
     finally:
         _running.discard(process)
-    if process.returncode != 0:
+    if process.returncode not in codes:
         if check:
             raise WorkspaceError(f"git {_what(args)} failed: {stderr.strip() or stdout.strip()}")
         return ""
@@ -645,7 +671,7 @@ def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, ti
 
 
 def _start(cwd: str | Path, args: tuple[str, ...], env: dict[str, str] | None,
-           stop: threading.Event | None) -> subprocess.Popen:
+           stop: threading.Event | None, piped: bool = False) -> subprocess.Popen:
     """git, started and in _running, unless its caller was cancelled or wf is exiting. A session of
     its own: no terminal for a signing program to ask on, and one process group, so stopping git
     stops the signing program too."""
@@ -657,8 +683,8 @@ def _start(cwd: str | Path, args: tuple[str, ...], env: dict[str, str] | None,
                 why = "wf is exiting" if _exiting.is_set() else "its caller was cancelled"
                 raise _Stopped(f"git {_what(args)} wasn't run: {why}")
             try:
-                process = subprocess.Popen(["git", *args], cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE, text=True, start_new_session=True,
+                process = subprocess.Popen(["git", *args], cwd=cwd, stdin=subprocess.PIPE if piped else subprocess.DEVNULL,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
                                            env=git_env(GIT_TERMINAL_PROMPT="0", **(env or {})))
             except OSError as error:
                 raise WorkspaceError(f"can't run git: {error}") from error
@@ -671,15 +697,16 @@ def _start(cwd: str | Path, args: tuple[str, ...], env: dict[str, str] | None,
 
 
 def _output(process: subprocess.Popen, args: tuple[str, ...], timeout: float,
-            stop: threading.Event | None) -> tuple[str, str]:
-    """git's stdout and stderr once it exits. It's stopped if it runs longer than `timeout` seconds,
-    when `stop` is set, and when this thread is interrupted (Ctrl-C)."""
+            stop: threading.Event | None, input: str | None = None) -> tuple[str, str]:
+    """git's stdout and stderr once it exits, after it got `input`. It's stopped if it runs longer than `timeout`
+    seconds, when `stop` is set, and when this thread is interrupted (Ctrl-C)."""
     deadline = time.monotonic() + timeout
     try:
         while True:
             try:  # wake up every 0.1 seconds to look at `stop`
-                return process.communicate(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+                return process.communicate(input, timeout=min(0.1, max(0.0, deadline - time.monotonic())))
             except subprocess.TimeoutExpired:
+                input = None  # communicate() keeps sending what it got first
                 if stop is not None and stop.is_set():
                     raise _Stopped(f"git {_what(args)} was stopped: its caller was cancelled") from None
                 if time.monotonic() >= deadline:
@@ -717,9 +744,10 @@ def _signal(process: subprocess.Popen, signum: int) -> None:
 
 
 def _what(args: tuple[str, ...]) -> str:
-    """The git command for an error message: `commit`, `worktree add`. No `-c name=value` pairs or options."""
+    """The git command for an error message: `commit`, `worktree add`. No `-c name=value` pairs, `--attr-source`
+    trees or options."""
     args = list(args)
-    while len(args) >= 2 and args[0] == "-c":
+    while len(args) >= 2 and args[0] in ("-c", "--attr-source"):
         args = args[2:]
     return " ".join(args[:1] + [arg for arg in args[1:2] if not arg.startswith("-")])
 

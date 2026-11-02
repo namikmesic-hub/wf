@@ -931,14 +931,16 @@ class _Checker:
                     and self.wf.setting(b, "max_parallel") > 1):  # new and temp give each item its own folder
                 self.warn(f"nodes.{b}", "items run in parallel in the same workspace and each edits it; "
                                         "use `workspace: new` or `max_parallel: 1`")
+        commands = [n for n, node in self.nodes.items() if node.kind == "command"]  # a file that one writes also counts
         for b, node in self.nodes.items():  # a review fails when its workspace changes while it runs
             if node.kind != "agent" or self.wf.setting(b, "access") != "review" or (shared := key(b)) is None:
                 continue
-            for a in editors:
+            for a in editors + commands:
                 if key(a) == shared and not self._ordered(a, b):
                     label = "repo" if shared == "repo" else f"`{shared}`"
-                    self.warn(f"nodes.{b}", f"`{a}` could edit the {label} workspace while `{b}` reviews it, and then `{b}` "
-                                            "fails")
+                    verb = "write to" if a in commands else "edit"
+                    self.warn(f"nodes.{b}", f"`{a}` could {verb} the {label} workspace while `{b}` reviews it, and then "
+                                            f"`{b}` fails")
 
     def _ordered(self, a: str, b: str) -> bool:
         """Is there a path from one to the other, so they can't overlap?"""

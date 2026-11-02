@@ -763,9 +763,14 @@ def test_a_review_that_could_run_while_an_agent_edits_its_workspace_warns(tmp_pa
         look: {needs: [start], instruction: x, access: review}
         after: {needs: [fix], instruction: x, access: review}
         own: {needs: [start], instruction: x, access: review, workspace: new}
+        build: {needs: [start], command: make}
     """))
     assert_problems(report, [("warning", "nodes.look", "`fix` could edit the repo workspace while `look` reviews it, and "
-                                                       "then `look` fails")])
+                                                       "then `look` fails"),
+                             ("warning", "nodes.look", "`build` could write to the repo workspace while `look` reviews it, "
+                                                       "and then `look` fails"),
+                             ("warning", "nodes.after", "`build` could write to the repo workspace while `after` reviews it, "
+                                                        "and then `after` fails")])
 
 
 def test_a_review_agent_reading_web_output_warns_as_a_full_one_does(tmp_path):

@@ -115,7 +115,7 @@ On Codex it runs commands, git included, in Codex's read-only sandbox.
 `review` has the tools of `full`, in a new copy of its workspace for each attempt, which the runner removes when the step ends.
 A review step can run the tests and `gh`, the GitHub command-line tool.
 The git config of the copy stops a push from the copy, but not each push (see the spec).
-The step fails when the reviewed worktree or its branch changes while it runs.
+The step fails when the reviewed worktree, its index or its branch changes while it runs.
 It still runs commands as you, so it can use the network and change GitHub with `gh`.
 The tests that it runs are the code under review, and they run as you too.
 
@@ -209,17 +209,17 @@ fails when the code stops doing what the row says.
 | A later pass of the node | The name that the first pass gave stays | `workflow/nodes.py:229` | `tests/test_workspaces.py::test_a_loop_keeps_the_branch_its_first_pass_named` |
 | `wf retry` continues the run, and its worktree is gone | It takes up the branch that `branches.json` records for the node | `workflow/nodes.py:248` | `tests/test_workspaces.py::test_a_retried_run_keeps_the_branch_it_made` |
 | A `for_each` item, or an item of a `for_each` node that runs a sub-workflow, on a later pass | The name renders again; a name that differs from the one its index had fails the item | `workflow/nodes.py:230` | `tests/test_workspaces.py::test_an_item_keeps_its_branch_only_while_its_index_holds_the_same_item`, `tests/test_subworkflows.py::test_a_sub_workflow_item_fails_when_its_index_names_another_branch_on_a_later_pass` |
-| The rendered name is empty, or only spaces | The node fails | `workflow/workspaces.py:128` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
-| The name is `wf`, or under `wf/`, in any case | The node fails | `workflow/workspaces.py:130` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
-| git doesn't allow the name as a branch name | The node fails | `workflow/workspaces.py:132` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| The rendered name is empty, or only spaces | The node fails | `workflow/workspaces.py:133` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| The name is `wf`, or under `wf/`, in any case | The node fails | `workflow/workspaces.py:135` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
+| git doesn't allow the name as a branch name | The node fails | `workflow/workspaces.py:137` | `tests/test_workspaces.py::test_a_branch_name_git_or_wf_would_refuse_fails_the_node` |
 | The fixed text of `branch` is empty or only spaces | `wf validate` error | `workflow/validate.py:813` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
 | The fixed text is `wf`, or starts with `wf/`, in any case | `wf validate` error | `workflow/validate.py:816` | `tests/test_validate.py::test_branch_cannot_be_wf_or_under_it_in_any_case` |
 | The branch exists, and this run didn't make it for this node | The node fails | `workflow/nodes.py:262` | `tests/test_workspaces.py::test_a_branch_that_already_exists_is_refused` |
-| A branch exists that git can't have beside the name: `fix/a` beside `fix/a/b` | The node fails | `workflow/workspaces.py:142` | `tests/test_workspaces.py::test_a_branch_git_cannot_have_beside_an_existing_one_is_refused` |
-| `core.ignorecase` is on, and a branch exists with the name in another case | The node fails | `workflow/workspaces.py:141` | `tests/test_workspaces.py::test_where_git_ignores_case_a_name_in_other_case_is_the_same_branch` |
+| A branch exists that git can't have beside the name: `fix/a` beside `fix/a/b` | The node fails | `workflow/workspaces.py:147` | `tests/test_workspaces.py::test_a_branch_git_cannot_have_beside_an_existing_one_is_refused` |
+| `core.ignorecase` is on, and a branch exists with the name in another case | The node fails | `workflow/workspaces.py:146` | `tests/test_workspaces.py::test_where_git_ignores_case_a_name_in_other_case_is_the_same_branch` |
 | Another node or item of the run has that name, or one that git can't have beside it | The node fails | `workflow/nodes.py:257` | `tests/test_workspaces.py::test_each_item_names_its_own_branch_and_two_items_cannot_share_one` |
 | Two `branch` fields, in a file or the sub-workflows it runs, could name the same branch or one under the other | `wf validate` error | `workflow/validate.py:823` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused`, `tests/test_validate.py::test_two_nodes_that_could_name_the_same_branch_are_refused` |
-| Two `branch` fields differ only in case | `wf validate` error on every machine, also where git doesn't ignore case | `workflow/validate.py:1083` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused` |
+| Two `branch` fields differ only in case | `wf validate` error on every machine, also where git doesn't ignore case | `workflow/validate.py:1085` | `tests/test_validate.py::test_branches_git_cannot_have_side_by_side_are_refused` |
 | A sub-workflow's `branch` reads `{{ start.<input> }}` | `wf validate` compares it with the value that `with` gives | `workflow/validate.py:841` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
 | A `for_each` node's `branch` doesn't use `item` or `index` | `wf validate` error | `workflow/validate.py:809` | `tests/test_validate.py::test_branch_names_a_new_worktree_once_per_item` |
 | A `for_each` workflow node doesn't give `item` or `index` to a `branch` in its sub-workflow | `wf validate` error | `workflow/validate.py:854` | `tests/test_validate.py::test_branches_named_in_a_sub_workflow_are_checked_against_the_parent` |
@@ -262,10 +262,10 @@ An attempt holds both slots until it ends.
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | `max_agents = N` in `~/.wf/config.toml`, or `WF_MAX_AGENTS=N`, which wins | At most N agent attempts hold a slot at once. | `workflow/capacity.py:57` | `test_two_runs_in_separate_processes_share_the_cap` |
-| A `[capacity]` key is set | It caps live sessions of that harness. Other harnesses use their own caps. | `workflow/nodes.py:700` | `test_a_harness_cap_queues_only_that_harness` |
-| Both caps are set | An attempt takes both slots before its session opens, and releases both when it ends. | `workflow/nodes.py:700`, `workflow/nodes.py:723` | `test_both_caps_apply_before_a_session_opens` |
+| A `[capacity]` key is set | It caps live sessions of that harness. Other harnesses use their own caps. | `workflow/nodes.py:701` | `test_a_harness_cap_queues_only_that_harness` |
+| Both caps are set | An attempt takes both slots before its session opens, and releases both when it ends. | `workflow/nodes.py:701`, `workflow/nodes.py:724` | `test_both_caps_apply_before_a_session_opens` |
 | An attempt finds every slot taken | It waits. It keeps its retries, and its `timeout` starts once it has a slot. | `workflow/nodes.py:335` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
-| A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:708` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
+| A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:709` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
 
 ## Sessions
 

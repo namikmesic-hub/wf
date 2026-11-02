@@ -15,7 +15,7 @@ here to be passed on (tools/relay.py). Each operation the node may use is in
 allowed_tools; the server lists no others. A node that lists `tools` gets no
 other MCP server: strict_mcp_config leaves out the repo's and your own, and
 ENABLE_CLAUDEAI_MCP_SERVERS=false your claude.ai connectors, which Claude Code
-would otherwise load at `full` access. What a wf tool returns stays out of
+would otherwise load at `full` and `review` access. What a wf tool returns stays out of
 the transcript, which notes only its size: it's other people's messages and
 mail, and the run folder outlives the session.
 
