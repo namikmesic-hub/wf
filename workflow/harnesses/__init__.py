@@ -57,7 +57,8 @@ def _cursor() -> Harness:
 FACTORIES: dict[str, Callable[[], Harness]] = {"claude-code": _claude_code, "codex": _codex, "cursor": _cursor}
 
 
-KEYCHAIN_SHELL = {"claude-code": ("edit", "full"), "cursor": ("edit", "full"), "codex": ("full",)}
+KEYCHAIN_SHELL = {"claude-code": ("edit", "full", "review"), "cursor": ("edit", "full", "review"),
+                  "codex": ("full", "review")}
 
 KEPT_INSTRUCTIONS = {  # what a harness still loads with `project_instructions: false`
     "codex": "your global ~/.codex/AGENTS.md, or the skills in your home folder (~/.agents/skills, ~/.codex/skills)",

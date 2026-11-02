@@ -590,8 +590,9 @@ class _Checker:
             self.warn(where, f"puts output from {listed} into the shell unquoted; pass it through `env` and use \"$NAME\", or add `| quote`")
 
     def _web_to_full(self, where: str, refs: list[Ref], node_id: str) -> None:
-        """An agent with `access: full` that reads what an agent with web pages or wf tools wrote."""
-        if self.wf.setting(node_id, "access") != "full":
+        """An agent with `access: full` or `review` that reads what an agent with web pages or wf tools wrote."""
+        access = self.wf.setting(node_id, "access")
+        if access not in ("full", "review"):
             return
         sources = []
         for ref in refs:
@@ -601,10 +602,10 @@ class _Checker:
                 sources.append(target)
         for source in dict.fromkeys(sources):
             if self.wf.setting(source, "web"):
-                self.warn(where, f"an agent with `access: full` reads output from `{source}`, which has `web: true`; "
+                self.warn(where, f"an agent with `access: {access}` reads output from `{source}`, which has `web: true`; "
                                  "web pages can carry instructions aimed at agents")
             if tools := [use.name for use in self.wf.setting(source, "tools") or ()]:
-                self.warn(where, f"an agent with `access: full` reads output from `{source}`, which reads {', '.join(tools)}; "
+                self.warn(where, f"an agent with `access: {access}` reads output from `{source}`, which reads {', '.join(tools)}; "
                                  "messages, notes and mail that other people write can carry instructions aimed at agents")
 
     def _harness(self, node_id: str) -> set[str]:
@@ -740,6 +741,10 @@ class _Checker:
 
     def _workspace(self, node_id: str) -> None:
         workspace = self.wf.setting(node_id, "workspace")
+        if self.nodes[node_id].kind == "agent" and self.wf.setting(node_id, "access") == "review" \
+                and self._workspace_kind(node_id) == "temp":
+            self.error(f"nodes.{node_id}", "`access: review` works in a copy of a git worktree, and a `temp` workspace "
+                                           "is an empty folder")
         if workspace in ("repo", "new", "temp"):
             return
         where = f"nodes.{node_id}.workspace"
@@ -893,6 +898,15 @@ class _Checker:
             return bool(steps) and self.nodes[name].for_each is None
         return {"start": 1, "run": 1, "workspace": 2}.get(name, 99) <= len(steps)
 
+    def _workspace_kind(self, node_id: str, seen: tuple = ()) -> str | None:
+        """repo, new or temp: the workspace that a node gets, through `workspace: <node>` too. None when it's unknown."""
+        workspace = self.wf.setting(node_id, "workspace")
+        if workspace in ("repo", "new", "temp"):
+            return workspace
+        if workspace in self.nodes and workspace not in seen and workspace != node_id:
+            return self._workspace_kind(workspace, (*seen, node_id))
+        return None
+
     def _concurrent_edits(self) -> None:
         editors = [n for n, node in self.nodes.items()
                    if node.kind == "agent" and self.wf.setting(n, "access") in ("edit", "full")]
@@ -917,6 +931,16 @@ class _Checker:
                     and self.wf.setting(b, "max_parallel") > 1):  # new and temp give each item its own folder
                 self.warn(f"nodes.{b}", "items run in parallel in the same workspace and each edits it; "
                                         "use `workspace: new` or `max_parallel: 1`")
+        commands = [n for n, node in self.nodes.items() if node.kind == "command"]  # a file that one writes also counts
+        for b, node in self.nodes.items():  # a review fails when its workspace changes while it runs
+            if node.kind != "agent" or self.wf.setting(b, "access") != "review" or (shared := key(b)) is None:
+                continue
+            for a in editors + commands:
+                if key(a) == shared and not self._ordered(a, b):
+                    label = "repo" if shared == "repo" else f"`{shared}`"
+                    verb = "write to" if a in commands else "edit"
+                    self.warn(f"nodes.{b}", f"`{a}` could {verb} the {label} workspace while `{b}` reviews it, and then "
+                                            f"`{b}` fails")
 
     def _ordered(self, a: str, b: str) -> bool:
         """Is there a path from one to the other, so they can't overlap?"""

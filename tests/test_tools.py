@@ -617,8 +617,9 @@ def shell_flow(harness: str, access: str, extra: str = "", tools: str = "[linear
 
 @pytest.mark.parametrize("harness, access, reaches", [
     ("claude-code", "read-only", False), ("claude-code", "edit", True), ("claude-code", "full", True),
-    ("codex", "read-only", False), ("codex", "edit", False), ("codex", "full", True),
-    ("cursor", "read-only", False), ("cursor", "edit", True), ("cursor", "full", True),
+    ("claude-code", "review", True),
+    ("codex", "read-only", False), ("codex", "edit", False), ("codex", "full", True), ("codex", "review", True),
+    ("cursor", "read-only", False), ("cursor", "edit", True), ("cursor", "full", True), ("cursor", "review", True),
 ])
 def test_a_node_with_tools_and_a_shell_that_reaches_the_keychain_needs_the_opt_in(repo, harness, access, reaches):
     keychain.save("linear", {"method": "token", "access_token": "x"})

@@ -21,8 +21,8 @@ The API key: the SDK needs a Cursor API key, and cursor-agent's login doesn't wo
 reads it from the macOS Keychain (`wf runtimes cursor signin` keeps it there), or from the file
 that cursor.api_key_file in ~/.wf/config.toml names: never from the environment. It goes to the
 host over stdin, in the protocol's hello, never on a command line. The host, and so the agent's
-commands, get the environment without CURSOR_API_KEY and CURSOR_AUTH_TOKEN. With no key, read-only
-and full sessions run through cursor-agent's ACP, as they did before the SDK, and the run's first
+commands, get the environment without CURSOR_API_KEY and CURSOR_AUTH_TOKEN. With no key, read-only,
+full and review sessions run through cursor-agent's ACP, as they did before the SDK. The run's first
 such session warns once and says what to do (FIX). A key that Cursor refuses makes Cursor
 unavailable, and the message says what to do.
 
@@ -35,6 +35,8 @@ Access levels, as the host maps them (cursor_host/src/cursor.ts):
   workspace. The SDK has no such answers, and no test has shown yet that Cursor's sandbox keeps
   writes there.
 - full: all of Cursor's tools, with the sandbox off.
+- review: as full, in the runner's copy of the workspace. The SDK can't refuse one command, so only
+  the copy's git config stops `git push` there.
 Web search and fetch follow `web`.
 
 Models: the host maps cursor-agent's model ids, such as gpt-5.6-sol-max-fast, to an id in the
@@ -87,7 +89,7 @@ EDIT_ON_ACP = ("Cursor's SDK can't refuse a write outside the workspace, and no 
                "keeps writes in it, so `edit` runs through cursor-agent's ACP")
 FIX = ("Create a Cursor API key in the Cursor dashboard, then run `wf runtimes cursor signin` to keep it in the "
        "macOS Keychain, or name a file that holds it with `api_key_file` under [cursor] in ~/.wf/config.toml")
-NO_KEY = ("no Cursor API key is set, so cursor runs read-only and full sessions through cursor-agent's ACP, "
+NO_KEY = ("no Cursor API key is set, so cursor runs read-only, full and review sessions through cursor-agent's ACP, "
           "which counts no tokens")
 INSTALL_TIMEOUT = 600
 LABELS = {  # Cursor's tool names, as progress shows them, the same as on ACP where there's one
@@ -447,5 +449,5 @@ async def doctor(models: list[str]) -> tuple[list[str], bool]:
         ok = False
         lines.append(f"Cursor: {error}")
     lines.append("cursor runs every session on cursor-agent's ACP (cursor.runtime is acp)" if runtime() == "acp" else
-                 "cursor runs read-only and full sessions on the SDK, and edit sessions on cursor-agent's ACP")
+                 "cursor runs read-only, full and review sessions on the SDK, and edit sessions on cursor-agent's ACP")
     return lines, ok

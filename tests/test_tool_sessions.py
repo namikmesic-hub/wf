@@ -179,7 +179,7 @@ def test_a_node_that_lists_tools_gets_no_other_mcp_server_and_one_without_keeps_
     assert [(len(s.tools), s.only_wf_tools) for s in fake.specs] == [(1, True), (0, False), (0, True)]
 
 
-@pytest.mark.parametrize("access", ["read-only", "edit", "full"])
+@pytest.mark.parametrize("access", ["read-only", "edit", "full", "review"])
 def test_claude_code_leaves_out_other_mcp_servers_and_claude_ai_connectors_for_a_node_with_tools(tmp_path, access):
     only = options(replace(spec(tmp_path, [], access), only_wf_tools=True))
     assert only.strict_mcp_config is True and only.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
@@ -371,7 +371,7 @@ def spec(cwd: Path, tools: list, access: str = "read-only") -> SessionSpec:
                        log=cwd / "attempt-1.log", emit=lambda event: None, tools=tools)
 
 
-@pytest.mark.parametrize("access", ["read-only", "edit", "full"])
+@pytest.mark.parametrize("access", ["read-only", "edit", "full", "review"])
 def test_claude_code_gets_an_mcp_server_per_tool_that_relays_its_calls(vendor, tmp_path, access):
     sign_in(vendor)
 

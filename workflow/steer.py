@@ -38,7 +38,8 @@ the agent slots). They are in ~/.wf/steer/<run-id>-<hash> (mailbox()), outside
 the run folder and every repo, in a folder that only you can open. `wf steer`
 trusts your user account, as every wf command does: any process that runs as
 you can steer a run. That includes an agent that can run commands as you: on
-Claude Code and Cursor with edit or full access, and on Codex with full access.
+Claude Code and Cursor with edit, full or review access, and on Codex with full
+or review access.
 
 `wf steer` (send) writes <sent>-<id>.request there, with the time it sent the
 message in the name. A run takes at most MAX_IN_MAILBOX messages at once: those

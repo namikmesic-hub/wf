@@ -68,6 +68,8 @@ Cursor would save.
   Cursor also writes to temp folders and to Markdown files in ~/.cursor without
   asking, so deny rules block those writes.
 - full: everything is allowed.
+- review: as full, in the runner's copy of the workspace, but a command that
+  pushes with git (`git push`, `git send-pack`) is refused (base.pushes).
 Web search and fetch follow `web` at every level.
 
 An explicit model goes to cursor-agent without a model list call.
@@ -128,6 +130,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import signal
 import tempfile
 import uuid
@@ -136,7 +139,7 @@ from pathlib import Path
 from .. import config, output_tool, workspaces
 from ..runs import write_json
 from . import git_tool, mcp_http
-from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
+from .base import SessionSpec, TurnEnd, Unavailable, Usage, pushes, short, transcript
 
 TESTED = "2026.10.18-ea085cb"
 FLAGS = ["--sandbox", "disabled", "--disable-project-configs", "--disable-indexing"]
@@ -153,8 +156,8 @@ WRITES_WITHOUT_ASKING = [  # outside the workspace: temp folders, and Markdown f
     "Write(/tmp/*)", "Write(/private/tmp/*)", "Write(/var/tmp/*)", "Write(/var/folders/*)",
     "Write(/private/var/folders/*)", "Write(~/.cursor/*)",
 ]
-DENY = {"read-only": ["Write(**)"], "edit": WRITES_WITHOUT_ASKING, "full": []}  # Cursor's `*` matches any text
-MODES = {"read-only": "ask", "edit": "agent", "full": "agent"}
+DENY = {"read-only": ["Write(**)"], "edit": WRITES_WITHOUT_ASKING, "full": [], "review": []}  # Cursor's `*` matches any text
+MODES = {"read-only": "ask", "edit": "agent", "full": "agent", "review": "agent"}
 SECRETS = ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN")
 NOTICES = (  # Cursor's own messages when the account needs attention
     "Please sign in to continue", "Upgrade your plan to continue", "Add a payment method to continue",
@@ -538,7 +541,9 @@ def allows(access: str, web: bool, cwd: Path, call: dict, servers: set[str] = fr
         return web
     if kind == "other" and only_these:
         return (call.get("rawInput") or {}).get("providerIdentifier") in servers
-    if kind == "read" or access == "full":
+    if access == "review" and kind == "execute" and _pushes(call):
+        return False
+    if kind == "read" or access in ("full", "review"):
         return True
     if kind == "other":  # an MCP tool: only on a server wf gave it
         return (call.get("rawInput") or {}).get("providerIdentifier") in servers
@@ -549,6 +554,15 @@ def allows(access: str, web: bool, cwd: Path, call: dict, servers: set[str] = fr
         root = Path(cwd).resolve()
         return bool(paths) and all((root / path).resolve().is_relative_to(root) for path in paths)
     return False
+
+
+def _pushes(call: dict) -> bool:
+    """Does the command that a permission request asks to run push with git? The request's title
+    stands in for a command that its input doesn't give."""
+    command = (call.get("rawInput") or {}).get("command")
+    if isinstance(command, list):
+        command = shlex.join(map(str, command))
+    return pushes(command if isinstance(command, str) else str(call.get("title") or ""))
 
 
 def choose(options: list[dict], allowed: bool) -> dict:

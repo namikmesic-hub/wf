@@ -24,7 +24,7 @@ import pytest
 
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, harnesses, runner, runs, schemas, workspaces
-from workflow.harnesses.base import SessionSpec
+from workflow.harnesses.base import SessionSpec, pushes
 from workflow.harnesses.cursor_acp import TESTED, WRITES_WITHOUT_ASKING, CursorAcp
 from workflow.output_tool import FINISH, NEW_RESULT, REMINDER, ResultTool
 
@@ -268,6 +268,36 @@ def test_permission_requests_are_answered_from_the_access_level(repo, monkeypatc
     assert answers(log) == [f"{answer}-once" for answer in expected]  # never allow-always, which Cursor would save
     logged = [e["allowed"] for e in attempt_log() if e["kind"] == "permission"]
     assert logged == [answer == "allow" for answer in expected]
+
+
+def test_review_allows_commands_as_full_does_but_refuses_a_git_push(repo, monkeypatch, wf_home):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
+                   check=True)
+    pushes = ["git push origin HEAD", "cd sub && git -C .. push --force", "git --git-dir .git -c remote.o.pushurl=u push o",
+              "git --work-tree . push", "\\git push", "'git' push", 'git -C "a b" push', "git --git-dir=.git push",
+              "git push>out origin HEAD:x", "git push<in", "git --attr-source HEAD push origin HEAD:x",
+              "git --shallow-file x push", "git send-pack ssh://host/r.git HEAD:refs/heads/x", "git -C .. send-pack .. HEAD",
+              'git -c user.name="A B" push origin HEAD', "git -C /a\\ b push", "git \\\n  push", 'git pu""sh',
+              "sh -c \"bash -c 'git push'\"", "echo $(git push)"]  # as a shell reads them
+    commands = ["uv run pytest -q", "gh pr view 12 --comments", *pushes, "git log --grep push", "git commit -m push"]
+    log = cursor(monkeypatch, repo, [*[{"permission": {"kind": "execute", "title": f"`{c}`", "rawInput": {"command": c}}}
+                                       for c in commands], permission_requests()[3], GOOD])
+    assert run("access: review\n") == 0
+    # the commands, an edit outside the workspace (as at full: the runner's check guards the reviewed one), submit_result
+    expected = ["allow", "allow", *["reject"] * len(pushes), "allow", "allow", "allow", "allow"]
+    assert answers(log) == [f"{a}-once" for a in expected]
+    (start,) = entries(log, "start")
+    assert start["settings"]["permissions"] == {"allow": [], "deny": []}
+    assert sent(log, "session/set_mode")[0]["modeId"] == "agent"
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    assert Path(sent(log, "session/new")[0]["cwd"]) == wf_home / "temp" / folder.name / "review-copies" / "ask"
+
+
+def test_the_push_check_reads_a_long_command_at_once():
+    began = time.monotonic()
+    assert not pushes("git" + ' -c "a.b=c" -C -C --x' * 2000 + " status")
+    assert pushes("git" + ' -c "a.b=c" -C -C --x' * 2000 + " push")
+    assert time.monotonic() - began < 1
 
 
 def test_a_question_for_the_user_is_skipped_even_with_full_access(repo, monkeypatch):

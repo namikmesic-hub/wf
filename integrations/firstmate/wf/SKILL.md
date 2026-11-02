@@ -171,7 +171,7 @@ wf steer <run-id> <node> --item <index> --file <message.md>
 `--file` takes a long message from a file, and `--file -` from stdin.
 
 `wf steer` trusts your user account, as every wf command does: any process that runs as you can steer a run.
-That includes an agent that can run commands as you: on Claude Code and Cursor with `edit` or `full` access, and on Codex with `full` access.
+That includes an agent that can run commands as you: on Claude Code and Cursor with `edit`, `full` or `review` access, and on Codex with `full` or `review` access.
 
 `wf steer` says what became of the message:
 

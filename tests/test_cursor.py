@@ -190,6 +190,19 @@ def test_each_access_level_and_web_setting_maps_to_the_sdks_tool_lists(repo, mon
     assert custom == (["submit_result"] if full else ["find_files", "git", "list_dir", "read_file", "search_files", "submit_result"])
 
 
+def test_review_gets_every_tool_and_a_shell_on_the_sdk_in_a_copy_of_the_workspace(repo, monkeypatch, cursor_host, wf_home):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
+                   check=True)
+    log = use(monkeypatch, repo, cursor_host, [GOOD])
+    assert run("access: review\n") == 0
+    (create,) = entries(log, "create")
+    assert ("tools" in create, create["disallowedTools"], create["local"]["sandboxOptions"]) == (
+        False, ["askQuestion", "webSearch", "webFetch"], {"enabled": False})  # shell and all, as at full
+    assert "mcpServers" not in create and "subagentInherit" in create["local"]
+    assert sorted(create["local"]["customTools"]) == ["submit_result"]
+    assert Path(create["local"]["cwd"]) == wf_home / "temp" / run_folder().name / "review-copies" / "ask"
+
+
 def test_edit_runs_through_cursor_agents_acp(repo, monkeypatch, cursor_host):
     from fakes import Fake, submit
     acp = Fake("cursor", submit({"summary": "from acp"}))
@@ -294,7 +307,7 @@ def test_with_no_api_key_sessions_run_through_cursor_agents_acp_and_one_warning_
     assert [spec.access for spec in acp.specs] == ["read-only", "full"]
     assert entries(log, "loaded") == []  # no Cursor host was started
     (warning,) = events("warning")
-    assert warning["message"].startswith("no Cursor API key is set, so cursor runs read-only and full sessions "
+    assert warning["message"].startswith("no Cursor API key is set, so cursor runs read-only, full and review sessions "
                                          "through cursor-agent's ACP, which counts no tokens. Create a Cursor API key")
     assert "`wf runtimes cursor signin`" in warning["message"] and "`api_key_file` under [cursor]" in warning["message"]
     assert capsys.readouterr().out.count("⚠ no Cursor API key is set") == 1

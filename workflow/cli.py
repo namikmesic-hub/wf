@@ -201,8 +201,8 @@ def main(argv: list[str] | None = None) -> int:
         "steer", help="send a message into the live agent session of a running node",
         description="Send a message into the live agent session of a running node. wf steer trusts your user "
                     "account, as every wf command does: any process that runs as you can steer a run. That includes "
-                    "an agent that can run commands as you: on Claude Code and Cursor with edit or full access, and "
-                    "on Codex with full access.")
+                    "an agent that can run commands as you: on Claude Code and Cursor with edit, full or review "
+                    "access, and on Codex with full or review access.")
     steering.add_argument("run_id", metavar="run-id")
     steering.add_argument("node", help="an agent node, as events name it: implement, or build[1]/implement in a sub-workflow")
     steering.add_argument("message", nargs="?", help="what to tell the agent (or use --file)")

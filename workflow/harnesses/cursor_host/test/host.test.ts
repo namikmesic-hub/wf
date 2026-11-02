@@ -53,7 +53,8 @@ test("the access levels keep what each may not do out of the options", () => {
   assert.deepEqual(accessOptions("read-only", true).tools, ["mcp", "webSearch", "webFetch"]);
   assert.deepEqual(accessOptions("edit", false), { disallowedTools: ["askQuestion", "webSearch", "webFetch"], sandbox: true, inherit: true });
   assert.deepEqual(accessOptions("full", true), { disallowedTools: ["askQuestion"], sandbox: false, inherit: true });
-  assert.throws(() => accessOptions("root", false), /access must be read-only, edit or full/);
+  assert.deepEqual(accessOptions("review", false), { disallowedTools: ["askQuestion", "webSearch", "webFetch"], sandbox: false, inherit: true });
+  assert.throws(() => accessOptions("root", false), /access must be read-only, edit, full or review/);
 });
 
 test("the SDK's errors get the protocol's classes", () => {

@@ -533,7 +533,7 @@ def test_doctor_checks_node_the_host_the_key_and_how_model_ids_map(monkeypatch, 
     assert "the key works: wf tests (someone@example.com), 3 models" in out
     assert "gpt-5.6-sol-max-fast: gpt-5.6-sol [reasoning=max, fast=true, context=1m]" in out
     assert "nope: Cursor has no model `nope`" in out
-    assert "cursor runs read-only and full sessions on the SDK, and edit sessions on cursor-agent's ACP" in out
+    assert "cursor runs read-only, full and review sessions on the SDK, and edit sessions on cursor-agent's ACP" in out
 
 
 @needs_node

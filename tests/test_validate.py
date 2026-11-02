@@ -736,6 +736,52 @@ def test_a_full_access_agent_reading_web_output_warns(tmp_path):
     assert_problems(report, [("warning", "nodes.act.instruction", "reads output from `search`, which has `web: true`")])
 
 
+def test_review_is_an_access_level_and_an_unknown_level_is_an_error(tmp_path):
+    assert found(check(tmp_path, flow("a: {needs: [start], instruction: x, access: review}"))) == []
+    in_defaults = flow("a: {needs: [start], instruction: x}").replace("  harness: claude-code\n",
+                                                                      "  harness: claude-code\n  access: review\n")
+    assert found(check(tmp_path, in_defaults)) == []
+    report = check(tmp_path, flow("a: {needs: [start], instruction: x, access: root}"))
+    assert_problems(report, [("error", "nodes.a.access", "Input should be 'read-only', 'edit', 'full' or 'review'")])
+
+
+def test_a_review_needs_a_git_worktree_to_copy_and_a_temp_workspace_is_none(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], instruction: x, workspace: temp}
+        b: {needs: [start], command: x, workspace: temp}
+        c: {needs: [b], instruction: x, workspace: b}
+        d: {needs: [b], command: x, workspace: new}
+        e: {needs: [d], instruction: x, workspace: d}
+    """).replace("  harness: claude-code\n", "  harness: claude-code\n  access: review\n"))
+    said = "`access: review` works in a copy of a git worktree, and a `temp` workspace is an empty folder"
+    assert_problems(report, [("error", "nodes.a", said), ("error", "nodes.c", said)])
+
+
+def test_a_review_that_could_run_while_an_agent_edits_its_workspace_warns(tmp_path):
+    report = check(tmp_path, flow("""
+        fix: {needs: [start], instruction: x, access: edit}
+        look: {needs: [start], instruction: x, access: review}
+        after: {needs: [fix], instruction: x, access: review}
+        own: {needs: [start], instruction: x, access: review, workspace: new}
+        build: {needs: [start], command: make}
+    """))
+    assert_problems(report, [("warning", "nodes.look", "`fix` could edit the repo workspace while `look` reviews it, and "
+                                                       "then `look` fails"),
+                             ("warning", "nodes.look", "`build` could write to the repo workspace while `look` reviews it, "
+                                                       "and then `look` fails"),
+                             ("warning", "nodes.after", "`build` could write to the repo workspace while `after` reviews it, "
+                                                        "and then `after` fails")])
+
+
+def test_a_review_agent_reading_web_output_warns_as_a_full_one_does(tmp_path):
+    report = check(tmp_path, flow("""
+        search: {needs: [start], instruction: look it up, web: true}
+        look: {needs: [search], instruction: "{{ search.summary }}", access: review}
+    """))
+    assert_problems(report, [("warning", "nodes.look.instruction",
+                              "an agent with `access: review` reads output from `search`, which has `web: true`")])
+
+
 def test_edit_nodes_that_could_run_together_in_one_workspace_warn(tmp_path):
     report = check(tmp_path, flow("""
         a: {needs: [start], instruction: x, access: edit}

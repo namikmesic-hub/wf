@@ -89,6 +89,19 @@ records it, so later passes and `wf retry` keep using it, and no other node
 or run can take it over. An item's `branch` renders on every pass, and must
 name the branch its index already has.
 
+An agent with `access: review` gets the tools of `full`, but works in a copy of
+its workspace (workspaces.review_copy). The runner makes the copy fresh for each
+attempt, and removes it when the job ends, also on Ctrl-C. The copy is in the
+same folder on every pass, so a harness that keeps a session by its folder can
+continue it. The runner records the reviewed worktree when the first attempt has
+its agent slot (workspaces.state), in the pass folder, so `wf retry` checks
+against the same record. Before each attempt but the first, and after each
+attempt, it checks that neither the worktree's files nor its branch changed.
+When they did, the job fails without a retry, since a retry would review other
+code. When git can't tell, only the attempt fails. When the watchdog or a stop
+of the run ends an attempt, the check after it doesn't run, but the check before
+the next attempt, or before the first attempt of `wf retry`, finds the change.
+
 Workflow nodes (_workflow) run their sub-workflow with the same graph, as a separate LangGraph
 thread in the run's checkpoints: one thread per attempt. So a sub-workflow that fails is just this
 job failing: retry, on_item_error and `wf retry` all work as for any node. A retry starts a fresh
@@ -110,8 +123,8 @@ import signal
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from dataclasses import asdict, replace
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext, suppress
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -439,7 +452,9 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                  extra: dict) -> tuple[dict, int]:
     node_id, wf = job["node"], ctx.workflow
     commits = _runner_commits(ctx, node_id, workspace)
-    note = [DONT_COMMIT] if commits and wf.setting(node_id, "access") == "edit" else []
+    reviews = wf.setting(node_id, "access") == "review"
+    note = ([DONT_COMMIT] if commits and wf.setting(node_id, "access") == "edit" else
+            [REVIEW_COPY.format(path=workspace["path"])] if reviews else [])
     request = _follow_up_request(job, variables)
     continuing = wf.setting(node_id, "session") == "continue" and job["index"] is None  # items always start fresh
     previous = job.get("session")  # the last pass's session, for session: continue
@@ -454,6 +469,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
     readable = _named_paths(fresh, ctx, variables, workspace)
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
+    review = _review(ctx, job, folder) if reviews else None
     target, override = ctx.override(node_id, job["index"]) or (None, {})
     render_setting = partial(ctx.trace.render, job)  # the trace records how the harness, model and effort render
     names = overrides.job_harnesses(wf, node_id, override, variables, render_setting)
@@ -474,7 +490,8 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         else:
             session_facts = {"start": "fresh", **({"fresh_because": why_not} if why_not else {})}
         record.begin(model=model, effort=effort, access=wf.setting(node_id, "access"), web=wf.setting(node_id, "web"),
-                     workspace=workspace, session=session_facts, **({"tools": [u.name for u in uses]} if uses else {}))
+                     workspace=workspace, session=session_facts, **({"tools": [u.name for u in uses]} if uses else {}),
+                     **({"copy": str(review.copy)} if review else {}))
         # Every attempt but the job's very first starts from the commit the job started from:
         # retries, and attempts after a crash or `wf retry` (which may find half-done edits)
         if start and (number > job["attempt"] or entered_before):
@@ -487,12 +504,13 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
             agent = await ctx.harness(name)
         except Unavailable as error:
             raise _Unavailable(str(error)) from error
-        async with _attached(uses, number) as tools:
-            return await converse(number, name, agent, tools, record, deadline, source, why_not, session_facts)
+        async with (_attached(uses, number) as tools,
+                    _working_folder(ctx, workspace, review, number, deadline) as cwd):
+            return await converse(number, name, agent, tools, record, deadline, source, why_not, session_facts, cwd)
 
     async def converse(number: int, name: str, agent, tools: list, record: Attempt, deadline: asyncio.Timeout,
-                       source: dict | None, why_not: str | None, session_facts: dict) -> dict:
-        """One session: the instruction, then reminders, until submit_result has a result.
+                       source: dict | None, why_not: str | None, session_facts: dict, cwd: Path) -> dict:
+        """One session in `cwd`: the instruction, then reminders, until submit_result has a result.
         `source` is the session to continue, and `session_facts` the trace's record of it."""
         model, effort = chosen[name]
         emit({"event": "agent_model", **_label(job), "attempt": number, "harness": name, "model": model, "effort": effort,
@@ -500,7 +518,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         if why_not:
             emit({"event": "session_fresh", **_label(job), "attempt": number, "reason": why_not})
         spec = SessionSpec(
-            cwd=Path(workspace["path"]),
+            cwd=cwd,
             access=wf.setting(node_id, "access"),
             web=wf.setting(node_id, "web"),
             model=model,
@@ -621,8 +639,11 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
                 record.facts["usage"] = asdict(spent)
                 spec.emit({"event": "session_ended"})
 
-    result, number = await _attempts(job, ctx, emit, attempt, names,
-                                     slot=lambda number, name: _agent_slot(job, ctx, emit, number, name))
+    try:
+        result, number = await _attempts(job, ctx, emit, attempt, names,
+                                         slot=lambda number, name: _agent_slot(job, ctx, emit, number, name))
+    finally:  # also when the job is cancelled, as on Ctrl-C
+        await _discard_copy(ctx, review)
     if commits:
         try:
             await _git(ctx, workspaces.commit_all, workspace["path"], f"wf: {node_id} ({ctx.run.id})")
@@ -632,6 +653,9 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
 
 DONT_COMMIT = "Don't commit: the runner commits your changes when you're done."
+LATE_CHECK = 30  # seconds that the review check after an attempt that timed out can take
+REVIEW_COPY = ("You work in a copy of {path}. The runner removes the copy when you're done. Run tests and other "
+               "commands in the copy. Don't change {path} or its branch. If they change, this step fails.")
 FOLLOW_UP = "## Follow-up request"
 AFTER_A_PASS = "An earlier pass of this step did the task above. Now do this request for more work on that result:"
 FIRST_PASS = "This step didn't run before in this run. Do the task above, and this request with it:"
@@ -719,6 +743,86 @@ async def _attached(uses, number: int):
         raise _Failed(str(error), number) from error
     except signin.Unreachable as error:
         raise _AttemptFailed(str(error)) from error
+
+
+@dataclass
+class _Review:
+    """What an `access: review` job checks the reviewed worktree with, and where its agent works."""
+    copy: Path  # one folder for every pass and attempt of the node or item, so a harness can continue a session there
+    check: Path  # the index of the check, and the git objects that it writes apart from the reviewed repository
+    record: Path  # `before`, in the pass folder
+    before: dict | None  # workspaces.state() when the job's first attempt started, None until then
+
+
+def _review(ctx: RunContext, job: Job, folder: Path) -> _Review:
+    """An `access: review` job's folders, and its record of the reviewed worktree when it has one. The record
+    is kept in its pass folder, so that `wf retry` checks against the same one."""
+    item = [str(job["index"])] if job["index"] is not None else []
+    copy, check = workspaces.review_folders(ctx.run.id, [*ctx.prefix, job["node"], *item])
+    record = folder / "reviewed.json"
+    before = json.loads(record.read_text(encoding="utf-8")) if record.exists() else None
+    return _Review(copy, check, record, before)
+
+
+@asynccontextmanager
+async def _working_folder(ctx: RunContext, workspace: dict, review: _Review | None, number: int,
+                          deadline: asyncio.Timeout) -> AsyncIterator[Path]:
+    """The folder that an attempt's agent works in: its workspace, or for `access: review` a fresh copy of
+    it. The job's first attempt records the reviewed worktree once it has its agent slot and its harness,
+    just before the copy is made. The job fails when the worktree changed since then, before a later attempt
+    or when an attempt ends. When the watchdog or a stop of the run cancels the attempt, the check before the
+    next attempt finds a change. When git fails to record the worktree or to make the copy, only the attempt fails."""
+    if review is None:
+        yield Path(workspace["path"])
+        return
+    path = workspace["path"]
+    try:
+        if review.before is None:
+            review.before = await _git(ctx, workspaces.state, path, review.check, True)
+            review.record.write_text(json.dumps(review.before) + "\n", encoding="utf-8")
+        elif changes := await _changes(ctx, path, review):
+            raise _Failed(f"{path} changed since this step recorded it before its first attempt: {'; '.join(changes)}. "
+                          f"If you changed it, delete {review.record} and run `wf retry` again", number)
+        cwd = await _git(ctx, workspaces.review_copy, path, review.copy, review.before["tree"], review.check)
+    except workspaces.NotReviewable as error:
+        raise _Failed(str(error), number) from error
+    except workspaces.WorkspaceError as error:
+        raise _AttemptFailed(f"can't make a copy of {path} for the agent: {error}") from error
+    try:
+        yield cwd
+    except asyncio.CancelledError:
+        if deadline.expired():  # the node's timeout, which the attempt ends with
+            with suppress(_AttemptFailed, TimeoutError):  # the check didn't run in time: the timeout stands
+                async with asyncio.timeout(LATE_CHECK):
+                    await _review_ended(ctx, path, review, number)
+        raise
+    except Exception:
+        with suppress(_AttemptFailed):  # the check didn't run: the attempt's own error stands
+            await _review_ended(ctx, path, review, number)
+        raise
+    await _review_ended(ctx, path, review, number)
+
+
+async def _review_ended(ctx: RunContext, path: str, review: _Review, number: int) -> None:
+    """Fail the job if the reviewed worktree changed during an `access: review` attempt."""
+    if changes := await _changes(ctx, path, review):
+        raise _Failed(f"{path} changed while the agent reviewed a copy of it: {'; '.join(changes)}", number)
+
+
+async def _changes(ctx: RunContext, path: str, review: _Review) -> list[str]:
+    """How the reviewed worktree changed since the record, in words. When git can't tell, as when it takes too
+    long, only the attempt fails: the next attempt checks again before it starts."""
+    try:
+        return await _git(ctx, workspaces.changed_since, path, review.before, review.check)
+    except workspaces.WorkspaceError as error:
+        raise _AttemptFailed(f"can't check whether {path} changed since this step recorded it: {error}") from error
+
+
+async def _discard_copy(ctx: RunContext, review: _Review | None) -> None:
+    """Remove an `access: review` job's copy when the job ends. It runs as git does, so the next copy waits for it."""
+    if review:
+        with suppress(workspaces.WorkspaceError):  # it stays in the run's temp folder
+            await _git(ctx, workspaces.discard_copy, review.copy)
 
 
 async def _start_commit(ctx: RunContext, folder: Path, workspace: dict) -> tuple[str, bool]:

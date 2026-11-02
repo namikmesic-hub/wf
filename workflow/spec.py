@@ -130,7 +130,7 @@ Duration = Annotated[str, PlainValidator(_duration)]
 NameOrList = Annotated[str | list[str], PlainValidator(_name_or_list)]
 PerHarness = Annotated[str | dict[str, str], PlainValidator(_per_harness)]
 FieldMap = dict[str, dict[str, Any]]
-Access = Literal["read-only", "edit", "full"]
+Access = Literal["read-only", "edit", "full", "review"]
 
 
 class _Model(BaseModel):

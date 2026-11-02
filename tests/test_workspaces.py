@@ -10,12 +10,14 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
 import time
 import tempfile
 from pathlib import Path
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from textwrap import dedent, indent
 
@@ -23,11 +25,12 @@ import pytest
 
 from fakes import Fake, edits, submit, talk
 from workflow import cli, harnesses, nodes, runner, workspaces
+from workflow.harnesses.base import TurnEnd, Usage
 from workflow.output_tool import FINISH
 
 
-def git(*args: str, cwd=".") -> str:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+def git(*args: str, cwd=".", check=True) -> str:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=check).stdout.strip()
 
 
 @pytest.fixture
@@ -906,3 +909,601 @@ def test_discard_keeps_or_deletes_named_branches_and_a_dry_run_deletes_them(repo
     Path("script.yaml").write_text('agents: {impl: [{summary: "scripted"}]}\n')
     assert cli.main(["run", "flow.yaml", "branch=fm/dry", "--dry-run", "script.yaml"]) == 0
     assert git("branch", "--list", "fm/dry") == ""  # it held scripted work
+
+
+# ---------- access: review ----------
+
+
+def done(session) -> TurnEnd:
+    session.fake.replies.append(session.spec.tool.submit({"summary": "looked"}))
+    return TurnEnd("done", usage=Usage(10, 0.0))
+
+
+def test_a_review_agent_works_in_a_copy_and_what_it_changes_there_stays_there(repo, monkeypatch, tmp_path):
+    Path("README").write_text("hello, and not committed\n")
+    Path("notes.txt").write_text("untracked\n")
+    seen = {}
+
+    async def review(session):
+        cwd = Path(session.spec.cwd)
+        seen.update(readme=(cwd / "README").read_text(), notes=(cwd / "notes.txt").read_text(),
+                    branch=git("branch", "--show-current", cwd=cwd), status=git("status", "--porcelain", cwd=cwd))
+        (cwd / "README").write_text("the agent's\n")
+        (cwd / "made.txt").write_text("made\n")
+        git("checkout", "-qb", "agent-work", cwd=cwd)
+        git("add", "--all", cwd=cwd)
+        git("-c", "user.email=a@a", "-c", "user.name=a", "commit", "-qm", "the agent's commit", cwd=cwd)
+        git("config", "wf.test", "set in the copy", cwd=cwd)
+        return done(session)
+
+    fake = use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    copy = tmp_path / "home" / "temp" / only_run().name / "review-copies" / "check"
+    (spec,) = fake.specs
+    assert (spec.access, spec.cwd) == ("review", copy)
+    assert seen == {"readme": "hello, and not committed\n", "notes": "untracked\n", "branch": git("branch", "--show-current"),
+                    "status": "M README\n?? flow.yaml\n?? notes.txt"}  # the worktree's files and branch, committed or not
+    assert fake.sent[0].startswith(f"Review it\n\nYou work in a copy of {repo.resolve()}. The runner removes the copy when")
+    assert Path("README").read_text() == "hello, and not committed\n" and not Path("made.txt").exists()
+    assert git("status", "--porcelain") == seen["status"] and git("log", "--format=%s") == "first"
+    assert git("branch", "--list", "agent-work") == "" and git("config", "--get", "wf.test", check=False) == ""
+    assert not copy.exists()
+
+
+@pytest.mark.parametrize("change, said", [
+    (lambda: Path("README").write_text("changed\n"), "files changed: README"),
+    (lambda: Path("new.txt").write_text("new\n"), "files changed: new.txt"),
+    (lambda: git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x"), "moved from"),
+    (lambda: git("checkout", "-qb", "elsewhere"), "it has branch `elsewhere` checked out now, not branch `"),
+])
+def test_a_review_fails_at_once_when_the_reviewed_worktree_or_its_branch_changes(repo, monkeypatch, capsys, change, said):
+    async def review(session):
+        change()  # the agent may run any command, so it can reach the reviewed worktree: the runner finds out
+        return done(session)
+
+    fake = use(monkeypatch, review, submit({"summary": "again"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 1
+    assert len(fake.specs) == 1  # no retry: it would review other code
+    error = json.loads((only_run() / "status.json").read_text())["error"]
+    assert error.startswith(f"{repo.resolve()} changed while the agent reviewed a copy of it: ") and said in error
+    assert not (Path(fake.specs[0].cwd)).exists()
+
+
+def test_a_review_that_times_out_after_it_changed_the_reviewed_worktree_fails_at_once(repo, monkeypatch):
+    async def review(session):
+        Path("README").write_text("changed\n")
+        await asyncio.sleep(60)
+
+    fake = use(monkeypatch, review, submit({"summary": "again"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review, timeout: 1s}") == 1
+    assert len(fake.specs) == 1
+    error = json.loads((only_run() / "status.json").read_text())["error"]
+    assert error == f"{repo.resolve()} changed while the agent reviewed a copy of it: files changed: README"  # not the next check
+
+
+def test_a_review_attempt_that_fails_after_it_changed_the_reviewed_worktree_fails_at_once(repo, monkeypatch):
+    async def review(session):
+        Path(repo / "README").write_text("changed\n")
+        return TurnEnd("failed", "the agent's own error")
+
+    fake = use(monkeypatch, review, submit({"summary": "again"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 1
+    assert len(fake.specs) == 1
+    error = json.loads((only_run() / "status.json").read_text())["error"]
+    assert error == f"{repo.resolve()} changed while the agent reviewed a copy of it: files changed: README"
+
+
+def test_a_review_check_that_git_cannot_make_fails_only_the_attempt(repo, monkeypatch):
+    real, checks = workspaces.changed_since, []
+
+    def changed_since(*args):
+        checks.append(args)
+        if len(checks) == 1:
+            raise workspaces.WorkspaceError("git add took longer than 600 seconds")
+        return real(*args)
+
+    monkeypatch.setattr(workspaces, "changed_since", changed_since)
+    fake = use(monkeypatch, submit({"summary": "looked"}), submit({"summary": "looked again"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert len(fake.specs) == 2 and len(checks) == 3  # after attempt 1, and before and after attempt 2
+    events = [json.loads(line) for line in (only_run() / "events.jsonl").read_text().splitlines()]
+    (failed,) = [e["error"] for e in events if e["event"] == "attempt_failed"]
+    assert failed == f"can't check whether {repo.resolve()} changed since this step recorded it: git add took longer than 600 seconds"
+
+
+@pytest.mark.parametrize("operation", ["state", "review_copy"])
+def test_a_review_copy_that_git_cannot_make_fails_only_the_attempt(repo, monkeypatch, operation):
+    real, calls = getattr(workspaces, operation), []
+
+    def failing(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise workspaces.WorkspaceError("git fetch took longer than 600 seconds")
+        return real(*args)
+
+    monkeypatch.setattr(workspaces, operation, failing)
+    fake = use(monkeypatch, submit({"summary": "looked"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert len(fake.specs) == 1 and len(calls) >= 2  # the agent starts in attempt 2
+    events = [json.loads(line) for line in (only_run() / "events.jsonl").read_text().splitlines()]
+    (failed,) = [e["error"] for e in events if e["event"] == "attempt_failed"]
+    assert failed == f"can't make a copy of {repo.resolve()} for the agent: git fetch took longer than 600 seconds"
+
+
+def test_the_check_after_a_review_that_timed_out_stops_after_its_own_limit(repo, monkeypatch):
+    monkeypatch.setattr(nodes, "LATE_CHECK", 0.2)
+    stopped = []
+
+    def slow(*args):  # as a check of a large worktree: it ends when the runner stops it
+        stop = workspaces._stop.get()
+        stopped.append(stop.wait(30))
+        raise workspaces.WorkspaceError("stopped")
+
+    async def review(session):
+        monkeypatch.setattr(workspaces, "changed_since", slow)
+        await asyncio.sleep(60)
+
+    use(monkeypatch, review)
+    began = time.monotonic()
+    assert run("check: {needs: [start], instruction: Review it, access: review, timeout: 1s, retry: 0}") == 1
+    assert time.monotonic() - began < 15 and stopped == [True]
+    assert json.loads((only_run() / "status.json").read_text())["error"] == "timed out after 1s"
+
+
+def test_the_review_check_fails_when_git_add_fails_as_a_whole(repo, tmp_path):
+    check = tmp_path / "check"
+    workspaces.state(repo, check, fresh=True)
+    (check / "index.lock").write_text("")  # as another git command that holds the index
+    with pytest.raises(workspaces.WorkspaceError, match="git add failed"):
+        workspaces.state(repo, check)
+    (check / "index.lock").unlink()
+    Path("unreadable.txt").write_text("secret\n")
+    Path("unreadable.txt").chmod(0)
+    try:  # a file that git can't read isn't a failure: the docs name it
+        assert workspaces.state(repo, check)["tree"] == workspaces.state(repo, check, fresh=True)["tree"]
+    finally:
+        Path("unreadable.txt").chmod(0o600)
+
+
+def test_a_review_records_the_worktree_once_its_first_attempt_has_its_agent_slot(repo, monkeypatch):
+    slot = nodes._agent_slot
+
+    @asynccontextmanager
+    async def waited(*args):
+        Path(repo / "README").write_text("changed while the step waited\n")
+        async with slot(*args):
+            yield
+
+    monkeypatch.setattr(nodes, "_agent_slot", waited)
+    seen = []
+
+    async def review(session):
+        seen.append((Path(session.spec.cwd) / "README").read_text())
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen == ["changed while the step waited\n"]
+
+
+def test_ctrl_c_during_a_review_removes_its_copy(repo, monkeypatch, tmp_path):
+    copies = []
+
+    async def review(session):
+        copies.append(Path(session.spec.cwd))
+        signal.raise_signal(signal.SIGINT)  # Ctrl-C while the agent works
+        await asyncio.sleep(60)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == runner.STOPPED
+    assert copies == [tmp_path / "home" / "temp" / only_run().name / "review-copies" / "check"]
+    assert not copies[0].exists()
+
+
+def test_wf_trace_shows_that_a_review_attempt_works_in_a_copy(repo, monkeypatch, capsys, tmp_path):
+    use(monkeypatch, submit({"summary": "looked"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    capsys.readouterr()
+    assert cli.main(["trace", only_run().name]) == 0
+    copy = tmp_path / "home" / "temp" / only_run().name / "review-copies" / "check"
+    assert f"access review, session fresh, in a copy of {repo.resolve()}, at {copy}" in capsys.readouterr().out
+
+
+def test_each_attempt_of_a_review_gets_a_fresh_copy_in_the_same_folder(repo, monkeypatch):
+    def fresh(cwd: Path):
+        assert not (cwd / "junk.txt").exists(), "the retry should get a fresh copy"
+
+    fake = use(monkeypatch, edits({"junk.txt": "left\n"}), talk(), talk(),  # attempt 1 never submits
+               edits({"scratch.txt": "x\n"}, {"summary": "done"}, check=fresh))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert fake.specs[0].cwd == fake.specs[1].cwd  # a harness that keeps a session by its folder can continue it
+    assert not Path("junk.txt").exists() and not Path("scratch.txt").exists()
+
+
+def commit_all(message: str) -> None:
+    git("add", "--all")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", message)
+
+
+def test_a_review_copy_has_each_file_as_the_worktree_has_it_whatever_its_type(repo, monkeypatch, tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "notes.txt").write_text("the user's\n")
+    for name in ("gone.txt", "file", "emptied", "flagged.txt"):
+        Path(name).write_text(f"{name} as committed\n")
+    Path("folder").mkdir()
+    (Path("folder") / "notes.txt").write_text("committed\n")
+    os.symlink(shared, "link")  # a committed link to a folder outside the worktree
+    Path(".gitattributes").write_text("*.big filter=fake\n")  # as Git LFS does, with a filter that only this repo sets
+    git("config", "filter.fake.clean", "sed s/^real/pointer/")
+    git("config", "filter.fake.smudge", "sed s/^pointer/real/")
+    Path("data.big").write_text("real data\n")
+    commit_all("types")
+    Path("gone.txt").unlink()
+    Path("file").unlink()
+    Path("file").mkdir()  # a file that became a folder
+    (Path("file") / "inside.txt").write_text("inside\n")
+    Path("emptied").unlink()
+    Path("emptied").mkdir()  # a file that became an empty folder: git sees the file deleted
+    Path("link").unlink()
+    Path("link").mkdir()  # a link that became a real folder
+    (Path("link") / "notes.txt").write_text("real folder\n")
+    git("rm", "-qr", "--cached", "folder")
+    shutil.rmtree("folder")
+    os.symlink(shared, "folder")  # a folder that became a staged link: git lists it before folder/notes.txt
+    git("add", "folder")
+    git("update-index", "--assume-unchanged", "flagged.txt")
+    Path("flagged.txt").write_text("changed, and git is told it isn't\n")
+    seen = {}
+
+    async def review(session):
+        cwd = Path(session.spec.cwd)
+        seen.update(gone=(cwd / "gone.txt").exists(), file=(cwd / "file" / "inside.txt").read_text(),
+                    emptied=(cwd / "emptied").exists(), link=(cwd / "link").is_symlink(),
+                    link_notes=(cwd / "link" / "notes.txt").read_text(), folder=os.readlink(cwd / "folder"),
+                    flagged=(cwd / "flagged.txt").read_text(), big=(cwd / "data.big").read_text())
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen == {"gone": False, "file": "inside\n", "emptied": False, "link": False, "link_notes": "real folder\n",
+                    "folder": str(shared), "flagged": "changed, and git is told it isn't\n", "big": "real data\n"}
+    assert (shared / "notes.txt").read_text() == "the user's\n" and sorted(p.name for p in shared.iterdir()) == ["notes.txt"]
+
+
+def test_the_review_check_and_copy_run_no_filter_in_the_reviewed_worktree_and_the_copy_keeps_its_own_lfs_folder(
+        repo, monkeypatch, tmp_path):
+    ran = tmp_path / "filters"
+    Path(".gitattributes").write_text("*.big filter=fake\n")
+    git("config", "filter.fake.clean", f"echo clean $PWD >> {ran}; sed s/^real/pointer/")  # as Git LFS stores a file
+    git("config", "filter.fake.smudge", f"echo smudge $PWD >> {ran}; sed s/^pointer/real/")
+    git("config", "filter.fake.required", "true")
+    Path("data.big").write_text("real data\n")
+    commit_all("big")
+    Path("data.big").write_text("real data, changed\n")
+    ran.unlink()
+    with open(os.environ["GIT_CONFIG_GLOBAL"], "a") as config:  # a store that your other repositories share
+        config.write(f"[lfs]\n\tstorage = {tmp_path / 'shared-lfs'}\n")
+    seen = {}
+
+    async def review(session):
+        cwd = Path(session.spec.cwd)
+        seen.update(big=(cwd / "data.big").read_text(), storage=git("config", "--get", "lfs.storage", cwd=cwd),
+                    status=git("status", "--porcelain", cwd=cwd))
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    copy = tmp_path / "home" / "temp" / only_run().name / "review-copies" / "check"
+    assert seen == {"big": "real data, changed\n", "storage": str(copy / ".git" / "lfs"), "status": "M data.big\n?? flow.yaml"}
+    assert f"{repo.resolve()}" not in ran.read_text()  # only the copy's `git status` ran the filter
+
+
+def test_a_review_fails_when_only_what_is_staged_in_the_reviewed_index_changes(repo, monkeypatch):
+    async def review(session):
+        Path(repo / "README").write_text("staged by the agent\n")
+        git("add", "README", cwd=repo)
+        Path(repo / "README").write_text("hello\n")  # the file as it was: only the index has the change
+        return done(session)
+
+    original = Path("README").read_text()
+    assert original == "hello\n"
+    use(monkeypatch, review, submit({"summary": "again"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 1
+    error = json.loads((only_run() / "status.json").read_text())["error"]
+    assert error == f"{repo.resolve()} changed while the agent reviewed a copy of it: what is staged in its index changed"
+
+
+def test_a_review_fails_when_only_the_line_ends_of_a_file_change(repo, monkeypatch):
+    git("config", "core.autocrlf", "true")  # git would store both forms as one blob
+
+    async def review(session):
+        Path(repo / "README").write_bytes(b"hello\r\n")
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 1
+    error = json.loads((only_run() / "status.json").read_text())["error"]
+    assert error == f"{repo.resolve()} changed while the agent reviewed a copy of it: files changed: README"
+
+
+def test_a_review_copy_has_the_bytes_of_each_file_whatever_the_line_end_rules(repo, monkeypatch):
+    Path(".gitattributes").write_text("*.txt text eol=lf\n")
+    commit_all("rules")
+    Path("crlf.txt").write_bytes(b"one\r\ntwo\r\n")
+    seen = {}
+
+    async def review(session):
+        seen["crlf"] = (Path(session.spec.cwd) / "crlf.txt").read_bytes()
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen == {"crlf": b"one\r\ntwo\r\n"}
+
+
+def test_a_review_copy_has_a_change_that_came_in_the_same_second_as_the_last_write_of_the_index(repo, monkeypatch):
+    git("config", "core.trustctime", "false")
+    git("config", "core.checkStat", "minimal")  # git compares only the size and the seconds of the time
+    then = time.time() - 3600
+    os.utime("README", (then, then))
+    git("add", "README")
+    Path("README").write_text("HELLO\n")  # the same size
+    os.utime("README", (then, then))
+    os.utime(git("rev-parse", "--git-path", "index"), (then, then))  # so git must read README again
+    seen = {}
+
+    async def review(session):
+        seen["readme"] = (Path(session.spec.cwd) / "README").read_text()
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen == {"readme": "HELLO\n"}
+
+
+def test_a_review_copy_gets_the_remotes_and_the_sparse_checkout_that_the_worktree_config_sets(repo, monkeypatch):
+    (Path("in")).mkdir()
+    (Path("out")).mkdir()
+    Path("in/kept.txt").write_text("in the cone\n")
+    Path("out/left.txt").write_text("out of the cone\n")
+    commit_all("folders")
+    git("config", "extensions.worktreeConfig", "true")
+    git("config", "--worktree", "remote.upstream.url", "https://example.com/r.git")
+    git("sparse-checkout", "set", "in")  # sets core.sparseCheckout in the worktree config
+    assert not Path("out").exists()
+    seen = {}
+
+    async def review(session):
+        cwd = Path(session.spec.cwd)
+        seen.update(remotes=git("remote", cwd=cwd), out=(cwd / "out").exists(), kept=(cwd / "in" / "kept.txt").read_text(),
+                    status=git("status", "--porcelain", cwd=cwd))
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen == {"remotes": "upstream", "out": False, "kept": "in the cone\n", "status": "?? flow.yaml"}
+
+
+def test_a_review_copy_gets_the_remotes_and_filters_that_an_included_config_file_sets(repo, monkeypatch, tmp_path):
+    shared = tmp_path / "shared.gitconfig"
+    shared.write_text('[remote "upstream"]\n\turl = https://example.com/r.git\n'
+                      '[filter "fake"]\n\tclean = sed s/^real/pointer/\n\tsmudge = sed s/^pointer/real/\n')
+    git("config", "include.path", str(shared))
+    Path(".gitattributes").write_text("*.big filter=fake\n")
+    Path("data.big").write_text("real data\n")
+    commit_all("big")
+    seen = {}
+
+    async def review(session):
+        cwd = Path(session.spec.cwd)
+        seen.update(remotes=git("remote", cwd=cwd), big=(cwd / "data.big").read_text())
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen == {"remotes": "upstream", "big": "real data\n"}
+
+
+def test_a_review_copy_of_a_shallow_clone_has_its_history_up_to_the_same_commit(repo, monkeypatch, tmp_path):
+    Path("README").write_text("second\n")
+    commit_all("second")
+    git("clone", "-q", "--depth", "1", f"file://{repo}", str(tmp_path / "shallow"))
+    monkeypatch.chdir(tmp_path / "shallow")
+    seen = {}
+
+    async def review(session):
+        cwd = session.spec.cwd
+        seen.update(log=git("log", "--format=%s", cwd=cwd), shallow=git("rev-parse", "--is-shallow-repository", cwd=cwd))
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen == {"log": "second", "shallow": "true"}
+
+
+@pytest.mark.parametrize("commit, code", [(False, 0), (True, 1)])
+def test_a_submodule_is_an_empty_folder_in_a_review_copy_and_the_check_sees_only_its_commit(
+        repo, monkeypatch, tmp_path, commit, code):
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    git("init", "-q", cwd=inner)
+    (inner / "inner.txt").write_text("inner\n")
+    git("add", "inner.txt", cwd=inner)
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "inner", cwd=inner)
+    git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner), "sub")
+    commit_all("a submodule")
+    seen = {}
+
+    async def review(session):
+        seen["sub"] = list((Path(session.spec.cwd) / "sub").iterdir())
+        Path(repo / "sub" / "inner.txt").write_text("changed in the submodule\n")
+        if commit:
+            git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "inside", cwd=repo / "sub")
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == code
+    assert seen == {"sub": []}
+    if commit:
+        assert json.loads((only_run() / "status.json").read_text())["error"].endswith(": files changed: sub")
+
+
+def test_only_you_can_open_the_folders_of_a_review_copy_and_of_its_check(repo, monkeypatch, tmp_path):
+    seen = {}
+
+    async def review(session):
+        temp = tmp_path / "home" / "temp" / only_run().name
+        seen.update({kind: stat.S_IMODE((temp / kind).stat().st_mode) for kind in ("review-copies", "review-objects")},
+                    inside=Path(session.spec.cwd).is_relative_to(temp / "review-copies"))
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0  # with a umask of 022 (conftest.py)
+    assert seen == {"review-copies": 0o700, "review-objects": 0o700, "inside": True}
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_a_review_finds_a_change_to_a_file_that_git_is_told_is_unchanged(repo, monkeypatch, flag):
+    git("update-index", flag, "README")
+
+    async def review(session):
+        Path(repo / "README").write_text("changed\n")
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 1
+    assert "files changed: README" in json.loads((only_run() / "status.json").read_text())["error"]
+
+
+def test_the_review_check_writes_no_object_into_the_reviewed_repository(repo, monkeypatch):
+    Path("secret.txt").write_text("a token that git doesn't ignore\n")
+    blob = git("hash-object", "secret.txt")
+    use(monkeypatch, edits({"secret.txt": "the agent's\n"}, {"summary": "looked"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert git("cat-file", "-e", blob, check=False) == "" and subprocess.run(["git", "cat-file", "-e", blob]).returncode != 0
+
+
+def test_a_review_of_another_node_s_worktree_copies_its_branch_and_commits(repo, monkeypatch):
+    seen = {}
+
+    async def review(session):
+        cwd = Path(session.spec.cwd)
+        seen.update(made=(cwd / "made.txt").read_text(), branch=git("branch", "--show-current", cwd=cwd),
+                    log=git("log", "--format=%s", cwd=cwd).splitlines())
+        return done(session)
+
+    fake = use(monkeypatch, edits({"made.txt": "made\n"}, {"summary": "made it"}), review)
+    assert run("""
+        impl: {needs: [start], instruction: Make it, access: edit, workspace: new}
+        check: {needs: [impl], instruction: Review it, access: review, workspace: impl}
+    """) == 0
+    run_id = only_run().name
+    assert seen == {"made": "made\n", "branch": f"wf/{run_id}/impl", "log": [f"wf: impl ({run_id})", "first"]}
+    assert fake.specs[1].cwd != fake.specs[0].cwd
+
+
+def test_a_review_copy_of_a_detached_head_is_detached_at_the_same_commit(repo, monkeypatch):
+    git("checkout", "-q", "--detach")
+    seen = {}
+
+    async def review(session):
+        seen.update(branch=git("branch", "--show-current", cwd=session.spec.cwd), head=git("rev-parse", "HEAD", cwd=session.spec.cwd))
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen == {"branch": "", "head": git("rev-parse", "HEAD")}
+
+
+def test_a_review_attempt_that_the_watchdog_ends_is_checked_before_the_next_one(repo, monkeypatch):
+    from workflow import watchdog
+    monkeypatch.setattr(watchdog, "POLL_SECONDS", 0.005)
+    monkeypatch.setattr(watchdog, "seconds", lambda value: 0.5)  # the copy is made before the agent starts
+
+    async def review(session):
+        Path(repo / "README").write_text("changed\n")
+        await asyncio.sleep(60)
+
+    fake = use(monkeypatch, review, submit({"summary": "again"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review, stall: {after: 1s, then: retry}}") == 1
+    assert len(fake.specs) == 1  # the next attempt doesn't start: it would review other code
+    error = json.loads((only_run() / "status.json").read_text())["error"]
+    assert error.startswith(f"{repo.resolve()} changed since this step recorded it before its first attempt: ")
+    assert "files changed: README" in error and "reviewed.json and run `wf retry` again" in error
+
+
+def test_wf_retry_of_a_review_checks_against_the_record_of_its_first_attempt(repo, monkeypatch):
+    from workflow import watchdog
+    monkeypatch.setattr(watchdog, "POLL_SECONDS", 0.005)
+    monkeypatch.setattr(watchdog, "seconds", lambda value: 0.5)  # the copy is made before the agent starts
+
+    async def review(session):
+        Path(repo / "README").write_text("changed\n")
+        await asyncio.sleep(60)
+
+    fake = use(monkeypatch, review, submit({"summary": "again"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review, stall: {after: 1s, then: retry, retries: 0}}") == 1
+    run_id = only_run().name
+    assert cli.main(["retry", run_id]) == 1  # the record stays: the change is still there
+    assert len(fake.specs) == 1
+    (record,) = (only_run() / "nodes").rglob("reviewed.json")
+    record.unlink()  # the person who changed README says to review it as it is now
+    assert cli.main(["retry", run_id]) == 0
+    assert len(fake.specs) == 2
+
+
+def test_a_review_copy_that_the_agent_made_read_only_is_removed(tmp_path):
+    copy = tmp_path / "copy"
+    (copy / "sub").mkdir(parents=True)
+    (copy / "sub" / "file").write_text("x\n")
+    (copy / "file").write_text("x\n")
+    (copy / "sub").chmod(0o500)
+    copy.chmod(0o500)
+    workspaces.discard_copy(copy)
+    assert not copy.exists()
+
+
+def test_a_review_copy_fetches_from_the_remotes_but_cannot_push(repo, monkeypatch, tmp_path):
+    remote = tmp_path / "remote.git"
+    git("init", "-q", "--bare", str(remote))
+    git("remote", "add", "origin", str(remote))
+    git("remote", "add", "mirror", "elsewhere:")  # a URL that the longer rule below changes, but not for a push URL
+    git("push", "-q", "origin", "HEAD:refs/heads/main")
+    tried = {}
+
+    with open(os.environ["GIT_CONFIG_GLOBAL"], "a") as config:  # a longer rule than the copy's wins
+        config.write(f'[url "{remote}"]\n\tpushInsteadOf = elsewhere:\n')
+
+    async def review(session):
+        cwd = session.spec.cwd
+        for name, target in (("origin", "origin"), ("url", str(remote)), ("repo", str(repo)), ("rewritten", "elsewhere:")):
+            push = subprocess.run(["git", "push", target, "HEAD:refs/heads/pushed"], cwd=cwd, capture_output=True, text=True)
+            tried[name] = (push.returncode, push.stderr)
+        for name, target in (("origin", "origin"), ("mirror", "mirror"), ("url", str(remote)), ("repo", str(repo))):  # no hook
+            push = subprocess.run(["git", "push", "--no-verify", target, "HEAD:refs/heads/pushed"], cwd=cwd,
+                                  capture_output=True, text=True)
+            tried[f"{name} --no-verify"] = (push.returncode, push.stderr)
+        tried["fetch"] = subprocess.run(["git", "fetch", "origin"], cwd=cwd, capture_output=True, text=True).returncode
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    for name in ("origin", "url", "repo", "rewritten"):
+        assert tried[name][0] != 0 and "wf-review-copy-cannot-push" in tried[name][1], name
+    for name in ("origin", "mirror", "url", "repo"):  # the push URL and the pushInsteadOf rule stop them, without the hook
+        code, error = tried[f"{name} --no-verify"]
+        assert code != 0 and "remote-wf-review-copy-cannot-push" in error and "this is a review copy" not in error, name
+    assert tried["fetch"] == 0
+    assert git("for-each-ref", "--format=%(refname)", cwd=remote) == "refs/heads/main"
+    assert git("branch", "--list", "pushed") == ""
+
+
+def test_a_review_needs_a_git_worktree_with_a_commit(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("WF_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(runner, "interactive", lambda: False)
+    fake = use(monkeypatch, submit({"summary": "x"}))
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 1
+    assert "`access: review` works in a copy of a git worktree with a commit" in capsys.readouterr().err
+    assert fake.specs == []

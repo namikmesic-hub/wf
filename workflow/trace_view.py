@@ -295,7 +295,9 @@ def _attempt(record: dict) -> str:
     parts.append(f"session {start}" + (f" of {session['from']}" if session.get("from") else "")
                  + (f" ({session['fresh_because']})" if session.get("fresh_because") else ""))
     workspace = record.get("workspace") or {}
-    if workspace.get("path"):
+    if record.get("copy"):  # access: review
+        parts.append(f"in a copy of {workspace.get('path')}, at {record['copy']}")
+    elif workspace.get("path"):
         parts.append(f"in {workspace['path']}")
     return ", ".join(parts)
 
