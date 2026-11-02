@@ -313,7 +313,8 @@
           "enum": [
             "read-only",
             "edit",
-            "full"
+            "full",
+            "review"
           ]
         },
         "web": {

@@ -270,6 +270,23 @@ def test_permission_requests_are_answered_from_the_access_level(repo, monkeypatc
     assert logged == [answer == "allow" for answer in expected]
 
 
+def test_review_allows_commands_as_full_does_but_refuses_a_git_push(repo, monkeypatch, wf_home):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
+                   check=True)
+    commands = ["uv run pytest -q", "gh pr view 12 --comments", "git push origin HEAD", "cd sub && git -C .. push --force",
+                "git log --grep push"]
+    log = cursor(monkeypatch, repo, [*[{"permission": {"kind": "execute", "title": f"`{c}`", "rawInput": {"command": c}}}
+                                       for c in commands], permission_requests()[3], GOOD])
+    assert run("access: review\n") == 0
+    # the commands, an edit outside the workspace (as at full: the runner's check guards the reviewed one), submit_result
+    assert answers(log) == [f"{a}-once" for a in ("allow", "allow", "reject", "reject", "allow", "allow", "allow")]
+    (start,) = entries(log, "start")
+    assert start["settings"]["permissions"] == {"allow": [], "deny": []}
+    assert sent(log, "session/set_mode")[0]["modeId"] == "agent"
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    assert Path(sent(log, "session/new")[0]["cwd"]) == wf_home / "temp" / folder.name / "review-copies" / "ask"
+
+
 def test_a_question_for_the_user_is_skipped_even_with_full_access(repo, monkeypatch):
     question = {"permission": {"kind": "other", "title": "Which database?", "options": [
         {"optionId": "pg", "name": "Postgres", "kind": "allow_once"}, {"optionId": "my", "name": "MySQL", "kind": "allow_once"},

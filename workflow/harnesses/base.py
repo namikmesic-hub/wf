@@ -27,6 +27,11 @@ AGENTS.md, Cursor's rules), as the harness loads them, unless the node sets
 adapter keeps out every such file its harness lets it. Its docstring names
 what stays, and `wf validate` warns about that (harnesses.KEPT_INSTRUCTIONS).
 
+At the `review` access level, a session gets the tools of `full`. Its cwd is a copy of the node's
+workspace, which the runner makes for each attempt and removes after it (nodes.py,
+workspaces.review_copy). The copy's git config already makes each push fail. An adapter whose
+harness can refuse a command also refuses `git push` there.
+
 Each adapter also reports to SessionSpec.trace, a Recorder, what the agent did:
 its text, and each tool call with its full arguments and answer. These go into
 the run's trace (trace.py). What a wf tool answers isn't kept there either.
@@ -111,8 +116,8 @@ class Recorder:
 class SessionSpec:
     """Everything an adapter needs to start one session."""
 
-    cwd: Path
-    access: Literal["read-only", "edit", "full"]
+    cwd: Path  # for `review`, the runner's copy of the node's workspace
+    access: Literal["read-only", "edit", "full", "review"]
     web: bool
     model: str | None
     effort: str | None

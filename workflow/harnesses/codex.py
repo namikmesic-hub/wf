@@ -39,7 +39,10 @@ plugins bring MCP servers of their own: config/read says which there are.
 
 Access levels map to Codex's sandbox: read-only, workspace-write and
 danger-full-access, with approvalPolicy "never" so nothing stops to ask (any
-approval request that still arrives is declined). Web search is "live" with
+approval request that still arrives is declined). `review` gets
+danger-full-access too, in the runner's copy of the workspace. Codex reads
+its rules for commands from `.rules` files, and thread/start takes none, so
+only the copy's git config stops `git push` there. Web search is "live" with
 `web: true` and "disabled" otherwise (Codex's default, "cached", is never
 left in place), and a workspace-write sandbox gets network access only with
 `web: true`.
@@ -94,7 +97,8 @@ from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
 TESTED = "0.163.0"
 APP_SERVER = ["app-server", "--disable", "hooks", "--disable", "apps",
               "--disable", "plugins"]
-SANDBOX = {"read-only": "read-only", "edit": "workspace-write", "full": "danger-full-access"}
+SANDBOX = {"read-only": "read-only", "edit": "workspace-write", "full": "danger-full-access",
+           "review": "danger-full-access"}
 UNAVAILABLE = {"usageLimitExceeded", "unauthorized"}
 STEER_TIMEOUT = 10  # seconds for turn/steer: inside the time `wf steer` waits for an answer (steer.py)
 DECLINE = {  # server requests that ask a person something: always no

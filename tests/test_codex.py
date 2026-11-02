@@ -123,6 +123,17 @@ def test_access_levels_map_to_sandboxes(repo, monkeypatch, settings, sandbox, co
     assert (thread["sandbox"], thread["model"], thread["config"]) == (sandbox, "gpt-6-sol", config)
 
 
+def test_review_runs_commands_without_a_sandbox_in_a_copy_of_the_workspace(repo, monkeypatch, wf_home):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
+                   check=True)
+    log = codex(monkeypatch, repo, [GOOD])
+    assert run("access: review\n") == 0
+    (thread,) = sent(log, "thread/start")
+    assert (thread["sandbox"], thread["config"]["web_search"]) == ("danger-full-access", "disabled")  # as at full
+    (folder,) = (Path(".wf") / "runs").iterdir()
+    assert Path(thread["cwd"]) == wf_home / "temp" / folder.name / "review-copies" / "ask"
+
+
 def test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill(repo, monkeypatch):
     skills = [{"name": "golf", "scope": "repo", "path": "/r/.agents/skills/golf/SKILL.md", "enabled": True},
               {"name": "mine", "scope": "user", "path": "/home/.agents/skills/mine/SKILL.md", "enabled": True}]

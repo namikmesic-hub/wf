@@ -27,6 +27,10 @@ Access levels (`options()`):
   allowed_tools, instead of stopping to ask a person.
 - edit: also Edit, Write, and any Bash command, still with "dontAsk".
 - full: all of Claude Code's tools, with "bypassPermissions".
+- review: as full, in the runner's copy of the workspace, and deny rules
+  (NO_PUSH) refuse `git push`. Claude Code checks deny rules in
+  "bypassPermissions" too, as a live test of Claude Code 2.1.301 showed
+  (test_a_real_review_node_runs_commands_in_its_copy_and_claude_code_refuses_git_push).
 - web: WebSearch and WebFetch only when the node has `web: true`.
 
 Every session also gets:
@@ -112,6 +116,7 @@ TOOL = f"mcp__{SERVER}__{output_tool.NAME}"
 GIT = f"mcp__{SERVER}__{git_tool.NAME}"
 SEARCH = ["Read", "Grep", "Glob"]
 WEB = ["WebSearch", "WebFetch"]
+NO_PUSH = ["Bash(git push)", "Bash(git push *)"]
 API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 CONNECTORS = "ENABLE_CLAUDEAI_MCP_SERVERS"  # false: Claude Code loads none of your claude.ai connectors
 REPLAY = "replay-user-messages"  # Claude Code repeats each user message, with its id, when it reads it
@@ -160,8 +165,9 @@ def options(spec: SessionSpec) -> ClaudeAgentOptions:
     elif spec.access == "edit":
         tools = [*SEARCH, "Edit", "Write", "Bash", *web]
         allowed, mode, disallowed = list(tools), "dontAsk", []
-    else:  # full
-        tools, allowed, mode, disallowed = None, [], "bypassPermissions", ([] if spec.web else list(WEB))
+    else:  # full, and review
+        tools, allowed, mode = None, [], "bypassPermissions"
+        disallowed = ([] if spec.web else list(WEB)) + (NO_PUSH if spec.access == "review" else [])
     use_api_key = config.get().claude.auth == "api-key"
     own_tools = [_submit_tool(spec.tool)] + ([_git_tool(spec.cwd)] if spec.access == "read-only" else [])
     servers = {SERVER: create_sdk_mcp_server(SERVER, tools=own_tools)}

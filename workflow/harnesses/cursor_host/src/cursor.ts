@@ -9,10 +9,12 @@
 // - edit: the default tools, Cursor's sandbox on, subagents get the same lists. wf runs `edit`
 //   through ACP for now, because no test has shown that the sandbox keeps writes in the workspace.
 // - full: the default tools, the sandbox off.
+// - review: as full, in wf's copy of the workspace, whose git config makes each push fail. The SDK
+//   can't refuse one shell command, so the host adds no rule of its own for `git push`.
 // At every level the web tools go when `web` is false, and askQuestion goes, since no person answers.
 // A session's tools (submit_result, git, wf tools) are the SDK's custom tools: callbacks in this
 // process that send a `call` frame and wait for the client's `ret`. They need "mcp" in the tool list.
-// With only_given_tools, or below full, the session gets `mcpServers: {}` on every send, which
+// With only_given_tools, or at read-only or edit, the session gets `mcpServers: {}` on every send. That
 // replaces the MCP servers Cursor would load, and a call to another MCP server cancels the turn.
 //
 // enableAgentRetries is set: the SDK then rides out a dropped stream by itself. Its default for it
@@ -129,8 +131,10 @@ export function accessOptions(access: string, web: boolean): Access {
     return { tools: [...READ_ONLY, ...(web ? WEB : [])], disallowedTools: ["task", ...NOBODY_ANSWERS], sandbox: true, inherit: false };
   }
   if (access === "edit") return { disallowedTools: [...NOBODY_ANSWERS, ...noWeb], sandbox: true, inherit: true };
-  if (access === "full") return { disallowedTools: [...NOBODY_ANSWERS, ...noWeb], sandbox: false, inherit: true };
-  throw fail("invalid", "protocol.access", `access must be read-only, edit or full, not ${JSON.stringify(access)}`);
+  if (access === "full" || access === "review") {
+    return { disallowedTools: [...NOBODY_ANSWERS, ...noWeb], sandbox: false, inherit: true };
+  }
+  throw fail("invalid", "protocol.access", `access must be read-only, edit, full or review, not ${JSON.stringify(access)}`);
 }
 
 export class CursorSession {
@@ -177,7 +181,7 @@ export class CursorSession {
       throw fail("invalid", "cursor.catalog_dir", "Cursor needs an absolute catalog cache folder");
     }
     this.allowed = access.tools ? new Set(access.tools) : null;
-    this.ownMcpOnly = args.only_given_tools === true || args.access !== "full";
+    this.ownMcpOnly = args.only_given_tools === true || (args.access !== "full" && args.access !== "review");
     this.tools(Array.isArray(args.tools) ? args.tools : []);
     const models = await cachedCatalog(apiKey, () => catalog(sdk, apiKey, budget), args.catalog_dir, budget);
     this.resolved = resolveModel(args.model, models);
