@@ -140,14 +140,17 @@ def test_review_allows_each_command_and_edit_that_codex_asks_about_but_a_push_wi
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
                    check=True)
     pushes = ["git push origin HEAD", "/bin/zsh -lc 'git -C .. push --force'", "git push>out origin HEAD:x",
+              "/bin/zsh -lc 'git -c user.name=\"A B\" push'", "git \\\npush",
               "git --attr-source HEAD push origin HEAD:x", "git send-pack ssh://host/r.git HEAD:refs/heads/x"]
     commands = ["uv run pytest -q", "gh pr view 12 --comments", *pushes, "git log --grep push"]
     asks = [{"approval": "item/commandExecution/requestApproval", "params": {"command": c}} for c in commands]
     log = codex(monkeypatch, repo, [*asks, {"approval": "item/fileChange/requestApproval"},
                                     {"approval": "execCommandApproval", "params": {"command": ["git", "push"]}},
+                                    {"approval": "execCommandApproval",
+                                     "params": {"command": ["git", "-c", "user.name=A B", "push"]}},  # one word with a space
                                     {"approval": "execCommandApproval", "params": {"command": ["ls"]}}, GOOD])
     assert run("access: review\n") == 0
-    expected = ["accept", "accept", *["decline"] * len(pushes), "accept", "accept", "denied", "approved"]
+    expected = ["accept", "accept", *["decline"] * len(pushes), "accept", "accept", "denied", "denied", "approved"]
     assert [reply["decision"] for reply in replies(log)[:len(expected)]] == expected
 
 

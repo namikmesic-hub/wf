@@ -130,6 +130,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import signal
 import tempfile
 import uuid
@@ -560,7 +561,7 @@ def _pushes(call: dict) -> bool:
     stands in for a command that its input doesn't give."""
     command = (call.get("rawInput") or {}).get("command")
     if isinstance(command, list):
-        command = " ".join(map(str, command))
+        command = shlex.join(map(str, command))
     return pushes(command if isinstance(command, str) else str(call.get("title") or ""))
 
 

@@ -88,6 +88,7 @@ import asyncio
 import contextlib
 import itertools
 import json
+import shlex
 import subprocess
 import time
 from dataclasses import replace
@@ -502,7 +503,7 @@ class _Connection:
         if session is None or session.spec.access != "review" or method not in ACCEPT:
             return DECLINE[method]
         command = params.get("command")
-        command = " ".join(map(str, command)) if isinstance(command, list) else str(command or "")
+        command = shlex.join(map(str, command)) if isinstance(command, list) else str(command or "")
         return DECLINE[method] if pushes(command) else ACCEPT[method]
 
     async def _tool_call(self, params: dict) -> dict:

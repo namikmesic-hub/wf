@@ -57,6 +57,7 @@ How a turn ended:
 import contextlib
 import json
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -67,11 +68,12 @@ from ..output_tool import ResultTool
 if TYPE_CHECKING:  # tools/relay.py loads the MCP client, which only runs that use tools need
     from ..tools.relay import ToolServer
 
-VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""  # a word, or a quoted one with spaces
 # git's options with a value after a space
-SPLIT = "-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--attr-source|--shallow-file"
-PUSH = re.compile(rf"""(?:^|[\s;&|(){{}}`/"'\\])git["']?(?:\s+(?:(?:{SPLIT})\s+{VALUE}|--?[\w-]+(?:={VALUE})?))*"""
-                  rf"""\s+["']?(?:push|send-pack)(?![\w.-])""")  # git -C x push too, and a text that only names it
+SPLIT = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source",
+         "--shallow-file"}
+PUSHING = {"push", "send-pack"}
+PUNCTUATION = ";&|()<>`"  # what ends a word in a shell, as a space does
+NESTED = 3  # levels of a command in a quoted word, such as `sh -c 'git push'`, that pushes() reads
 
 
 @dataclass
@@ -210,10 +212,41 @@ class StartFailed(Exception):
         self.retry_after = retry_after
 
 
-def pushes(command: str) -> bool:
+def pushes(command: str, depth: int = 0) -> bool:
     """Does a shell command push with git, with `git push` or `git send-pack`? Also with git's options before
-    the command, such as `git -C <folder> push`."""
-    return PUSH.search(command) is not None
+    the command, such as `git -C <folder> push`, and in a quoted word, such as `sh -c 'git push'`. It reads the
+    words as a POSIX shell does, with its quotes, backslashes and line continuations, but not variables or
+    aliases. A text that only names a push, such as `echo git push`, counts too, and so does a command that
+    the shell couldn't read."""
+    try:
+        words = _shell_words(command)
+    except ValueError:  # such as a quote that doesn't close
+        return _names_push(command)
+    for at, word in enumerate(words):
+        if word.strip(PUNCTUATION) and any(c.isspace() or c in PUNCTUATION for c in word):  # a quoted command
+            if pushes(word, depth + 1) if depth < NESTED else _names_push(word):
+                return True
+        if word.rpartition("/")[2] == "git" and _git_command(words[at + 1:]) in PUSHING:
+            return True
+    return False
+
+
+def _shell_words(command: str) -> list[str]:
+    lexer = shlex.shlex(command.replace("\\\n", ""), posix=True, punctuation_chars=PUNCTUATION)
+    lexer.whitespace_split, lexer.commenters = True, ""  # `#` starts a comment only at the start of a word
+    return list(lexer)
+
+
+def _git_command(words: list[str]) -> str | None:
+    """The git command in the words after `git`: the first word that isn't one of git's options or their values."""
+    at = 0
+    while at < len(words) and words[at].startswith("-"):
+        at += 2 if words[at] in SPLIT else 1
+    return words[at] if at < len(words) else None
+
+
+def _names_push(text: str) -> bool:
+    return re.search(r"\bgit\b", text) is not None and re.search(r"\b(?:push|send-pack)\b", text) is not None
 
 
 def transcript(path: Path, kind: str, **data) -> None:
