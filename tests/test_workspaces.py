@@ -93,7 +93,7 @@ def test_an_edit_agent_works_on_its_own_branch_and_the_runner_commits(repo, monk
     out = output()
     assert out["branch"] == f"wf/{run_id}/impl"
     assert out["base"] == git("rev-parse", "HEAD")
-    assert out["seen"] == f"made\nwf: impl ({run_id})\n"
+    assert out["seen"] == "made\nUpdate new.txt\n"
     assert Path(fake.specs[0].cwd).is_relative_to(tmp_path / "home" / "worktrees" / run_id)
     assert not (tmp_path / "home" / "worktrees" / run_id).exists()  # removed once the run succeeded
     assert git("show", f"{out['branch']}:new.txt") == "made"  # the branch stays
@@ -123,7 +123,7 @@ def test_a_loop_keeps_working_on_one_branch(repo, monkeypatch):
     """, end='{commits: "{{ workspace.impl.branch }}"}') == 0
     branch = output()["commits"]
     assert git("log", "--format=%s", f"{git('rev-parse', 'HEAD')}..{branch}").splitlines() == [
-        f"wf: impl ({only_run().name})"] * 2
+        "Update b.txt", "Update a.txt"]
 
 
 def test_each_item_of_a_for_each_gets_its_own_worktree(repo, monkeypatch):
@@ -216,7 +216,88 @@ def test_the_runners_commit_message_has_no_trailer_even_when_a_hook_would_add_on
     hook.chmod(0o755)
     use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
     assert run(IMPL, end='{branch: "{{ workspace.impl.branch }}"}') == 0
-    assert git("log", "-1", "--format=%B", output()["branch"]) == f"wf: impl ({only_run().name})"
+    assert git("log", "-1", "--format=%B", output()["branch"]) == "Update new.txt"
+
+
+def test_the_runner_commits_with_the_message_that_the_nodes_commit_message_renders(repo, monkeypatch):
+    use(monkeypatch, edits({"a.txt": "a\n"}, {"summary": "a"}), edits({"b.txt": "b\n"}, {"summary": "b"}))
+    write("""
+        each:
+          needs: [start]
+          for_each: '["a", "b"]'
+          max_parallel: 1
+          instruction: "Add {{ item }}.txt"
+          access: edit
+          workspace: new
+          commit_message: |
+            Add {{ item }}.txt for {{ start.who }}
+
+            The file holds one letter.
+    """, inputs="{who: {type: string}}")
+    assert cli.main(["run", "flow.yaml", "who=Ana"]) == 0
+    run_id = only_run().name
+    assert [git("log", "-1", "--format=%B", f"wf/{run_id}/each/{i}") for i in (0, 1)] == [
+        "Add a.txt for Ana\n\nThe file holds one letter.", "Add b.txt for Ana\n\nThe file holds one letter."]
+
+
+def test_without_commit_message_the_runner_names_the_changed_files_and_no_part_of_wf(repo, monkeypatch):
+    use(monkeypatch, edits({"notes.md": "n\n", "README": "changed\n", "docs.md": "d\n"}, {"summary": "done"}))
+    assert run(IMPL, end='{branch: "{{ workspace.impl.branch }}"}') == 0
+    message = git("log", "-1", "--format=%B", output()["branch"])
+    assert message == "Update README and 2 more files"
+    assert not any(part in message for part in ("wf", "impl", only_run().name))
+
+
+@pytest.mark.parametrize("changed, message", [
+    (["docs/tools.md"], "Update docs/tools.md"),
+    (["docs/tools.md", "README.md"], "Update docs/tools.md and 1 more file"),
+    (["docs/tools.md", "README.md", "a.txt"], "Update docs/tools.md and 2 more files"),
+])
+def test_the_default_message_names_the_first_changed_file_and_counts_the_others(changed, message):
+    assert workspaces.default_message(changed) == message
+
+
+def test_the_default_message_names_a_file_on_one_line_and_counts_a_rename_as_two_files(repo):
+    Path("über.md").write_text("new\n")
+    assert git("log", "-1", "--format=%B", workspaces.commit_all(repo)) == "Update über.md"
+    Path("a\nb.txt").write_text("x\n")  # git quotes the name, so the line break stays out of the message
+    assert git("log", "-1", "--format=%B", workspaces.commit_all(repo)) == 'Update "a\\nb.txt"'
+    git("mv", "über.md", "moved.md")
+    assert git("log", "-1", "--format=%B", workspaces.commit_all(repo)) == "Update moved.md and 1 more file"
+
+
+def test_a_file_name_that_isnt_utf_8_doesnt_stop_the_runners_commit(repo):
+    try:
+        Path(os.fsdecode(b"caf\xe9.txt")).write_text("x\n")
+    except OSError:
+        pytest.skip("this file system refuses a file name that isn't UTF-8, as macOS does")
+    assert git("log", "-1", "--format=%B", workspaces.commit_all(repo)) == "Update caf�.txt"
+
+
+@pytest.mark.parametrize("template, note, error", [
+    ("{{ later.stdout }}", "x", "Run failed: impl: template: commit_message: 'None' has no attribute 'stdout'"),
+    ("{{ start.note }}", "", "Run failed: impl: `commit_message` renders to empty text, and a commit needs a message"),
+])
+def test_a_commit_message_that_cant_render_fails_the_node_before_the_agent_works(repo, monkeypatch, capsys,
+                                                                                template, note, error):
+    fake = use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    write(f"""
+        impl: {{needs: [start], instruction: work, access: edit, workspace: new, commit_message: "{template}"}}
+        later: {{needs: [impl], command: "true"}}
+    """, inputs="{note: {type: string}}")
+    assert cli.main(["run", "flow.yaml", f"note={note}"]) == 1
+    assert error in capsys.readouterr().err
+    assert fake.specs == []
+
+
+def test_an_agent_in_your_own_checkout_leaves_its_commit_message_unused(repo, monkeypatch):
+    use(monkeypatch, edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run("""
+        mine: {needs: [start], instruction: work, access: edit, commit_message: "{{ later.stdout }}"}
+        later: {needs: [mine], command: "true"}
+    """) == 0
+    assert git("log", "--format=%s") == "first"
+    assert git("status", "--porcelain").splitlines() == ["?? flow.yaml", "?? new.txt"]
 
 
 def sign_with(key: Path) -> None:
@@ -817,7 +898,7 @@ def test_a_loop_keeps_the_branch_its_first_pass_named(repo, monkeypatch):
           routes: [{when: "check.exit_code != 0", to: impl, max: 3}, {to: end}]
     """, end='{branch: "{{ workspace.impl.branch }}"}') == 0
     assert output() == {"branch": "try-0"}
-    assert git("log", "--format=%s", "HEAD..try-0").count("wf: impl") == 2
+    assert git("log", "--format=%s", "HEAD..try-0").splitlines() == ["Update b.txt", "Update a.txt"]
     assert git("branch", "--list", "try-1") == ""
 
 
@@ -1399,7 +1480,7 @@ def test_a_review_of_another_node_s_worktree_copies_its_branch_and_commits(repo,
         check: {needs: [impl], instruction: Review it, access: review, workspace: impl}
     """) == 0
     run_id = only_run().name
-    assert seen == {"made": "made\n", "branch": f"wf/{run_id}/impl", "log": [f"wf: impl ({run_id})", "first"]}
+    assert seen == {"made": "made\n", "branch": f"wf/{run_id}/impl", "log": ["Update made.txt", "first"]}
     assert fake.specs[1].cwd != fake.specs[0].cwd
 
 

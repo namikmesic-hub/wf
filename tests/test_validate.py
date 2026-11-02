@@ -633,6 +633,31 @@ def test_branches_named_in_a_sub_workflow_are_checked_against_the_parent(tmp_pat
     ])
 
 
+def test_commit_message_is_a_template_on_an_agent_that_the_runner_commits_for(tmp_path):
+    report = check(tmp_path, flow("""
+        a: {needs: [start], instruction: x, access: edit, workspace: new, commit_message: "Fix {{ start.task }}"}
+        b: {needs: [start], instruction: x, access: full, workspace: new, commit_message: "{{ nope }}"}
+        c: {needs: [a], instruction: x, access: edit, workspace: a, commit_message: "{{ c.summary }}"}
+        d: {needs: [c], instruction: x, access: edit, workspace: a,
+            commit_message: "{{ 'Go on' if session.continued else 'Start' }}"}
+        e: {needs: [start], instruction: x, commit_message: Review}
+        f: {needs: [start], instruction: x, access: review, commit_message: Review}
+        g: {needs: [start], instruction: x, access: edit, workspace: temp, commit_message: Notes}
+        h: {needs: [g], instruction: x, access: edit, workspace: g, commit_message: Notes}
+    """))
+    assert_problems(report, [
+        ("error", "nodes.b.commit_message", "unknown name `nope`"),
+        ("warning", "nodes.c.commit_message", "reads `c.summary`, but `c` might not have run yet"),
+        ("error", "nodes.d.commit_message", "`session` isn't available here: the message renders before the session starts"),
+        ("error", "nodes.e.commit_message", "after an `edit` or `full` agent, but this node's access is `read-only`"),
+        ("error", "nodes.f.commit_message", "after an `edit` or `full` agent, but this node's access is `review`"),
+        ("error", "nodes.g.commit_message", "in a git worktree that it made, but this node's workspace is `temp`"),
+        ("error", "nodes.h.commit_message", "in a git worktree that it made, but this node's workspace is `temp`"),
+    ])
+    report = check(tmp_path, flow("a: {needs: [start], command: x, workspace: new, commit_message: Fix}"))
+    assert_problems(report, [("error", "nodes.a.commit_message", "unknown key")])
+
+
 # ---------- warnings ----------
 
 BRANCHES = """

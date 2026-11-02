@@ -18,11 +18,14 @@ passes, so a loop keeps working on one branch.
 
 The runner commits, not the agent: Codex's sandbox keeps .git read-only. After
 an `edit` or `full` agent finishes in a worktree the runner made, anything
-left uncommitted becomes the commit "wf: <node> (<run-id>)". Before a retry,
-the worktree goes back to the commit the job started from, so a retry is the
-same instruction on the same commit.
+left uncommitted becomes one commit. Its message is the node's `commit_message`
+(nodes.py renders it), or else default_message(), which names the changed
+files: "Update docs/tools.md and 2 more files". Neither puts a node id or a run
+id into the project's history. Before a retry, the worktree goes back to the
+commit the job started from, so a retry is the same instruction on the same
+commit.
 The runner never commits, or resets, your own checkout. Commits skip hooks, so
-the message is only that line. They are signed when your git config says so
+the message is only that text. They are signed when your git config says so
 (commit.gpgsign), with your key. A run that may commit first checks that the
 key signs with nobody there (check_signing), so a key that can't fails the run
 before any agent works for it.
@@ -191,15 +194,19 @@ def reset(path: str | Path, commit: str) -> None:
     _git(path, "clean", "--quiet", "-ffd")  # -ff: nested git repos (an agent's clone) go too
 
 
-def commit_all(path: str | Path, message: str) -> str | None:
-    """Commit everything left uncommitted in a runner-made worktree. Returns the new commit, if any."""
+def commit_all(path: str | Path, message: str | None = None) -> str | None:
+    """Commit everything left uncommitted in a runner-made worktree, with `message`, or else with
+    default_message(). Returns the new commit, if any."""
     if not _git(path, "status", "--porcelain"):
         return None
     _git(path, "add", "--all")
-    if not _git(path, "diff", "--cached", "--name-only"):
+    changed = _git(path, "-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--no-renames", strip=False,
+                   errors="replace")  # a name that isn't UTF-8 gets a replacement character, not a failed commit
+    changed = [name for name in changed.split("\n") if name]
+    if not changed:
         return None  # e.g. only a submodule's own files changed: nothing to commit here
     # No hooks, not even prepare-commit-msg, which --no-verify still runs: one could add a trailer
-    commit = [*_identity(path), "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", message]
+    commit = [*_identity(path), "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", message or default_message(changed)]
     if not _signs(path):
         _git(path, *commit)
         return head(path)
@@ -213,6 +220,13 @@ def commit_all(path: str | Path, message: str) -> str | None:
         key = _signing_key(path) or "your default key"
         raise WorkspaceError(f"can't sign the commit with {key} (commit.gpgsign is on): {error}") from error
     return head(path)
+
+
+def default_message(changed: list[str]) -> str:
+    """The message of a commit for a node without `commit_message`: it names the changed files, in git's order,
+    and no part of wf. `Update docs/tools.md`, or `Update docs/tools.md and 2 more files`."""
+    more = len(changed) - 1
+    return f"Update {changed[0]}" + (f" and {more} more file{'s' if more > 1 else ''}" if more else "")
 
 
 def check_signing(repo: str | Path) -> None:
@@ -653,11 +667,12 @@ def _exit(signum: int) -> None:
 
 
 def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, timeout: float = 600,
-         env: dict[str, str] | None = None, input: str | None = None, codes: tuple[int, ...] = (0,)) -> str:
-    """git's output. `codes`: the exit codes that aren't a failure. A failure raises WorkspaceError, or with
-    check=False returns ""."""
+         env: dict[str, str] | None = None, input: str | None = None, codes: tuple[int, ...] = (0,),
+         errors: str | None = None) -> str:
+    """git's output. `codes`: the exit codes that aren't a failure. `errors`: how to decode bytes that aren't
+    UTF-8, as for open(). A failure raises WorkspaceError, or with check=False returns ""."""
     stop = _stop.get()
-    process = _start(cwd, args, env, stop, input is not None)
+    process = _start(cwd, args, env, stop, input is not None, errors)
     try:
         with process:
             stdout, stderr = _output(process, args, timeout, stop, input)
@@ -671,7 +686,7 @@ def _git(cwd: str | Path, *args: str, check: bool = True, strip: bool = True, ti
 
 
 def _start(cwd: str | Path, args: tuple[str, ...], env: dict[str, str] | None,
-           stop: threading.Event | None, piped: bool = False) -> subprocess.Popen:
+           stop: threading.Event | None, piped: bool = False, errors: str | None = None) -> subprocess.Popen:
     """git, started and in _running, unless its caller was cancelled or wf is exiting. A session of
     its own: no terminal for a signing program to ask on, and one process group, so stopping git
     stops the signing program too."""
@@ -684,8 +699,8 @@ def _start(cwd: str | Path, args: tuple[str, ...], env: dict[str, str] | None,
                 raise _Stopped(f"git {_what(args)} wasn't run: {why}")
             try:
                 process = subprocess.Popen(["git", *args], cwd=cwd, stdin=subprocess.PIPE if piped else subprocess.DEVNULL,
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
-                                           env=git_env(GIT_TERMINAL_PROMPT="0", **(env or {})))
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors=errors,
+                                           start_new_session=True, env=git_env(GIT_TERMINAL_PROMPT="0", **(env or {})))
             except OSError as error:
                 raise WorkspaceError(f"can't run git: {error}") from error
             _running.add(process)

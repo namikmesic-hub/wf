@@ -202,6 +202,7 @@ class AgentNode(_Node):
     tools_with_shell: StrictBool | None = None  # only here, not in defaults: each such node says so
     project_instructions: StrictBool | None = None
     stall: Stall | None = None
+    commit_message: str | None = None
 
 
 class CommandNode(_Node):
