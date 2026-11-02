@@ -273,13 +273,15 @@ def test_permission_requests_are_answered_from_the_access_level(repo, monkeypatc
 def test_review_allows_commands_as_full_does_but_refuses_a_git_push(repo, monkeypatch, wf_home):
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
                    check=True)
-    commands = ["uv run pytest -q", "gh pr view 12 --comments", "git push origin HEAD", "cd sub && git -C .. push --force",
-                "git log --grep push"]
+    pushes = ["git push origin HEAD", "cd sub && git -C .. push --force", "git --git-dir .git -c remote.o.pushurl=u push o",
+              "git --work-tree . push", "\\git push", "'git' push", 'git -C "a b" push', "git --git-dir=.git push"]
+    commands = ["uv run pytest -q", "gh pr view 12 --comments", *pushes, "git log --grep push", "git commit -m push"]
     log = cursor(monkeypatch, repo, [*[{"permission": {"kind": "execute", "title": f"`{c}`", "rawInput": {"command": c}}}
                                        for c in commands], permission_requests()[3], GOOD])
     assert run("access: review\n") == 0
     # the commands, an edit outside the workspace (as at full: the runner's check guards the reviewed one), submit_result
-    assert answers(log) == [f"{a}-once" for a in ("allow", "allow", "reject", "reject", "allow", "allow", "allow")]
+    expected = ["allow", "allow", *["reject"] * len(pushes), "allow", "allow", "allow", "allow"]
+    assert answers(log) == [f"{a}-once" for a in expected]
     (start,) = entries(log, "start")
     assert start["settings"]["permissions"] == {"allow": [], "deny": []}
     assert sent(log, "session/set_mode")[0]["modeId"] == "agent"

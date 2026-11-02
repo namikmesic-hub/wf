@@ -41,8 +41,9 @@ Access levels map to Codex's sandbox: read-only, workspace-write and
 danger-full-access, with approvalPolicy "never" so nothing stops to ask (any
 approval request that still arrives is declined). `review` gets
 danger-full-access too, in the runner's copy of the workspace. Codex reads
-its rules for commands from `.rules` files, and thread/start takes none, so
-only the copy's git config stops `git push` there. Web search is "live" with
+its rules for commands from `.rules` files. The ThreadStartParams schema of
+codex-cli 0.163.0 (`codex app-server generate-json-schema`) has no field for
+such rules, so only the copy's git config stops `git push` there. Web search is "live" with
 `web: true` and "disabled" otherwise (Codex's default, "cached", is never
 left in place), and a workspace-write sandbox gets network access only with
 `web: true`.

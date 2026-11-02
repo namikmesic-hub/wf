@@ -42,9 +42,11 @@ When a run succeeds its worktrees go and their branches stay, and `wf continue` 
 (restore). A failed run keeps its worktrees for `wf retry`.
 
 An agent with `access: review` works in a copy of its workspace (review_copy), which nodes.py makes
-for each attempt in ~/.wf/temp/<run-id>/review-copies/ and removes after it (discard_copy). state()
-records the reviewed worktree before the job, and changed_since() says after each attempt whether it
-or its branch changed.
+for each attempt in ~/.wf/temp/<run-id>/review-copies/ and removes when the job ends (discard_copy).
+state() records the reviewed worktree before the job, with its objects in
+~/.wf/temp/<run-id>/review-objects/, and changed_since() says before and after each attempt whether
+the worktree or its branch changed. The copy isn't a clone or a linked worktree: a clone makes the
+worktree its `origin` remote, and a linked worktree shares the refs and the config of the repository.
 
 These are plain blocking functions (git is a subprocess). nodes.py runs them
 in a thread, one at a time per run, because parallel `git worktree add`
@@ -68,6 +70,7 @@ from .config import home
 
 GRACE = 5  # seconds a stopped git gets to remove its temporary and lock files before wf kills it
 NO_PUSH = "wf-review-copy-cannot-push::"  # a transport that git has no program for, where a review copy pushes
+PRE_PUSH = "#!/bin/sh\necho 'wf-review-copy-cannot-push: this is a review copy, and its pushes fail' >&2\nexit 1\n"
 LISTED = 10  # changed files that the review check names
 
 
@@ -369,34 +372,42 @@ def uncommitted(repo: str | Path) -> list[Path]:
     return [Path(top) / entry[3:] for entry in out.split("\0") if len(entry) > 3] if top else []
 
 
-def review_copy(path: str | Path, copy: Path) -> Path:
+def review_copy(path: str | Path, copy: Path, tree: str, objects: Path) -> Path:
     """Make `copy` a copy of the git worktree that holds `path`, for an agent with `access: review`, and
-    return the folder in it that matches `path`. A copy that is there already goes first.
+    return the folder in it that matches `path`. A copy that is there already goes first. `tree` is the
+    worktree's files as state() found them, and `objects` the object folder that state() wrote to.
 
-    The copy is a repository of its own that borrows the worktree's objects (objects/info/alternates),
-    so it is quick to make and needs little disk. It has the worktree's branches, remote-tracking
-    branches and tags, its remotes and the config of its branch, and the same branch or commit checked
-    out. Then each file that differs from that commit, staged or not, and each untracked file is copied
-    in. The files that git ignores, such as a virtual environment, aren't. The copy's config sends each
-    push to NO_PUSH, so it fails. What the agent commits, fetches or configures stays in the copy."""
+    The copy is a repository of its own that borrows the worktree's objects (objects/info/alternates).
+    It has the worktree's branches, remote-tracking branches and tags, its remotes, its filters and the
+    config of its branch, and the same branch or commit checked out. git then writes the files of `tree`,
+    so the copy has each change that isn't committed, and each untracked file, but not the files that git
+    ignores, such as a virtual environment. Only the objects are shared: git writes each file again.
+    A push fails there (NO_PUSH, PRE_PUSH). What the agent commits, fetches or configures stays in the copy."""
     top = _top(path)
     discard_copy(copy)
     copy.mkdir(parents=True)
     _git(copy, "init", "--quiet", f"--object-format={_git(top, 'rev-parse', '--show-object-format')}")
-    objects = _git(top, "rev-parse", "--path-format=absolute", "--git-path", "objects")
-    (copy / ".git" / "objects" / "info" / "alternates").write_text(objects + "\n", encoding="utf-8")
+    alternates = [_git(top, "rev-parse", "--path-format=absolute", "--git-path", "objects"), str(objects)]
+    (copy / ".git" / "objects" / "info" / "alternates").write_text("\n".join(alternates) + "\n", encoding="utf-8")
     _git(copy, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--update-head-ok", "--no-write-fetch-head",
          str(top), "+refs/heads/*:refs/heads/*", "+refs/remotes/*:refs/remotes/*", "+refs/tags/*:refs/tags/*")
     branch = _git(top, "symbolic-ref", "--quiet", "HEAD", check=False)
     for remote in _copy_config(top, copy, branch):
         _git(copy, "config", f"remote.{remote}.pushurl", NO_PUSH)
-    _git(copy, "config", f"url.{NO_PUSH}.pushInsteadOf", "")  # a push to a URL goes there too
+    _git(copy, "config", f"url.{NO_PUSH}.pushInsteadOf", "")  # a push to a URL goes there too, unless a longer rule wins
+    hooks = copy / ".git" / "wf-hooks"
+    hooks.mkdir()
+    (hooks / "pre-push").write_text(PRE_PUSH, encoding="utf-8")
+    (hooks / "pre-push").chmod(0o755)
+    _git(copy, "config", "core.hooksPath", str(hooks))
+    if storage := _lfs_storage(top):
+        _git(copy, "config", "lfs.storage", storage)
     if branch:
         _git(copy, "symbolic-ref", "HEAD", branch)
     else:
         _git(copy, "update-ref", "--no-deref", "HEAD", head(top))
-    _git(copy, "reset", "--quiet", "--hard")
-    _copy_changes(top, copy)
+    _git(copy, "read-tree", "--reset", "-u", tree)
+    _git(copy, "reset", "--quiet")  # the index of the commit: the changes show as not staged, as untracked files
     folder = copy / Path(path).resolve().relative_to(top)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
@@ -412,6 +423,8 @@ def discard_copy(copy: Path) -> None:
         try:
             shutil.rmtree(copy)
         except OSError:
+            with contextlib.suppress(OSError):
+                os.chmod(copy, 0o700)
             for folder, folders, _ in os.walk(copy):  # top down: each folder opens before os.walk goes in
                 for name in folders:
                     if not os.path.islink(os.path.join(folder, name)):
@@ -422,27 +435,43 @@ def discard_copy(copy: Path) -> None:
         raise WorkspaceError(f"can't remove the review copy {copy}")
 
 
-def state(path: str | Path) -> dict:
+def state(path: str | Path, objects: Path) -> dict:
     """What the review check compares in a git worktree: its branch (None when HEAD is detached), its
     commit, and a tree of its files. `path` is in the worktree. The tree has each file as it is, committed
     or not, but not the files that git ignores or can't read. git builds the tree in an index of its own,
-    so the worktree's index doesn't change. Only the objects of its files are written, and nothing refers
-    to them."""
+    so the worktree's index doesn't change. The objects that it writes go to `objects`, not to the
+    worktree's repository."""
     top = _top(path)
     index = _git(top, "rev-parse", "--path-format=absolute", "--git-path", "index")
+    objects.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="wf-review-") as folder:
-        scratch = os.path.join(folder, "index")
+        env = {"GIT_INDEX_FILE": os.path.join(folder, "index"), **_apart(top, objects)}
         with contextlib.suppress(FileNotFoundError):
-            shutil.copyfile(index, scratch)  # with its file data, git reads only the files that changed
-        _git(top, "add", "--all", "--ignore-errors", env={"GIT_INDEX_FILE": scratch}, check=False)
-        tree = _git(top, "write-tree", env={"GIT_INDEX_FILE": scratch})
+            shutil.copyfile(index, env["GIT_INDEX_FILE"])  # with its file data, git reads only the files that changed
+        _unflag(top, env)
+        _git(top, "add", "--all", "--ignore-errors", env=env, check=False)
+        tree = _git(top, "write-tree", env=env)
     return {"branch": _git(top, "symbolic-ref", "--quiet", "HEAD", check=False) or None, "commit": head(top),
             "tree": tree}
 
 
-def changed_since(path: str | Path, before: dict) -> list[str]:
+def _apart(path: str | Path, objects: Path) -> dict:
+    """The environment for a git command that writes its objects to `objects` and reads those of the repository too."""
+    stored = _git(path, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    return {"GIT_OBJECT_DIRECTORY": str(objects), "GIT_ALTERNATE_OBJECT_DIRECTORIES": stored}
+
+
+def _unflag(top: Path, env: dict) -> None:
+    """Clear the assume-unchanged and skip-worktree flags in an index, so that `git add` reads those files too."""
+    listed = _git(top, "-c", "core.quotePath=false", "ls-files", "-z", "-v", env=env, strip=False).split("\0")
+    flagged = [entry[2:] for entry in listed if entry[:1] == "S" or entry[:1].islower()]  # "s": both flags
+    for at in range(0, len(flagged), 500):
+        _git(top, "update-index", "--no-assume-unchanged", "--no-skip-worktree", "--", *flagged[at:at + 500], env=env)
+
+
+def changed_since(path: str | Path, before: dict, objects: Path) -> list[str]:
     """How the worktree that holds `path` changed since state() gave `before`, in words. [] when it didn't."""
-    after, said = state(path), []
+    after, said = state(path, objects), []
     if after["branch"] != before["branch"]:
         said.append(f"it has {_checked_out(after)} checked out now, not {_checked_out(before)}")
     elif after["commit"] != before["commit"]:
@@ -450,7 +479,7 @@ def changed_since(path: str | Path, before: dict) -> list[str]:
         said.append(f"{moved} moved from {before['commit'][:12]} to {after['commit'][:12]}")
     if after["tree"] != before["tree"]:
         names = _git(path, "diff-tree", "-r", "-z", "--name-only", "--no-renames", before["tree"], after["tree"],
-                     check=False, strip=False).split("\0")
+                     check=False, strip=False, env=_apart(path, objects)).split("\0")
         names = [name for name in names if name]
         more = f" and {len(names) - LISTED} more" if len(names) > LISTED else ""
         said.append(f"files changed: {', '.join(names[:LISTED])}{more}" if names else "its files changed")
@@ -472,15 +501,18 @@ def _top(path: str | Path) -> Path:
 
 
 def _copy_config(top: Path, copy: Path, branch: str) -> list[str]:
-    """Copy the worktree's remotes, without their push URLs, and the config of its branch into the copy.
-    Then `git fetch` and `gh` work there as in the worktree. Returns the remotes' names."""
-    found = _git(top, "config", "--local", "--null", "--get-regexp", r"^(remote|branch)\.", check=False, strip=False)
+    """Copy the worktree's remotes, without their push URLs, its filters (such as Git LFS), its line end
+    settings and the config of its branch into the copy. Then `git fetch` and `gh` work there as in the
+    worktree, and git writes each file as it does there. Returns the remotes' names."""
+    found = _git(top, "config", "--local", "--null", "--get-regexp", r"^(remote|branch|filter|lfs)\.|^core\.(autocrlf|eol)$",
+                 check=False, strip=False)
     remotes = []
     for entry in filter(None, found.split("\0")):
         key, _, value = entry.partition("\n") if "\n" in entry else (entry, "", "true")  # a key alone is true
         section, _, rest = key.partition(".")
         name, _, variable = rest.rpartition(".")
-        if (section == "branch" and name != branch.removeprefix("refs/heads/")) or variable == "pushurl":
+        if (section == "branch" and name != branch.removeprefix("refs/heads/")) or variable == "pushurl" \
+                or key == "lfs.storage":  # _lfs_storage gives it, as an absolute path
             continue
         if section == "remote" and name and name not in remotes:
             remotes.append(name)
@@ -488,30 +520,11 @@ def _copy_config(top: Path, copy: Path, branch: str) -> list[str]:
     return remotes
 
 
-def _copy_changes(top: Path, copy: Path) -> None:
-    """Make the copy's files match the worktree's where they differ from its commit. Deletions go first,
-    since a file can give way to a folder of the same name. A nested repository isn't copied."""
-    listed = _git(top, "--no-optional-locks", "-c", "core.quotePath=false", "status", "--porcelain", "-z",
-                  "--no-renames", "--untracked-files=all", "--ignore-submodules=all", strip=False)  # no index write
-    paths = [entry[3:] for entry in listed.split("\0") if len(entry) > 3]  # "XY path"
-    there = [path for path in paths if os.path.lexists(top / path)]
-    try:
-        for path in set(paths) - set(there):
-            _remove(copy / path)
-        for path in there:
-            if (top / path).is_symlink() or not (top / path).is_dir():
-                _remove(copy / path)
-                (copy / path).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(top / path, copy / path, follow_symlinks=False)
-    except OSError as error:
-        raise WorkspaceError(f"can't copy {top} for `access: review`: {error}") from error
-
-
-def _remove(path: Path) -> None:
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    elif os.path.lexists(path):
-        path.unlink()
+def _lfs_storage(top: Path) -> str | None:
+    """The folder where Git LFS keeps the worktree's files, when there is one, so that the copy uses it too."""
+    common = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    folder = common / (_git(top, "config", "--local", "--get", "lfs.storage", check=False) or "lfs")
+    return str(folder) if folder.is_dir() else None
 
 
 def branches(repo: str | Path, run_id: str, named: list[str] | None = None) -> list[str]:

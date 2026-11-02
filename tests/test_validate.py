@@ -749,9 +749,12 @@ def test_a_review_needs_a_git_worktree_to_copy_and_a_temp_workspace_is_none(tmp_
     report = check(tmp_path, flow("""
         a: {needs: [start], instruction: x, workspace: temp}
         b: {needs: [start], command: x, workspace: temp}
+        c: {needs: [b], instruction: x, workspace: b}
+        d: {needs: [b], command: x, workspace: new}
+        e: {needs: [d], instruction: x, workspace: d}
     """).replace("  harness: claude-code\n", "  harness: claude-code\n  access: review\n"))
-    assert_problems(report, [("error", "nodes.a", "`access: review` works in a copy of a git worktree, and a `temp` "
-                                                  "workspace is an empty folder")])
+    said = "`access: review` works in a copy of a git worktree, and a `temp` workspace is an empty folder"
+    assert_problems(report, [("error", "nodes.a", said), ("error", "nodes.c", said)])
 
 
 def test_a_review_that_could_run_while_an_agent_edits_its_workspace_warns(tmp_path):

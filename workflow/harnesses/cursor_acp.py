@@ -157,7 +157,10 @@ WRITES_WITHOUT_ASKING = [  # outside the workspace: temp folders, and Markdown f
 ]
 DENY = {"read-only": ["Write(**)"], "edit": WRITES_WITHOUT_ASKING, "full": [], "review": []}  # Cursor's `*` matches any text
 MODES = {"read-only": "ask", "edit": "agent", "full": "agent", "review": "agent"}
-PUSH = re.compile(r"""(?:^|[\s;&|(){}`/"'])git(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+push(?=$|[\s;&|)}`"'])""")  # git -C x push too
+VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""  # a word, or a quoted one with spaces
+SPLIT = "-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env"  # git's options with a value after a space
+PUSH = re.compile(rf"""(?:^|[\s;&|(){{}}`/"'\\])git["']?(?:\s+(?:(?:{SPLIT})\s+{VALUE}|--?[\w-]+(?:={VALUE})?))*"""
+                  rf"""\s+["']?push(?=$|[\s;&|)}}`"'])""")  # git -C x push too, and a text that only names it
 SECRETS = ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN")
 NOTICES = (  # Cursor's own messages when the account needs attention
     "Please sign in to continue", "Upgrade your plan to continue", "Add a payment method to continue",

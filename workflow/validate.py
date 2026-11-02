@@ -741,7 +741,8 @@ class _Checker:
 
     def _workspace(self, node_id: str) -> None:
         workspace = self.wf.setting(node_id, "workspace")
-        if workspace == "temp" and self.nodes[node_id].kind == "agent" and self.wf.setting(node_id, "access") == "review":
+        if self.nodes[node_id].kind == "agent" and self.wf.setting(node_id, "access") == "review" \
+                and self._workspace_kind(node_id) == "temp":
             self.error(f"nodes.{node_id}", "`access: review` works in a copy of a git worktree, and a `temp` workspace "
                                            "is an empty folder")
         if workspace in ("repo", "new", "temp"):
@@ -896,6 +897,15 @@ class _Checker:
         if name in self.nodes:
             return bool(steps) and self.nodes[name].for_each is None
         return {"start": 1, "run": 1, "workspace": 2}.get(name, 99) <= len(steps)
+
+    def _workspace_kind(self, node_id: str, seen: tuple = ()) -> str | None:
+        """repo, new or temp: the workspace that a node gets, through `workspace: <node>` too. None when it's unknown."""
+        workspace = self.wf.setting(node_id, "workspace")
+        if workspace in ("repo", "new", "temp"):
+            return workspace
+        if workspace in self.nodes and workspace not in seen and workspace != node_id:
+            return self._workspace_kind(workspace, (*seen, node_id))
+        return None
 
     def _concurrent_edits(self) -> None:
         editors = [n for n, node in self.nodes.items()
