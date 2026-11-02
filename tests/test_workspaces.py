@@ -282,6 +282,7 @@ def test_a_file_name_that_isnt_utf_8_doesnt_stop_the_runners_commit(repo):
     ("{{ start.note }}", "  ", 'Run failed: impl: `commit_message` renders to "  ", but a commit needs a message'),
     ("{{ start.title }}", "x", "Run failed: impl: `commit_message` renders to none, but a commit needs a message"),
     ("Fix{{ start.note }}", "\0", "Run failed: impl: `commit_message` renders to text with a NUL character"),
+    ("{{ start.count }}", "x", "Run failed: impl: `commit_message` renders to 42, but a commit needs a message"),
 ])
 def test_a_commit_message_that_cant_render_fails_the_node_before_the_agent_works(repo, monkeypatch, capsys,
                                                                                 template, note, error):
@@ -289,10 +290,20 @@ def test_a_commit_message_that_cant_render_fails_the_node_before_the_agent_works
     write(f"""
         impl: {{needs: [start], instruction: work, access: edit, workspace: new, commit_message: "{template}"}}
         later: {{needs: [impl], command: "true"}}
-    """, inputs="{note: {type: string}, title: {type: string, optional: true}}")
+    """, inputs="{note: {type: string}, title: {type: string, optional: true}, count: {type: integer, default: 42}}")
     assert cli.main(["run", "flow.yaml", f"note={note}"]) == 1
     assert error in capsys.readouterr().err
     assert fake.specs == []
+
+
+def test_a_commit_message_with_a_lone_surrogate_fails_the_node_before_the_agent_works(repo, monkeypatch, capsys):
+    fake = use(monkeypatch, edits({}, {"summary": "Fix \ud800"}), edits({"new.txt": "made\n"}, {"summary": "done"}))
+    assert run("""
+        ask: {needs: [start], instruction: look}
+        impl: {needs: [ask], instruction: work, access: edit, workspace: new, commit_message: "{{ ask.summary }}"}
+    """) == 1
+    assert "Run failed: impl: `commit_message` renders to text that isn't valid Unicode" in capsys.readouterr().err
+    assert len(fake.specs) == 1
 
 
 def test_an_agent_in_your_own_checkout_leaves_its_commit_message_unused(repo, monkeypatch):

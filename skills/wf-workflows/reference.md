@@ -249,7 +249,7 @@ A `commit_message` holds the text that its template writes.
 |---|---|---|---|
 | An `edit` or `full` agent in a worktree that the runner made leaves changes, and its node has `commit_message` | The runner commits them with the rendered message, stripped. Each `for_each` item renders its own | `workflow/nodes.py:653` | `tests/test_workspaces.py::test_the_runner_commits_with_the_message_that_the_nodes_commit_message_renders` |
 | The node has no `commit_message` | The message names the first changed file in git's order and counts the others. A renamed file counts as two | `workflow/workspaces.py:233` | `tests/test_workspaces.py::test_without_commit_message_the_runner_names_the_changed_files_and_no_part_of_wf`, `tests/test_workspaces.py::test_the_default_message_names_the_first_changed_file_and_counts_the_others`, `tests/test_workspaces.py::test_the_default_message_names_a_file_on_one_line_and_counts_a_rename_as_two_files`, `tests/test_workspaces.py::test_a_file_name_that_isnt_utf_8_doesnt_stop_the_runners_commit` |
-| `commit_message` fails to render, or renders to empty text, none, or text with a NUL character | The node fails before an agent works | `workflow/nodes.py:684`, `workflow/nodes.py:687`, `workflow/nodes.py:691` | `tests/test_workspaces.py::test_a_commit_message_that_cant_render_fails_the_node_before_the_agent_works` |
+| `commit_message` fails to render, or renders to a value that isn't text, to empty text, or to text with a NUL character or a lone surrogate | The node fails before an agent works | `workflow/nodes.py:684`, `workflow/nodes.py:687`, `workflow/nodes.py:691`, `workflow/nodes.py:695` | `tests/test_workspaces.py::test_a_commit_message_that_cant_render_fails_the_node_before_the_agent_works`, `tests/test_workspaces.py::test_a_commit_message_with_a_lone_surrogate_fails_the_node_before_the_agent_works` |
 | The agent works in your own checkout | The runner doesn't commit, and `commit_message` doesn't render | `workflow/nodes.py:473` | `tests/test_workspaces.py::test_an_agent_in_your_own_checkout_leaves_its_commit_message_unused` |
 | `commit_message` is on an agent without `edit` or `full` access, or in a `temp` workspace, or reads `session` | `wf validate` error | `workflow/validate.py:748`, `workflow/validate.py:751`, `workflow/validate.py:736` | `tests/test_validate.py::test_commit_message_is_a_template_on_an_agent_that_the_runner_commits_for` |
 | `commit_message` is empty, or reads the output of its own node | `wf validate` error. That output comes from an earlier pass | `workflow/validate.py:733`, `workflow/validate.py:741` | `tests/test_validate.py::test_commit_message_is_a_template_on_an_agent_that_the_runner_commits_for` |
@@ -277,10 +277,10 @@ An attempt holds both slots until it ends.
 | Condition | Effect | Source line | Conformance assertion |
 |---|---|---|---|
 | `max_agents = N` in `~/.wf/config.toml`, or `WF_MAX_AGENTS=N`, which wins | At most N agent attempts hold a slot at once. | `workflow/capacity.py:57` | `test_two_runs_in_separate_processes_share_the_cap` |
-| A `[capacity]` key is set | It caps live sessions of that harness. Other harnesses use their own caps. | `workflow/nodes.py:723` | `test_a_harness_cap_queues_only_that_harness` |
-| Both caps are set | An attempt takes both slots before its session opens, and releases both when it ends. | `workflow/nodes.py:723`, `workflow/nodes.py:746` | `test_both_caps_apply_before_a_session_opens` |
+| A `[capacity]` key is set | It caps live sessions of that harness. Other harnesses use their own caps. | `workflow/nodes.py:728` | `test_a_harness_cap_queues_only_that_harness` |
+| Both caps are set | An attempt takes both slots before its session opens, and releases both when it ends. | `workflow/nodes.py:728`, `workflow/nodes.py:751` | `test_both_caps_apply_before_a_session_opens` |
 | An attempt finds every slot taken | It waits. It keeps its retries, and its `timeout` starts once it has a slot. | `workflow/nodes.py:338` | `test_a_waiting_attempt_keeps_its_retries_and_its_timeout_starts_with_its_slot` |
-| A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:731` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
+| A run limit is reached while it waits | The attempt doesn't start, and the run pauses at the limit. | `workflow/nodes.py:736` | `test_a_limit_reached_while_waiting_ends_the_wait_and_the_attempt_never_starts` |
 
 ## Sessions
 

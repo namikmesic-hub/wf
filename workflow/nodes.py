@@ -689,6 +689,11 @@ def _commit_message(job: Job, ctx: RunContext, variables: dict) -> str | None:
         raise _Failed(f"`commit_message` renders to {shown}, but a commit needs a message", job["attempt"])
     if "\0" in value:
         raise _Failed("`commit_message` renders to text with a NUL character, which git can't keep", job["attempt"])
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _Failed("`commit_message` renders to text that isn't valid Unicode, which git can't take",
+                      job["attempt"]) from None
     return value.strip()
 
 
