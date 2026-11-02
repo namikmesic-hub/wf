@@ -505,6 +505,25 @@ def test_doctor_reports_a_server_it_cannot_reach(vendor, monkeypatch):
     assert dict(report.lines)["next step"] == "check your network connection, then run `wf tools linear doctor` again"
 
 
+@pytest.mark.parametrize("problem,next_step", [
+    ("App is not enabled for Slack MCP server access",
+     "turn on Model Context Protocol under Agents & AI Apps. "
+     "Reinstall the app. Then run `wf tools slack doctor` again"),
+    ("invalid_request", "check your network connection, then run `wf tools slack doctor` again"),
+])
+def test_doctor_gives_setup_advice_only_when_slack_mcp_is_disabled(monkeypatch, problem, next_step):
+    vendor = FakeVendor(mcp_status=400, mcp_error=problem).start()
+    monkeypatch.setitem(TOOLS, "slack", vendor.tool("slack"))
+    try:
+        sign_in(vendor, "slack")
+        report = asyncio.run(doctor.check(TOOLS["slack"]))
+    finally:
+        vendor.stop()
+    assert report.status == "fail"
+    assert "HTTP 400" in dict(report.lines)["problem"]
+    assert dict(report.lines)["next step"] == next_step
+
+
 def test_doctor_says_when_the_keyring_cannot_be_read(fake_keyring, monkeypatch):
     def locked(service, name):
         raise KeyringLocked("the Keychain is locked")

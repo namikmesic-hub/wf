@@ -118,7 +118,8 @@ class FakeVendor:
                     status = 401
                 if status is not None:
                     header = f'Bearer resource_metadata="{self.base}/.well-known/oauth-protected-resource/mcp"'
-                    response = JSONResponse({"error": "invalid_token"}, status_code=status, headers={"WWW-Authenticate": header})
+                    response = JSONResponse({"error": self.settings.get("mcp_error", "invalid_token")},
+                                            status_code=status, headers={"WWW-Authenticate": header})
                     return await response(scope, receive, send)
             return await mcp_app(scope, receive, send)  # the lifespan too
 

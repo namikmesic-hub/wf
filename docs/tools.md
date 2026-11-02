@@ -79,13 +79,15 @@ Slack's MCP server only takes OAuth clients that are Slack apps.
 And only internal apps or apps in the Slack Marketplace can use it.
 So make an internal app for wf once:
 
-1. At https://api.slack.com/apps, create a new app from scratch in your workspace.
-2. Under Agents, turn on "Slack Model Context Protocol (MCP) Server".
+1. At https://api.slack.com/apps, select **Create new app**.
+   Select **Blank app** for your workspace.
+2. Under **Agents & AI Apps**, turn on **Model Context Protocol**.
 3. Under OAuth & Permissions, add the redirect URL `http://localhost:47152/callback`.
    With `--port`, or `signin_port` under `[tools]` in `~/.wf/config.toml`, the URL has that port instead.
    Add the user token scopes that setup prints, which are the read scopes in the table below.
    With `--write`, setup asks for the write scopes too, so the app needs them as well.
-4. Under Basic Information, copy the Client ID and the Client Secret.
+4. Install the app to your workspace.
+5. Under Basic Information, copy the Client ID and the Client Secret.
    Setup asks for them.
 
 | Slack scopes | |
@@ -227,11 +229,10 @@ So `wf tools <name> setup`, which runs doctor, checks the Gmail and Notion lists
 | `slack` | `slack_search_public`, `slack_search_public_and_private`, `slack_search_channels`, `slack_search_users`, `slack_search_emojis`, `slack_read_channel`, `slack_read_thread`, `slack_read_canvas`, `slack_read_file`, `slack_read_list`, `slack_read_user_profile`, `slack_list_user_channels`, `slack_list_channel_members`, `slack_get_reactions` | sending, scheduling and drafting messages, reactions, canvases, lists, file uploads |
 | `granola` | `query_granola_meetings`, `list_meetings`, `get_meetings`, `get_meeting_transcript`, `get_meeting_attachment`, `list_meeting_folders`, `get_account_info` | `switch_workspace`, which changes the workspace in the Granola app, and `sign_out` |
 | `linear` | `list_issues`, `get_issue`, `list_comments`, `list_issue_statuses`, `get_issue_status`, `list_issue_labels`, `list_projects`, `get_project`, `list_project_labels`, `list_milestones`, `get_milestone`, `list_initiatives`, `get_initiative`, `list_initiative_labels`, `get_status_updates`, `list_documents`, `get_document`, `get_attachment`, `extract_images`, `list_cycles`, `list_teams`, `get_team`, `list_users`, `get_user`, `get_workspace`, `list_custom_views`, `list_templates`, `get_template`, `get_triage_responsibility`, `get_notifications`, `list_releases`, `get_release`, `list_release_notes`, `get_release_note`, `list_release_pipelines`, `list_diffs`, `get_diff`, `get_diff_threads`, `list_agent_skills`, `get_agent_skill`, `search_documentation` | the `save_`, `create_`, `delete_`, `restore_` and `retire_` operations, and the ones that mark, share, merge or review |
-| `notion` | `notion-search`, `notion-ai-search`, `notion-fetch`, `notion-get-self`, `notion-get-users`, `notion-get-teams`, `notion-get-groups`, `notion-get-comments`, `notion-get-tool-access`, `notion-get-async-task`, `notion-list-private-pages`, `notion-list-shared-pages`, `notion-list-favorite-pages`, `notion-list-recent-pages`, `notion-list-page-backlinks`, `notion-query-data-sources`, `notion-query-multiple-data-sources`, `notion-query-meeting-notes`, `notion-memory-search`, `notion-get-file-download-urls`, `notion-download-attachment`, `notion-get-enabled-skills`, `notion-download-skill`, `notion-search-agents`, `notion-query-sessions`, `notion-search-sessions`, `notion-get-session-status`, `notion-wait-session`, `notion-list-session-events`, `notion-read-session-event`, `notion-calendar-list-calendars`, `notion-calendar-list-events`, `notion-calendar-list-coworkers-events`, `notion-calendar-list-contacts`, `notion-calendar-list-calendar-resources` | creating, changing, moving, deleting and restoring pages, databases, views, comments and skills, and starting, stopping or messaging a Custom Agent session |
+| `notion` | `notion-search`, `notion-fetch`, `notion-get-self`, `notion-get-users`, `notion-get-teams`, `notion-get-groups`, `notion-get-comments`, `notion-get-tool-access`, `notion-get-async-task`, `notion-list-private-pages`, `notion-list-shared-pages`, `notion-list-favorite-pages`, `notion-list-recent-pages`, `notion-list-page-backlinks`, `notion-query-data-sources`, `notion-query-multiple-data-sources`, `notion-query-meeting-notes`, `notion-memory-search`, `notion-get-file-download-urls`, `notion-download-attachment`, `notion-get-enabled-skills`, `notion-download-skill`, `notion-search-agents`, `notion-query-sessions`, `notion-search-sessions`, `notion-get-session-status`, `notion-wait-session`, `notion-list-session-events`, `notion-read-session-event`, `notion-calendar-list-calendars`, `notion-calendar-list-events`, `notion-calendar-list-coworkers-events`, `notion-calendar-list-contacts`, `notion-calendar-list-calendar-resources` | creating, changing, moving, deleting and restoring pages, databases, views, comments and skills, and starting, stopping or messaging a Custom Agent session |
 | `gmail` | `search_threads`, `get_thread`, `get_message`, `list_labels`, `list_drafts` | `create_draft`, `create_label`, `label_message`, `label_thread`, `unlabel_message`, `unlabel_thread` |
 
 The Notion list is wf's own choice, made from Notion's tool descriptions.
-It has `notion-ai-search`, Notion's older search, which Notion's page calls read-only and which some connections still list.
 Notion groups its tools by task, not by reads and writes.
 The Custom Agent session operations that only look at a session count as reads: querying, searching, its status, waiting for it, and its events.
 Starting, stopping or messaging a session counts as a write.
