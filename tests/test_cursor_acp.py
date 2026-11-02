@@ -274,7 +274,9 @@ def test_review_allows_commands_as_full_does_but_refuses_a_git_push(repo, monkey
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
                    check=True)
     pushes = ["git push origin HEAD", "cd sub && git -C .. push --force", "git --git-dir .git -c remote.o.pushurl=u push o",
-              "git --work-tree . push", "\\git push", "'git' push", 'git -C "a b" push', "git --git-dir=.git push"]
+              "git --work-tree . push", "\\git push", "'git' push", 'git -C "a b" push', "git --git-dir=.git push",
+              "git push>out origin HEAD:x", "git push<in", "git --attr-source HEAD push origin HEAD:x",
+              "git --shallow-file x push", "git send-pack ssh://host/r.git HEAD:refs/heads/x", "git -C .. send-pack .. HEAD"]
     commands = ["uv run pytest -q", "gh pr view 12 --comments", *pushes, "git log --grep push", "git commit -m push"]
     log = cursor(monkeypatch, repo, [*[{"permission": {"kind": "execute", "title": f"`{c}`", "rawInput": {"command": c}}}
                                        for c in commands], permission_requests()[3], GOOD])

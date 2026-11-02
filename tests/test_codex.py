@@ -17,6 +17,7 @@ import pytest
 
 from steering import STEER, at_pause, left_in_mailbox, steer_events, steer_lines
 from workflow import cli, harnesses, runner
+from workflow.harnesses import codex as codex_harness
 from workflow.harnesses.codex import APP_SERVER, Codex, _tokens, program
 from workflow.output_tool import FINISH, REMINDER
 
@@ -130,8 +131,24 @@ def test_review_runs_commands_without_a_sandbox_in_a_copy_of_the_workspace(repo,
     assert run("access: review\n") == 0
     (thread,) = sent(log, "thread/start")
     assert (thread["sandbox"], thread["config"]["web_search"]) == ("danger-full-access", "disabled")  # as at full
+    assert thread["approvalPolicy"] == "untrusted"  # Codex asks about each command that it doesn't know as safe
     (folder,) = (Path(".wf") / "runs").iterdir()
     assert Path(thread["cwd"]) == wf_home / "temp" / folder.name / "review-copies" / "ask"
+
+
+def test_review_allows_each_command_and_edit_that_codex_asks_about_but_a_push_with_git(repo, monkeypatch):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"],
+                   check=True)
+    pushes = ["git push origin HEAD", "/bin/zsh -lc 'git -C .. push --force'", "git push>out origin HEAD:x",
+              "git --attr-source HEAD push origin HEAD:x", "git send-pack ssh://host/r.git HEAD:refs/heads/x"]
+    commands = ["uv run pytest -q", "gh pr view 12 --comments", *pushes, "git log --grep push"]
+    asks = [{"approval": "item/commandExecution/requestApproval", "params": {"command": c}} for c in commands]
+    log = codex(monkeypatch, repo, [*asks, {"approval": "item/fileChange/requestApproval"},
+                                    {"approval": "execCommandApproval", "params": {"command": ["git", "push"]}},
+                                    {"approval": "execCommandApproval", "params": {"command": ["ls"]}}, GOOD])
+    assert run("access: review\n") == 0
+    expected = ["accept", "accept", *["decline"] * len(pushes), "accept", "accept", "denied", "approved"]
+    assert [reply["decision"] for reply in replies(log)[:len(expected)]] == expected
 
 
 def test_without_project_instructions_a_thread_gets_no_repo_agents_md_and_no_repo_skill(repo, monkeypatch):
@@ -325,6 +342,60 @@ end:
     out = output()
     assert out["word"].strip(" .").lower() == "quince"
     assert out["tokens"] > 0
+
+
+@pytest.mark.harness
+def test_a_real_review_node_on_codex_runs_commands_in_its_copy_and_wf_refuses_a_push(tmp_path, monkeypatch, capsys):
+    git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True, capture_output=True)
+    git("init", "-q", "--bare", str(tmp_path / "remote.git"))
+    (tmp_path / "repo").mkdir()
+    monkeypatch.chdir(tmp_path / "repo")
+    git("init", "-q")
+    Path("notes.txt").write_text("hello\n")
+    git("add", "notes.txt")
+    git("commit", "-qm", "first")
+    git("remote", "add", "origin", str(tmp_path / "remote.git"))
+    answered, approval = [], codex_harness._Connection._approval
+
+    def answer(self, method, params):
+        given = approval(self, method, params)
+        answered.append((method, str(params.get("command")), given.get("decision")))
+        return given
+
+    monkeypatch.setattr(codex_harness._Connection, "_approval", answer)
+    Path("flow.yaml").write_text("""
+version: 1
+name: real
+defaults: {harness: codex, effort: low}
+start: {input: {}}
+nodes:
+  check:
+    needs: [start]
+    access: review
+    instruction: >-
+      This step tests what a review copy allows. Run each of these shell commands, one at a time:
+      `echo ran > ran.txt && cat ran.txt`, then `git push origin HEAD:refs/heads/pushed`,
+      then `git -C REVIEWED push origin HEAD:refs/heads/pushed`.
+      Then make the file made.txt with the text `made` with your file edit tool.
+      Report what each command gave.
+    output:
+      ran: {type: string, description: What the first command printed}
+      push: {type: string, description: "What the second command printed, or why it didn't run"}
+      push_from_worktree: {type: string, description: "What the third command printed, or why it didn't run"}
+end:
+  output: {ran: "{{ check.ran }}"}
+""".replace("REVIEWED", str(Path.cwd())))
+    branches = git("branch", "--list").stdout
+    assert cli.main(["run", "flow.yaml"]) == 0, capsys.readouterr()
+    assert "ran" in output()["ran"]
+    commands = [(command, decision) for method, command, decision in answered if "commandExecution" in method]
+    assert any("echo ran" in command and decision == "accept" for command, decision in commands), answered
+    assert sum("push" in command and decision == "decline" for command, decision in commands) == 2, answered
+    assert not any("push" in command and decision == "accept" for command, decision in commands), answered
+    assert any(method == "item/fileChange/requestApproval" and decision == "accept" for method, _, decision in answered)
+    assert not Path("ran.txt").exists() and not Path("made.txt").exists() and git("branch", "--list").stdout == branches
+    remote = subprocess.run(["git", "-C", str(tmp_path / "remote.git"), "for-each-ref"], capture_output=True, text=True)
+    assert remote.stdout == ""
 
 
 def test_without_settings_the_model_lists_defaults_are_used_not_your_codex_config(repo, monkeypatch):

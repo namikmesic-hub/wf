@@ -54,7 +54,8 @@ def test_review_has_every_tool_and_a_shell_as_full_has_but_no_git_push(tmp_path)
     o = options(spec(tmp_path, access="review"))
     assert o.tools is None  # Claude Code's whole default tool set, Bash included
     assert o.permission_mode == "bypassPermissions"
-    pushes = ["Bash(git push)", "Bash(git push *)", "Bash(git * push)", "Bash(git * push *)"]
+    pushes = ["Bash(git push)", "Bash(git push *)", "Bash(git * push)", "Bash(git * push *)",
+              "Bash(git send-pack)", "Bash(git send-pack *)", "Bash(git * send-pack)", "Bash(git * send-pack *)"]
     assert o.disallowed_tools == ["WebSearch", "WebFetch", *pushes]
     assert options(spec(tmp_path, access="review", web=True)).disallowed_tools == pushes
     assert GIT not in o.allowed_tools  # the runner's git tool is for read-only only
@@ -304,7 +305,7 @@ end:
 
 
 @pytest.mark.harness
-def test_a_real_review_node_runs_commands_in_its_copy_and_claude_code_refuses_git_push(tmp_path, monkeypatch, capsys):
+def test_a_real_review_node_runs_commands_in_its_copy_and_claude_code_refuses_a_push_with_git(tmp_path, monkeypatch, capsys):
     git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], check=True, capture_output=True)
     git("init", "-q", "--bare", str(tmp_path / "remote.git"))
     (tmp_path / "repo").mkdir()
@@ -330,14 +331,16 @@ nodes:
       This step tests what a review copy allows. With your Bash tool, run `echo ran > ran.txt && cat ran.txt`.
       Then, in a separate Bash call, run `git push origin HEAD:refs/heads/pushed`.
       Then, in a third Bash call, run `git -C REVIEWED push origin HEAD:refs/heads/pushed`.
+      Then, in a fourth Bash call, run `git send-pack REMOTE HEAD:refs/heads/sent`.
       Report what each one gave.
     output:
       ran: {type: string, description: What the first command printed}
       push: {type: string, description: "What the second command printed, or the error that the tool gave"}
       push_from_worktree: {type: string, description: "What the third command printed, or the error that the tool gave"}
+      send_pack: {type: string, description: "What the fourth command printed, or the error that the tool gave"}
 end:
   output: {ran: "{{ check.ran }}"}
-""".replace("REVIEWED", str(Path.cwd())))
+""".replace("REVIEWED", str(Path.cwd())).replace("REMOTE", str(tmp_path / "remote.git")))
     branches = git("branch", "--list").stdout
     assert cli.main(["run", "flow.yaml"]) == 0, capsys.readouterr()
     (folder,) = Path(".wf/runs").iterdir()
@@ -345,8 +348,9 @@ end:
     log = [json.loads(line) for line in (folder / "nodes" / "check" / "1" / "attempt-1.log").read_text().splitlines()]
     assert any(e["kind"] == "tool" and "git push" in str(e["input"].get("command")) for e in log)
     assert any(e["kind"] == "tool" and str(e["input"].get("command")).startswith("git -C ") for e in log)
+    assert any(e["kind"] == "tool" and str(e["input"].get("command")).startswith("git send-pack ") for e in log)
     results = [e for e in log if e["kind"] == "tool_result"]
-    assert sum(e["is_error"] and "has been denied" in e["content"] for e in results) == 2  # the deny rules, in bypassPermissions
+    assert sum(e["is_error"] and "has been denied" in e["content"] for e in results) == 3  # the deny rules, in bypassPermissions
     assert not any("wf-review-copy-cannot-push" in e["content"] for e in results)  # so git never ran it
     assert not Path("ran.txt").exists() and git("branch", "--list").stdout == branches
     remote = subprocess.run(["git", "-C", str(tmp_path / "remote.git"), "for-each-ref"], capture_output=True, text=True)

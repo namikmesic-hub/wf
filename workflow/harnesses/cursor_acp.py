@@ -69,7 +69,7 @@ Cursor would save.
   asking, so deny rules block those writes.
 - full: everything is allowed.
 - review: as full, in the runner's copy of the workspace, but a command that
-  runs `git push` is refused (pushes).
+  pushes with git (`git push`, `git send-pack`) is refused (base.pushes).
 Web search and fetch follow `web` at every level.
 
 An explicit model goes to cursor-agent without a model list call.
@@ -138,7 +138,7 @@ from pathlib import Path
 from .. import config, output_tool, workspaces
 from ..runs import write_json
 from . import git_tool, mcp_http
-from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
+from .base import SessionSpec, TurnEnd, Unavailable, Usage, pushes, short, transcript
 
 TESTED = "2026.10.18-ea085cb"
 FLAGS = ["--sandbox", "disabled", "--disable-project-configs", "--disable-indexing"]
@@ -157,10 +157,6 @@ WRITES_WITHOUT_ASKING = [  # outside the workspace: temp folders, and Markdown f
 ]
 DENY = {"read-only": ["Write(**)"], "edit": WRITES_WITHOUT_ASKING, "full": [], "review": []}  # Cursor's `*` matches any text
 MODES = {"read-only": "ask", "edit": "agent", "full": "agent", "review": "agent"}
-VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""  # a word, or a quoted one with spaces
-SPLIT = "-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env"  # git's options with a value after a space
-PUSH = re.compile(rf"""(?:^|[\s;&|(){{}}`/"'\\])git["']?(?:\s+(?:(?:{SPLIT})\s+{VALUE}|--?[\w-]+(?:={VALUE})?))*"""
-                  rf"""\s+["']?push(?=$|[\s;&|)}}`"'])""")  # git -C x push too, and a text that only names it
 SECRETS = ("CURSOR_API_KEY", "CURSOR_AUTH_TOKEN")
 NOTICES = (  # Cursor's own messages when the account needs attention
     "Please sign in to continue", "Upgrade your plan to continue", "Add a payment method to continue",
@@ -544,7 +540,7 @@ def allows(access: str, web: bool, cwd: Path, call: dict, servers: set[str] = fr
         return web
     if kind == "other" and only_these:
         return (call.get("rawInput") or {}).get("providerIdentifier") in servers
-    if access == "review" and kind == "execute" and pushes(call):
+    if access == "review" and kind == "execute" and _pushes(call):
         return False
     if kind == "read" or access in ("full", "review"):
         return True
@@ -559,13 +555,13 @@ def allows(access: str, web: bool, cwd: Path, call: dict, servers: set[str] = fr
     return False
 
 
-def pushes(call: dict) -> bool:
+def _pushes(call: dict) -> bool:
     """Does the command that a permission request asks to run push with git? The request's title
     stands in for a command that its input doesn't give."""
     command = (call.get("rawInput") or {}).get("command")
     if isinstance(command, list):
         command = " ".join(map(str, command))
-    return PUSH.search(command if isinstance(command, str) else str(call.get("title") or "")) is not None
+    return pushes(command if isinstance(command, str) else str(call.get("title") or ""))
 
 
 def choose(options: list[dict], allowed: bool) -> dict:

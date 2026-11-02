@@ -28,13 +28,14 @@ Access levels (`options()`):
 - edit: also Edit, Write, and any Bash command, still with "dontAsk".
 - full: all of Claude Code's tools, with "bypassPermissions".
 - review: as full, in the runner's copy of the workspace, and deny rules
-  (NO_PUSH) refuse a command with `git`, any text, and then `push`, such as
-  `git -C <reviewed worktree> push`. A `*` in a Bash rule matches any text,
-  spaces too, and Claude Code checks deny rules before the permission mode,
-  so in "bypassPermissions" too (https://code.claude.com/docs/en/permissions,
+  (NO_PUSH) refuse a command with `git`, any text, and then `push` or
+  `send-pack`, such as `git -C <reviewed worktree> push`. A `*` in a Bash
+  rule matches any text, spaces too, and Claude Code checks deny rules before
+  the permission mode, so in "bypassPermissions" too
+  (https://code.claude.com/docs/en/permissions,
   https://code.claude.com/docs/en/agent-sdk/permissions). A live test of
   Claude Code 2.1.301 showed it
-  (test_a_real_review_node_runs_commands_in_its_copy_and_claude_code_refuses_git_push).
+  (test_a_real_review_node_runs_commands_in_its_copy_and_claude_code_refuses_a_push_with_git).
 - web: WebSearch and WebFetch only when the node has `web: true`.
 
 Every session also gets:
@@ -120,7 +121,8 @@ TOOL = f"mcp__{SERVER}__{output_tool.NAME}"
 GIT = f"mcp__{SERVER}__{git_tool.NAME}"
 SEARCH = ["Read", "Grep", "Glob"]
 WEB = ["WebSearch", "WebFetch"]
-NO_PUSH = ["Bash(git push)", "Bash(git push *)", "Bash(git * push)", "Bash(git * push *)"]  # also `git log --grep push`
+NO_PUSH = ["Bash(git push)", "Bash(git push *)", "Bash(git * push)", "Bash(git * push *)",  # also `git log --grep push`
+           "Bash(git send-pack)", "Bash(git send-pack *)", "Bash(git * send-pack)", "Bash(git * send-pack *)"]
 API_KEY_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 CONNECTORS = "ENABLE_CLAUDEAI_MCP_SERVERS"  # false: Claude Code loads none of your claude.ai connectors
 REPLAY = "replay-user-messages"  # Claude Code repeats each user message, with its id, when it reads it

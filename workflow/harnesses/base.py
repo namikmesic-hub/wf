@@ -30,7 +30,8 @@ what stays, and `wf validate` warns about that (harnesses.KEPT_INSTRUCTIONS).
 At the `review` access level, a session gets the tools of `full`. Its cwd is a copy of the node's
 workspace, which the runner makes for each attempt and removes after it (nodes.py,
 workspaces.review_copy). The copy's git config already stops most pushes from the copy. An adapter whose
-harness can refuse a command also refuses `git push` there.
+harness can refuse a command also refuses a push with git there (pushes): `git push`, and `git send-pack`,
+which the git config of the copy doesn't stop.
 
 Each adapter also reports to SessionSpec.trace, a Recorder, what the agent did:
 its text, and each tool call with its full arguments and answer. These go into
@@ -55,6 +56,7 @@ How a turn ended:
 
 import contextlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -64,6 +66,12 @@ from ..output_tool import ResultTool
 
 if TYPE_CHECKING:  # tools/relay.py loads the MCP client, which only runs that use tools need
     from ..tools.relay import ToolServer
+
+VALUE = r"""(?:"[^"]*"|'[^']*'|\S+)"""  # a word, or a quoted one with spaces
+# git's options with a value after a space
+SPLIT = "-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--attr-source|--shallow-file"
+PUSH = re.compile(rf"""(?:^|[\s;&|(){{}}`/"'\\])git["']?(?:\s+(?:(?:{SPLIT})\s+{VALUE}|--?[\w-]+(?:={VALUE})?))*"""
+                  rf"""\s+["']?(?:push|send-pack)(?![\w.-])""")  # git -C x push too, and a text that only names it
 
 
 @dataclass
@@ -200,6 +208,12 @@ class StartFailed(Exception):
     def __init__(self, message: str, retry_after: float = 0):
         super().__init__(message)
         self.retry_after = retry_after
+
+
+def pushes(command: str) -> bool:
+    """Does a shell command push with git, with `git push` or `git send-pack`? Also with git's options before
+    the command, such as `git -C <folder> push`."""
+    return PUSH.search(command) is not None
 
 
 def transcript(path: Path, kind: str, **data) -> None:

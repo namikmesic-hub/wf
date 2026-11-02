@@ -40,10 +40,11 @@ plugins bring MCP servers of their own: config/read says which there are.
 Access levels map to Codex's sandbox: read-only, workspace-write and
 danger-full-access, with approvalPolicy "never" so nothing stops to ask (any
 approval request that still arrives is declined). `review` gets
-danger-full-access too, in the runner's copy of the workspace. Codex reads
-its rules for commands from `.rules` files. The ThreadStartParams schema of
-codex-cli 0.163.0 (`codex app-server generate-json-schema`) has no field for
-such rules, so only the copy's git config stops `git push` there. Web search is "live" with
+danger-full-access too, in the runner's copy of the workspace, with
+approvalPolicy "untrusted". Then Codex asks wf about each command that it
+doesn't know as safe, and about each edit, and wf allows each one but a command
+that pushes with git (base.pushes, _approval). A rule in your own Codex config
+that allows a command can run it without a question. Web search is "live" with
 `web: true` and "disabled" otherwise (Codex's default, "cached", is never
 left in place), and a workspace-write sandbox gets network access only with
 `web: true`.
@@ -93,13 +94,14 @@ from dataclasses import replace
 from pathlib import Path
 
 from .. import config, output_tool
-from .base import SessionSpec, TurnEnd, Unavailable, Usage, short, transcript
+from .base import SessionSpec, TurnEnd, Unavailable, Usage, pushes, short, transcript
 
 TESTED = "0.163.0"
 APP_SERVER = ["app-server", "--disable", "hooks", "--disable", "apps",
               "--disable", "plugins"]
 SANDBOX = {"read-only": "read-only", "edit": "workspace-write", "full": "danger-full-access",
            "review": "danger-full-access"}
+APPROVAL = {"review": "untrusted"}  # "never" at the other levels
 UNAVAILABLE = {"usageLimitExceeded", "unauthorized"}
 STEER_TIMEOUT = 10  # seconds for turn/steer: inside the time `wf steer` waits for an answer (steer.py)
 DECLINE = {  # server requests that ask a person something: always no
@@ -109,6 +111,12 @@ DECLINE = {  # server requests that ask a person something: always no
     "applyPatchApproval": {"decision": "denied"},
     "mcpServer/elicitation/request": {"action": "decline"},
     "item/tool/requestUserInput": {"answers": {}},
+}
+ACCEPT = {  # what a review thread asks about: the commands and edits that Codex doesn't know as safe
+    "item/commandExecution/requestApproval": {"decision": "accept"},
+    "item/fileChange/requestApproval": {"decision": "accept"},
+    "execCommandApproval": {"decision": "approved"},
+    "applyPatchApproval": {"decision": "approved"},
 }
 
 
@@ -205,7 +213,7 @@ class CodexSession:
         if not spec.project_instructions:
             config.update(await self._without_repo_instructions())
         params = {
-            "cwd": str(spec.cwd), "sandbox": SANDBOX[spec.access], "approvalPolicy": "never",
+            "cwd": str(spec.cwd), "sandbox": SANDBOX[spec.access], "approvalPolicy": APPROVAL.get(spec.access, "never"),
             **({"model": model} if model else {}),
             "ephemeral": not spec.continuable,  # saved only when a later pass may fork it
             "config": config,
@@ -475,7 +483,7 @@ class _Connection:
             if method == "item/tool/call":
                 result = await self._tool_call(params)
             elif method in DECLINE:
-                result = DECLINE[method]
+                result = self._approval(method, params)
             elif method == "currentTime/read":
                 result = {"currentTimeAt": int(time.time())}
             else:
@@ -486,6 +494,16 @@ class _Connection:
             "error": {"code": -32601, "message": f"wf doesn't handle {method}"}}
         with contextlib.suppress(OSError):  # the app server is gone: the reader notices that
             await self._write({"id": request_id, **reply})
+
+    def _approval(self, method: str, params: dict) -> dict:
+        """The answer to a request that asks a person something: no, but a review thread gets yes for
+        each command and edit, as at `full`, unless the command pushes with git."""
+        session = self.threads.get(params.get("threadId") or params.get("conversationId"))
+        if session is None or session.spec.access != "review" or method not in ACCEPT:
+            return DECLINE[method]
+        command = params.get("command")
+        command = " ".join(map(str, command)) if isinstance(command, list) else str(command or "")
+        return DECLINE[method] if pushes(command) else ACCEPT[method]
 
     async def _tool_call(self, params: dict) -> dict:
         session = self.threads.get(params.get("threadId"))

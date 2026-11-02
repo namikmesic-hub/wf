@@ -13,6 +13,7 @@ takes the next list of actions:
     {"tool": {...}, "background": true}                      send the call and go on without waiting; the
                                                              turn ends once its reply is in
     {"approval": "item/commandExecution/requestApproval"}  ask for approval, wait for the reply
+    {"approval": "...", "params": {"command": "git push"}}   the same, with more params in the request
     {"item": {"type": "commandExecution", "command": "ls"}} item/started + item/completed
     {"started": {"type": "commandExecution", "command": "ls"}}  item/started only: the item never completes
     {"tokens": 1200}                                         a response of 1200 tokens: thread/tokenUsage/updated
@@ -95,7 +96,8 @@ async def main() -> None:
             elif "tool" in action:
                 await tool_call(thread, turn, action["tool"])
             elif "approval" in action:
-                log("reply", await call(action["approval"], {"threadId": thread, "turnId": turn, "itemId": "i1"}))
+                params = {"threadId": thread, "turnId": turn, "itemId": "i1", **action.get("params", {})}
+                log("reply", await call(action["approval"], params))
             elif "item" in action or "started" in action:
                 item = {"id": f"item-{next(ids)}", **(action.get("item") or action["started"])}
                 write({"method": "item/started", "params": {"threadId": thread, "turnId": turn, "item": item}})

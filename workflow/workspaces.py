@@ -43,10 +43,11 @@ When a run succeeds its worktrees go and their branches stay, and `wf continue` 
 
 An agent with `access: review` works in a copy of its workspace (review_copy), which nodes.py makes
 for each attempt in ~/.wf/temp/<run-id>/review-copies/ and removes when the job ends (discard_copy).
-state() records the reviewed worktree before the job, with its objects in
+state() records the reviewed worktree when the job's first attempt starts, with its objects in
 ~/.wf/temp/<run-id>/review-objects/, and changed_since() says before and after each attempt whether
-the worktree or its branch changed. The copy isn't a clone or a linked worktree: a clone makes the
-worktree its `origin` remote, and a linked worktree shares the refs and the config of the repository.
+the worktree or its branch changed. Only you can open those two folders (review_folders). The copy
+isn't a clone or a linked worktree: a clone makes the worktree its `origin` remote, and a linked
+worktree shares the refs and the config of the repository.
 
 These are plain blocking functions (git is a subprocess). nodes.py runs them
 in a thread, one at a time per run, because parallel `git worktree add`
@@ -306,6 +307,19 @@ def temp_root(run_id: str) -> Path:
     return home() / "temp" / run_id
 
 
+def review_folders(run_id: str, parts: list[str]) -> tuple[Path, Path]:
+    """Where an `access: review` job's copy goes, and the objects of its check: review-copies/<parts> and
+    review-objects/<parts> in temp_root(). Both hold the untracked files of the reviewed worktree, which can be
+    secrets, so only you can open review-copies and review-objects."""
+    found = []
+    for kind in ("review-copies", "review-objects"):
+        folder = temp_root(run_id) / kind
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        folder.chmod(0o700)  # also when it was there before
+        found.append(folder.joinpath(*parts))
+    return found[0], found[1]
+
+
 def mailbox(run_dir: Path) -> Path:
     """Where `wf steer` passes messages to the process that drives a run (steer.py):
     ~/.wf/steer/<run-id>-<hash of the run folder's path>, so two repos' runs with one id keep
@@ -379,8 +393,9 @@ def review_copy(path: str | Path, copy: Path, tree: str, objects: Path) -> Path:
 
     The copy is a repository of its own that borrows the worktree's objects (objects/info/alternates).
     It has the worktree's branches, remote-tracking branches and tags, its remotes, its filters and the
-    config of its branch, and the same branch or commit checked out. git then writes the files of `tree`,
-    so the copy has each change that isn't committed, and each untracked file, but not the files that git
+    config of its branch, and the same branch or commit checked out. The copy of a shallow clone has its
+    list of shallow commits, so that its history ends at the same commits. git then writes the files of
+    `tree`, so the copy has each change that isn't committed, and each untracked file, but not the files that git
     ignores, such as a virtual environment. Only the objects are shared: git writes each file again.
     Git LFS reads the worktree's LFS folder while git writes the files, and then uses a folder in the copy.
     Most pushes fail there (NO_PUSH, PRE_PUSH). What the agent commits, fetches or configures stays in the copy."""
@@ -390,6 +405,9 @@ def review_copy(path: str | Path, copy: Path, tree: str, objects: Path) -> Path:
     _git(copy, "init", "--quiet", f"--object-format={_git(top, 'rev-parse', '--show-object-format')}")
     alternates = [_git(top, "rev-parse", "--path-format=absolute", "--git-path", "objects"), str(objects)]
     (copy / ".git" / "objects" / "info" / "alternates").write_text("\n".join(alternates) + "\n", encoding="utf-8")
+    shallow = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-path", "shallow"))
+    if shallow.is_file():  # before the fetch: without the list, git looks for the parents of the shallow commits
+        shutil.copyfile(shallow, copy / ".git" / "shallow")
     _git(copy, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--update-head-ok", "--no-write-fetch-head",
          str(top), "+refs/heads/*:refs/heads/*", "+refs/remotes/*:refs/remotes/*", "+refs/tags/*:refs/tags/*")
     branch = _git(top, "symbolic-ref", "--quiet", "HEAD", check=False)
@@ -502,10 +520,11 @@ def _top(path: str | Path) -> Path:
 
 def _copy_config(top: Path, copy: Path, branch: str) -> list[str]:
     """Copy the worktree's remotes, without their push URLs, its filters (such as Git LFS), its line end
-    settings and the config of its branch into the copy. Then `git fetch` and `gh` work there as in the
-    worktree, and git writes each file as it does there. Returns the remotes' names."""
-    found = _git(top, "config", "--local", "--null", "--get-regexp", r"^(remote|branch|filter|lfs)\.|^core\.(autocrlf|eol)$",
-                 check=False, strip=False)
+    settings and the config of its branch into the copy, also those that a file that the config includes sets.
+    Then `git fetch` and `gh` work there as in the worktree, and git writes each file as it does there. Returns
+    the remotes' names."""
+    found = _git(top, "config", "--local", "--includes", "--null", "--get-regexp",
+                 r"^(remote|branch|filter|lfs)\.|^core\.(autocrlf|eol)$", check=False, strip=False)
     remotes = []
     for entry in filter(None, found.split("\0")):
         key, _, value = entry.partition("\n") if "\n" in entry else (entry, "", "true")  # a key alone is true
@@ -523,7 +542,7 @@ def _copy_config(top: Path, copy: Path, branch: str) -> list[str]:
 def _lfs_storage(top: Path) -> str | None:
     """The folder where Git LFS keeps the worktree's files, when there is one, so that the copy can read them."""
     common = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    folder = common / (_git(top, "config", "--local", "--get", "lfs.storage", check=False) or "lfs")
+    folder = common / (_git(top, "config", "--local", "--includes", "--get", "lfs.storage", check=False) or "lfs")
     return str(folder) if folder.is_dir() else None
 
 
