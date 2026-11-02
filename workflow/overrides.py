@@ -308,6 +308,11 @@ def _harness(key: str, node_id: str, index: int | None, settings: dict[str, str]
     return harness, None
 
 
+def _reads_absent_workspace(node_id: str, variables: dict, reads: list[templates.Read]) -> bool:
+    return variables["workspace"].get(node_id) is None and any(
+        read.path == ("workspace",) or read.path[:2] == ("workspace", node_id) for read in reads)
+
+
 def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict[str, dict],
                  *, before_start: bool = False) -> str | None:
     """The one harness that the node names. When the target is one job still to run in the pass in progress, also
@@ -321,8 +326,11 @@ def _own_harness(workflow: Workflow, node_id: str, index: int | None, jobs: dict
     one_job = index is not None or workflow.nodes[node_id].for_each is None  # a node's items can differ
     if not one_job or len(jobs) != 1:
         return None
+    variables = next(iter(jobs.values()))
     try:
-        harness, reads = templates.watched(templates.render, own, next(iter(jobs.values())))
+        harness, reads = templates.watched(templates.render, own, variables)
+        if _reads_absent_workspace(node_id, variables, reads):
+            return None
         later = set(workflow.nodes) | {"run", "workspace", "history", "results", "errors"}
         if before_start and any(read.path[0] in later for read in reads):
             return None
@@ -345,9 +353,8 @@ def _models(key: str, node_id: str, override: dict, workflow: Workflow,
 
     def render(field, source, variables, call=templates.render, **facts):
         value, reads = templates.watched(call, source, variables)
-        if variables["workspace"].get(node_id) is None and any(
-                read.path == ("workspace",) or read.path[:2] == ("workspace", node_id) for read in reads):
-            raise templates.TemplateError(f"{field}: the template reads `{node_id}` before it has a workspace")
+        if _reads_absent_workspace(node_id, variables, reads):
+            raise templates.TemplateError(f"the template reads `workspace.{node_id}` before the job has a workspace")
         return value
 
     if jobs:
