@@ -267,16 +267,21 @@ def test_the_default_message_names_a_file_on_one_line_and_counts_a_rename_as_two
 
 
 def test_a_file_name_that_isnt_utf_8_doesnt_stop_the_runners_commit(repo):
-    try:
-        Path(os.fsdecode(b"caf\xe9.txt")).write_text("x\n")
-    except OSError:
-        pytest.skip("this file system refuses a file name that isn't UTF-8, as macOS does")
-    assert git("log", "-1", "--format=%B", workspaces.commit_all(repo)) == "Update caf�.txt"
+    # The name goes into the index only, because some file systems, such as that of macOS, refuse it
+    blob = git("hash-object", "-w", "README")
+    subprocess.run([b"git", b"update-index", b"--add", b"--cacheinfo", f"100644,{blob},".encode() + b"caf\xe9.txt"],
+                   check=True)
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--quiet", "-m", "add")
+    git("config", "core.quotePath", "false")  # git status then gives the name as it is, not quoted
+    assert git("log", "-1", "--format=%B", workspaces.commit_all(repo)) == "Update caf�.txt"  # its deletion
 
 
 @pytest.mark.parametrize("template, note, error", [
     ("{{ later.stdout }}", "x", "Run failed: impl: template: commit_message: 'None' has no attribute 'stdout'"),
-    ("{{ start.note }}", "", "Run failed: impl: `commit_message` renders to empty text, and a commit needs a message"),
+    ("{{ start.note }}", "", 'Run failed: impl: `commit_message` renders to "", but a commit needs a message'),
+    ("{{ start.note }}", "  ", 'Run failed: impl: `commit_message` renders to "  ", but a commit needs a message'),
+    ("{{ start.title }}", "x", "Run failed: impl: `commit_message` renders to none, but a commit needs a message"),
+    ("Fix{{ start.note }}", "\0", "Run failed: impl: `commit_message` renders to text with a NUL character"),
 ])
 def test_a_commit_message_that_cant_render_fails_the_node_before_the_agent_works(repo, monkeypatch, capsys,
                                                                                 template, note, error):
@@ -284,7 +289,7 @@ def test_a_commit_message_that_cant_render_fails_the_node_before_the_agent_works
     write(f"""
         impl: {{needs: [start], instruction: work, access: edit, workspace: new, commit_message: "{template}"}}
         later: {{needs: [impl], command: "true"}}
-    """, inputs="{note: {type: string}}")
+    """, inputs="{note: {type: string}, title: {type: string, optional: true}}")
     assert cli.main(["run", "flow.yaml", f"note={note}"]) == 1
     assert error in capsys.readouterr().err
     assert fake.specs == []

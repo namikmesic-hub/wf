@@ -370,13 +370,13 @@ class _Checker:
         if node.branch is not None:
             fields.append(("branch", node.branch))
         for name, source in fields:
+            if name == "commit_message":
+                self._commit_message(f"{at}.commit_message", source, node_id)
             refs = self._template(f"{at}.{name}", source, node_id, "node")
             if refs and name == "command":
                 self._unquoted(f"{at}.command", refs, node_id)
             if refs and name == "instruction":
                 self._web_to_full(f"{at}.instruction", refs, node_id)
-            if refs and name == "commit_message" and any(ref.name == "session" for ref in refs):
-                self.error(f"{at}.commit_message", "`session` isn't available here: the message renders before the session starts")
         if node.kind == "agent":
             possible = self._harness(node_id)
             self._tools(node_id, possible)
@@ -722,6 +722,24 @@ class _Checker:
                 self._warned.add((where, name))
                 label = "cursor through cursor-agent" if name == "cursor" else name
                 self.warn(where, f"on {label}, `project_instructions: false` doesn't keep out {kept}")
+
+    def _commit_message(self, where: str, source: str, node_id: str) -> None:
+        """What `commit_message` can't read, because it renders before the node's pass, and a message that is empty."""
+        try:
+            refs, pattern = templates.references(source), templates.pattern(source)
+        except TemplateError:
+            return  # reported with the node's other templates
+        if all(isinstance(part, str) for part in pattern) and not "".join(pattern).strip():
+            self.error(where, "`commit_message` is empty: write a message, or leave `commit_message` out "
+                              "for a message that names the changed files")
+        if any(ref.name == "session" for ref in refs):
+            self.error(where, "`session` isn't available here: the message renders before the session starts")
+        for ref in refs:
+            if ref.name == node_id or (ref.name == "results" and ref.path and ref.path[0] == node_id):
+                self._warned.add((where, node_id))  # this error says more than the warning that it might not have run
+                self.error(where, f"reads `{_dotted(ref.name, ref.path)}`, but the message renders before this node's "
+                                  f"pass, so it would hold the output of an earlier pass")
+                return
 
     def _commits(self, node_id: str) -> None:
         """`commit_message` is on a node that the runner can commit for: an `edit` or `full` agent in a worktree."""
@@ -1200,8 +1218,8 @@ def _reads_follow_up(workflow: Workflow, node_id: str) -> bool:
     """Does a template or expression of the node read `follow_up`?"""
     node = workflow.nodes[node_id]
     texts = [(text, False) for text in (getattr(node, "instruction", None), getattr(node, "command", None),
-                                        getattr(node, "human", None), getattr(node, "commit_message", None), node.base,
-                                        node.branch) if isinstance(text, str)]
+                                        getattr(node, "human", None), node.base, node.branch)
+              if isinstance(text, str)]  # not commit_message: a request that only it reads gets no work done
     texts += [(text, False) for text in workflow.setting(node_id, "env").values()] if node.kind == "command" else []
     texts += [(text, False) for text in node.with_.values() if isinstance(text, str)] if node.kind == "workflow" else []
     for name in ("harness", "model", "effort"):  # a string, a list of harnesses, or a map by harness

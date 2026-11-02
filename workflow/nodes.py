@@ -675,17 +675,21 @@ def _follow_up_request(job: Job, variables: dict) -> list[str]:
 
 
 def _commit_message(job: Job, ctx: RunContext, variables: dict) -> str | None:
-    """The node's `commit_message`, rendered and stripped, for the runner's commit. None when the node sets none."""
+    """The node's `commit_message`, rendered and stripped, for the runner's commit. None when the node sets none.
+    A message that git can't take fails the node here, before an agent works."""
     source = ctx.workflow.setting(job["node"], "commit_message")
     if source is None:
         return None
     try:
-        message = ctx.trace.render(job, "commit_message", source, variables).strip()
+        value = ctx.trace.render(job, "commit_message", source, variables, templates.render_value)
     except templates.TemplateError as error:
         raise templates.TemplateError(f"commit_message: {error}") from error
-    if not message:
-        raise _Failed("`commit_message` renders to empty text, and a commit needs a message", job["attempt"])
-    return message
+    if not isinstance(value, str) or not value.strip():
+        shown = "none" if value is None else json.dumps(value, ensure_ascii=False, default=str)
+        raise _Failed(f"`commit_message` renders to {shown}, but a commit needs a message", job["attempt"])
+    if "\0" in value:
+        raise _Failed("`commit_message` renders to text with a NUL character, which git can't keep", job["attempt"])
+    return value.strip()
 
 
 def _in_run(ctx: RunContext, path: Path) -> str:

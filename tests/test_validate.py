@@ -644,15 +644,22 @@ def test_commit_message_is_a_template_on_an_agent_that_the_runner_commits_for(tm
         f: {needs: [start], instruction: x, access: review, commit_message: Review}
         g: {needs: [start], instruction: x, access: edit, workspace: temp, commit_message: Notes}
         h: {needs: [g], instruction: x, access: edit, workspace: g, commit_message: Notes}
+        i: {needs: [start], instruction: x, access: edit, workspace: new, commit_message: "  {# none #}  "}
+        j: {needs: [start], instruction: x, access: edit, workspace: new,
+            commit_message: "{% if j %}{{ j.summary }}{% else %}Add the feature{% endif %}"}
+        k: {needs: [a], instruction: x, access: edit, workspace: new, commit_message: "{{ a.summary }} on {{ workspace.k.branch }}"}
     """))
     assert_problems(report, [
         ("error", "nodes.b.commit_message", "unknown name `nope`"),
-        ("warning", "nodes.c.commit_message", "reads `c.summary`, but `c` might not have run yet"),
+        ("error", "nodes.c.commit_message", "reads `c.summary`, but the message renders before this node's pass, "
+                                            "so it would hold the output of an earlier pass"),
         ("error", "nodes.d.commit_message", "`session` isn't available here: the message renders before the session starts"),
         ("error", "nodes.e.commit_message", "after an `edit` or `full` agent, but this node's access is `read-only`"),
         ("error", "nodes.f.commit_message", "after an `edit` or `full` agent, but this node's access is `review`"),
         ("error", "nodes.g.commit_message", "in a git worktree that it made, but this node's workspace is `temp`"),
         ("error", "nodes.h.commit_message", "in a git worktree that it made, but this node's workspace is `temp`"),
+        ("error", "nodes.i.commit_message", "`commit_message` is empty: write a message, or leave `commit_message` out"),
+        ("error", "nodes.j.commit_message", "reads `j`, but the message renders before this node's pass"),
     ])
     report = check(tmp_path, flow("a: {needs: [start], command: x, workspace: new, commit_message: Fix}"))
     assert_problems(report, [("error", "nodes.a.commit_message", "unknown key")])

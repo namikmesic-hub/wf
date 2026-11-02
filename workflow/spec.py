@@ -259,7 +259,7 @@ class HarnessSettings(_Model):
 
 class Defaults(_Model):
     """Settings every node inherits. Not `needs`, `routes`, `for_each`, the kind keys,
-    or fields that only make sense per node (`output`, `with`, `branch`, `description`)."""
+    or fields that only make sense per node (`output`, `with`, `branch`, `commit_message`, `description`)."""
 
     harness: NameOrList | None = None
     harnesses: dict[Literal["claude-code", "codex", "cursor"], HarnessSettings] = {}

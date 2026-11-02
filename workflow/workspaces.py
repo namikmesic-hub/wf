@@ -20,8 +20,9 @@ The runner commits, not the agent: Codex's sandbox keeps .git read-only. After
 an `edit` or `full` agent finishes in a worktree the runner made, anything
 left uncommitted becomes one commit. Its message is the node's `commit_message`
 (nodes.py renders it), or else default_message(), which names the changed
-files: "Update docs/tools.md and 2 more files". Neither puts a node id or a run
-id into the project's history. Before a retry, the worktree goes back to the
+files: "Update docs/tools.md and 2 more files". The default message puts no node
+id or run id into the project's history. A `commit_message` holds the text that
+its template writes. Before a retry, the worktree goes back to the
 commit the job started from, so a retry is the same instruction on the same
 commit.
 The runner never commits, or resets, your own checkout. Commits skip hooks, so
@@ -197,21 +198,24 @@ def reset(path: str | Path, commit: str) -> None:
 def commit_all(path: str | Path, message: str | None = None) -> str | None:
     """Commit everything left uncommitted in a runner-made worktree, with `message`, or else with
     default_message(). Returns the new commit, if any."""
-    if not _git(path, "status", "--porcelain"):
+    # A name that isn't UTF-8 gets a replacement character, not a failed commit. Your config can set core.quotePath off.
+    if not _git(path, "status", "--porcelain", errors="replace"):
         return None
     _git(path, "add", "--all")
     changed = _git(path, "-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--no-renames", strip=False,
-                   errors="replace")  # a name that isn't UTF-8 gets a replacement character, not a failed commit
+                   errors="replace")
     changed = [name for name in changed.split("\n") if name]
     if not changed:
         return None  # e.g. only a submodule's own files changed: nothing to commit here
-    # No hooks, not even prepare-commit-msg, which --no-verify still runs: one could add a trailer
-    commit = [*_identity(path), "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", message or default_message(changed)]
+    # No hooks, not even prepare-commit-msg, which --no-verify still runs: one could add a trailer.
+    # The message goes on stdin, because an argument has a size limit.
+    commit = [*_identity(path), "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--file=-"]
+    text = message or default_message(changed)
     if not _signs(path):
-        _git(path, *commit)
+        _git(path, *commit, input=text)
         return head(path)
     try:
-        _git(path, *commit, timeout=config.get().git.signing_timeout)
+        _git(path, *commit, input=text, timeout=config.get().git.signing_timeout)
     except _Stopped:
         raise
     except WorkspaceError as error:
