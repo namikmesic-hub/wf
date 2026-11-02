@@ -83,7 +83,10 @@ none: scripted results don't call tools.
 Workspaces: `new` is a git worktree (workspaces.py). For an `edit` or `full`
 agent in a worktree the runner made, a retry starts from the commit the job
 started from, and when the agent succeeds the runner commits what it left
-(`edit` agents are told not to commit themselves). A node's `branch` names
+(`edit` agents are told not to commit themselves). The commit's message is the
+node's `commit_message`, which renders before the first attempt, so a template
+that fails costs no agent work. Without it, the message names the changed files
+(workspaces.default_message). A node's `branch` names
 its worktree's branch on its first pass; the run folder's branches.json
 records it, so later passes and `wf retry` keep using it, and no other node
 or run can take it over. An item's `branch` renders on every pass, and must
@@ -467,6 +470,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
 
     fresh = render(False)
     (folder / "instruction.md").write_text(fresh, encoding="utf-8")
+    message = _commit_message(job, ctx, variables) if commits else None
     readable = _named_paths(fresh, ctx, variables, workspace)
     start, entered_before = await _start_commit(ctx, folder, workspace) if commits else (None, False)
     review = _review(ctx, job, folder) if reviews else None
@@ -646,7 +650,7 @@ async def _agent(job: Job, ctx: RunContext, folder: Path, variables: dict, works
         await _discard_copy(ctx, review)
     if commits:
         try:
-            await _git(ctx, workspaces.commit_all, workspace["path"], f"wf: {node_id} ({ctx.run.id})")
+            await _git(ctx, workspaces.commit_all, workspace["path"], message)
         except workspaces.WorkspaceError as error:  # attempt `number` ran: `wf retry` starts the job at the next one
             raise _Failed(f"workspace: {error}", number) from error
     return result, number
@@ -668,6 +672,29 @@ def _follow_up_request(job: Job, variables: dict) -> list[str]:
         return []
     intro = AFTER_A_PASS if variables["history"].get(job["node"]) else FIRST_PASS
     return [f"{FOLLOW_UP}\n\n{intro}\n\n{variables['follow_up']['request']}"]
+
+
+def _commit_message(job: Job, ctx: RunContext, variables: dict) -> str | None:
+    """The node's `commit_message`, rendered and stripped, for the runner's commit. None when the node sets none.
+    A message that git can't take fails the node here, before an agent works."""
+    source = ctx.workflow.setting(job["node"], "commit_message")
+    if source is None:
+        return None
+    try:
+        value = ctx.trace.render(job, "commit_message", source, variables, templates.render_value)
+    except templates.TemplateError as error:
+        raise templates.TemplateError(f"commit_message: {error}") from error
+    if not isinstance(value, str) or not value.strip():
+        shown = "none" if value is None else json.dumps(value, ensure_ascii=False, default=str)
+        raise _Failed(f"`commit_message` renders to {shown}, but a commit needs a message", job["attempt"])
+    if "\0" in value:
+        raise _Failed("`commit_message` renders to text with a NUL character, which git can't keep", job["attempt"])
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _Failed("`commit_message` renders to text that isn't valid Unicode, which git can't take",
+                      job["attempt"]) from None
+    return value.strip()
 
 
 def _in_run(ctx: RunContext, path: Path) -> str:

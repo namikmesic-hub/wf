@@ -1062,6 +1062,18 @@ def test_a_template_reads_follow_up_only_in_a_workflow_that_has_it_and_checks_it
         end: {output: {}}
     """)
     assert any("no node that a follow-up runs again reads `follow_up`" in p for p in before)
+    # The agent's instruction doesn't get a request that only the message of the runner's commit reads
+    only_the_message = problems("""
+        version: 1
+        name: message
+        start: {input: {}}
+        follow_up: {to: work}
+        nodes:
+          work: {needs: [start], instruction: Work, access: edit, workspace: new,
+                 commit_message: "{% if follow_up %}{{ follow_up.request }}{% else %}Work{% endif %}"}
+        end: {output: {}}
+    """)
+    assert any("no node that a follow-up runs again reads `follow_up`" in p for p in only_the_message), only_the_message
     unquoted = problems(REVIEW.replace("{{ follow_up.request | quote }}", "{{ follow_up.request }}"))
     assert any("puts output from `follow_up` into the shell unquoted" in p for p in unquoted)
 
