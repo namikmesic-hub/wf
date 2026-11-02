@@ -445,6 +445,9 @@ What the runner does:
   It has the branches, tags and remotes of the worktree, and the same branch or commit is checked out.
   Its files are those of the hash, so the copy has the changes that aren't committed and the untracked files.
   git writes each file again, through the filters that the repository config sets, such as Git LFS.
+  While git writes these files, Git LFS reads the LFS folder of the reviewed repository.
+  After that, the copy uses an LFS folder of its own, so `git lfs pull` or `git lfs prune` there doesn't touch the reviewed repository.
+  So a checkout of another commit in the copy can download its LFS files again.
 - The copy doesn't have the files that git ignores, such as a virtual environment or `node_modules`.
   So a test command may have to install them first.
   A submodule is an empty folder in the copy.
@@ -455,7 +458,7 @@ What the runner does:
   The error names what changed.
 - The copy and the checks count against the `timeout` of the step.
   Parallel items of a review make their copies one at a time, because git operations of a run go one at a time.
-- The git config of the copy stops a push from the copy in three ways.
+- The git config of the copy stops most pushes from the copy, in three ways.
   A push to a remote of the copy goes to an address that git can't use.
   A push to a URL goes there too, unless a longer `pushInsteadOf` rule in your own git config changes the URL.
   A `pre-push` hook refuses each other push, unless the command has `--no-verify`.
@@ -510,6 +513,7 @@ The tests named below are in `tests/test_workspaces.py`, unless another file is 
 | A review step starts | The runner records the reviewed worktree in `reviewed.json` in the pass folder, and writes the objects of the record apart from the reviewed repository. | `workflow/nodes.py:759`, `workflow/workspaces.py:438` | `test_the_review_check_writes_no_object_into_the_reviewed_repository` |
 | An attempt starts | The runner makes a new copy of the workspace, in the same folder for each attempt and pass, and the agent works there. The copy has each file of the worktree as it is: deleted, changed, untracked, a folder or a link in place of a file, a file that git is told is unchanged, and a file that a filter of the repository writes. | `workflow/nodes.py:788`, `workflow/workspaces.py:375` | `test_a_review_agent_works_in_a_copy_and_what_it_changes_there_stays_there`, `test_each_attempt_of_a_review_gets_a_fresh_copy_in_the_same_folder`, `test_a_review_copy_has_each_file_as_the_worktree_has_it_whatever_its_type`, `test_a_review_of_another_node_s_worktree_copies_its_branch_and_commits`, `test_a_review_copy_of_a_detached_head_is_detached_at_the_same_commit` |
 | The agent changes files, commits, makes a branch or sets git config in the copy | The reviewed worktree and its repository get none of it. The copy goes when the step ends, also when the agent made it read-only. | `workflow/workspaces.py:375`, `workflow/workspaces.py:416` | `test_a_review_agent_works_in_a_copy_and_what_it_changes_there_stays_there`, `test_a_review_copy_that_the_agent_made_read_only_is_removed` |
+| The reviewed repository uses Git LFS | Git LFS reads the LFS folder of the reviewed repository while git writes the files of the copy. After that, the copy uses an LFS folder of its own, so what Git LFS fetches or deletes there stays in the copy. | `workflow/workspaces.py:408` | `test_a_review_copy_reads_the_git_lfs_folder_of_the_worktree_but_keeps_its_own` |
 | The files, the commit or the branch of the reviewed worktree change during an attempt, also one that times out, and also a file that git is told is unchanged | The step fails at once, with no retry, and the error names the change. | `workflow/nodes.py:804`, `workflow/workspaces.py:472` | `test_a_review_fails_at_once_when_the_reviewed_worktree_or_its_branch_changes`, `test_a_review_that_times_out_after_it_changed_the_reviewed_worktree_fails_at_once`, `test_a_review_finds_a_change_to_a_file_that_git_is_told_is_unchanged` |
 | The reviewed worktree changed since the record, before an attempt that isn't the first, or before the first attempt of `wf retry` | The step fails before the agent starts. The error says to delete `reviewed.json` when the change was on purpose. | `workflow/nodes.py:785` | `test_a_review_attempt_that_the_watchdog_ends_is_checked_before_the_next_one`, `test_wf_retry_of_a_review_checks_against_the_record_of_its_first_attempt` |
 | The agent pushes from the copy, to a remote or to a URL, also one that a longer `pushInsteadOf` rule changes | git refuses the push. `git fetch` still works. | `workflow/workspaces.py:396`, `workflow/workspaces.py:397`, `workflow/workspaces.py:400` | `test_a_review_copy_fetches_from_the_remotes_but_cannot_push` |
@@ -2318,7 +2322,8 @@ A `failed` `TurnEnd` can also set `retry_after`, the seconds the runner waits be
 Notes:
 - Every setting is passed on every session. Codex fills any gap from your
   `~/.codex/config.toml`.
-- At `review`, the git config of the runner's copy stops a push from the copy on every harness (see [Review access](#review-access)).
+- At `review`, the git config of the runner's copy stops most pushes from the copy on every harness.
+  [Review access](#review-access) names the pushes that it doesn't stop.
   Codex reads its rules for one command from `.rules` files, and the `thread/start` schema of codex-cli 0.163.0 has no field for them.
   Cursor's SDK can't refuse one command.
   So on those two, only the git config stops a push.

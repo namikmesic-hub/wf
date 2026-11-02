@@ -1040,6 +1040,26 @@ def test_a_review_copy_has_each_file_as_the_worktree_has_it_whatever_its_type(re
     assert (shared / "notes.txt").read_text() == "the user's\n" and sorted(p.name for p in shared.iterdir()) == ["notes.txt"]
 
 
+def test_a_review_copy_reads_the_git_lfs_folder_of_the_worktree_but_keeps_its_own(repo, monkeypatch, tmp_path):
+    stored = repo / ".git" / "lfs"
+    stored.mkdir()
+    seen = tmp_path / "smudged"
+    Path(".gitattributes").write_text("*.big filter=fake\n")
+    git("config", "filter.fake.clean", "cat")
+    git("config", "filter.fake.smudge", f"git config --get lfs.storage >> {seen}; cat")  # Git LFS reads this setting
+    Path("data.big").write_text("data\n")
+    commit_all("big")
+    found = {}
+
+    async def review(session):
+        found["storage"] = git("config", "--get", "lfs.storage", cwd=session.spec.cwd, check=False)
+        return done(session)
+
+    use(monkeypatch, review)
+    assert run("check: {needs: [start], instruction: Review it, access: review}") == 0
+    assert seen.read_text() == f"{stored.resolve()}\n" and found == {"storage": ""}
+
+
 def test_a_review_finds_a_change_to_a_file_that_git_is_told_is_unchanged(repo, monkeypatch):
     git("update-index", "--assume-unchanged", "README")
 

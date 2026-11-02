@@ -9,7 +9,7 @@
 // - edit: the default tools, Cursor's sandbox on, subagents get the same lists. wf runs `edit`
 //   through ACP for now, because no test has shown that the sandbox keeps writes in the workspace.
 // - full: the default tools, the sandbox off.
-// - review: as full, in wf's copy of the workspace, whose git config stops a push from it. The SDK
+// - review: as full, in wf's copy of the workspace, whose git config stops most pushes from it. The SDK
 //   can't refuse one shell command, so the host adds no rule of its own for `git push`.
 // At every level the web tools go when `web` is false, and askQuestion goes, since no person answers.
 // A session's tools (submit_result, git, wf tools) are the SDK's custom tools: callbacks in this

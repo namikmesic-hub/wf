@@ -382,7 +382,8 @@ def review_copy(path: str | Path, copy: Path, tree: str, objects: Path) -> Path:
     config of its branch, and the same branch or commit checked out. git then writes the files of `tree`,
     so the copy has each change that isn't committed, and each untracked file, but not the files that git
     ignores, such as a virtual environment. Only the objects are shared: git writes each file again.
-    A push fails there (NO_PUSH, PRE_PUSH). What the agent commits, fetches or configures stays in the copy."""
+    Git LFS reads the worktree's LFS folder while git writes the files, and then uses a folder in the copy.
+    Most pushes fail there (NO_PUSH, PRE_PUSH). What the agent commits, fetches or configures stays in the copy."""
     top = _top(path)
     discard_copy(copy)
     copy.mkdir(parents=True)
@@ -400,14 +401,13 @@ def review_copy(path: str | Path, copy: Path, tree: str, objects: Path) -> Path:
     (hooks / "pre-push").write_text(PRE_PUSH, encoding="utf-8")
     (hooks / "pre-push").chmod(0o755)
     _git(copy, "config", "core.hooksPath", str(hooks))
-    if storage := _lfs_storage(top):
-        _git(copy, "config", "lfs.storage", storage)
     if branch:
         _git(copy, "symbolic-ref", "HEAD", branch)
     else:
         _git(copy, "update-ref", "--no-deref", "HEAD", head(top))
-    _git(copy, "read-tree", "--reset", "-u", tree)
-    _git(copy, "reset", "--quiet")  # the index of the commit: the changes show as not staged, as untracked files
+    shared = ("-c", f"lfs.storage={storage}") if (storage := _lfs_storage(top)) else ()  # only while the runner writes the files
+    _git(copy, *shared, "read-tree", "--reset", "-u", tree)
+    _git(copy, *shared, "reset", "--quiet")  # the index of the commit: the changes show as not staged, as untracked files
     folder = copy / Path(path).resolve().relative_to(top)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
@@ -521,7 +521,7 @@ def _copy_config(top: Path, copy: Path, branch: str) -> list[str]:
 
 
 def _lfs_storage(top: Path) -> str | None:
-    """The folder where Git LFS keeps the worktree's files, when there is one, so that the copy uses it too."""
+    """The folder where Git LFS keeps the worktree's files, when there is one, so that the copy can read them."""
     common = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-common-dir"))
     folder = common / (_git(top, "config", "--local", "--get", "lfs.storage", check=False) or "lfs")
     return str(folder) if folder.is_dir() else None

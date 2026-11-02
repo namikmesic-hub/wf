@@ -29,7 +29,7 @@ what stays, and `wf validate` warns about that (harnesses.KEPT_INSTRUCTIONS).
 
 At the `review` access level, a session gets the tools of `full`. Its cwd is a copy of the node's
 workspace, which the runner makes for each attempt and removes after it (nodes.py,
-workspaces.review_copy). The copy's git config already stops a push from the copy. An adapter whose
+workspaces.review_copy). The copy's git config already stops most pushes from the copy. An adapter whose
 harness can refuse a command also refuses `git push` there.
 
 Each adapter also reports to SessionSpec.trace, a Recorder, what the agent did:
